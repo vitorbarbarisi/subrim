@@ -1,0 +1,12 @@
+# Ignore generated screenshots
+r36s_viewer
+*.png
+
+# Ignore assets folder (contains large/generated inputs)
+assets/
+
+# macOS Finder
+.DS_Store
+
+# Environment variables
+.env
