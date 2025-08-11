@@ -1,149 +1,15 @@
+// Main entry includes
 #include <SDL2/SDL.h>
 #include <SDL2/SDL_image.h>
 #include <SDL2/SDL_ttf.h>
-#include <dirent.h>
-#include <errno.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <ctype.h>
 
-typedef struct ImageList {
-  char **paths;
-  int count;
-} ImageList;
-
-static int compare_strings(const void *a, const void *b) {
-  const char *sa = *(const char **)a;
-  const char *sb = *(const char **)b;
-  return strcmp(sa, sb);
-}
-
-static bool basename_numeric_value(const char *path, long *out_value) {
-  if (!path) return false;
-  const char *name = strrchr(path, '/');
-  name = name ? (name + 1) : path;
-  // Strip extension
-  const char *dot = strrchr(name, '.');
-  size_t len = dot && dot > name ? (size_t)(dot - name) : strlen(name);
-  if (len == 0) return false;
-  // Ensure all digits
-  long value = 0;
-  for (size_t i = 0; i < len; ++i) {
-    unsigned char ch = (unsigned char)name[i];
-    if (!isdigit(ch)) return false;
-    value = value * 10 + (long)(ch - '0');
-  }
-  *out_value = value;
-  return true;
-}
-
-static int compare_numeric_paths(const void *a, const void *b) {
-  const char *sa = *(const char **)a;
-  const char *sb = *(const char **)b;
-  long va = 0, vb = 0;
-  bool ha = basename_numeric_value(sa, &va);
-  bool hb = basename_numeric_value(sb, &vb);
-  if (ha && hb) {
-    if (va < vb) return -1;
-    if (va > vb) return 1;
-    // Same numeric value: fallback to lexical for stability
-    return strcmp(sa, sb);
-  }
-  // If only one is numeric, put numeric first
-  if (ha && !hb) return -1;
-  if (!ha && hb) return 1;
-  // Neither numeric: fallback to lexical
-  return strcmp(sa, sb);
-}
-
-static bool has_image_ext(const char *name) {
-  const char *dot = strrchr(name, '.');
-  if (!dot) return false;
-  // Restrito a PNG conforme requisito atual
-  if (strcasecmp(dot, ".png") == 0) return true;
-  return false;
-}
-
-static ImageList scan_images(const char *directory) {
-  ImageList list = {0};
-  DIR *dir = opendir(directory);
-  if (!dir) {
-    fprintf(stderr, "Failed to open directory '%s': %s\n", directory, strerror(errno));
-    return list;
-  }
-
-  struct dirent *ent;
-  size_t cap = 32;
-  list.paths = (char **)malloc(cap * sizeof(char *));
-  if (!list.paths) {
-    closedir(dir);
-    return list;
-  }
-
-  while ((ent = readdir(dir)) != NULL) {
-    if (ent->d_name[0] == '.') continue;
-    if (!has_image_ext(ent->d_name)) continue;
-    if (list.count == (int)cap) {
-      cap *= 2;
-      char **np = (char **)realloc(list.paths, cap * sizeof(char *));
-      if (!np) break;
-      list.paths = np;
-    }
-    size_t needed = strlen(directory) + 1 + strlen(ent->d_name) + 1;
-    char *full = (char *)malloc(needed);
-    if (!full) continue;
-    snprintf(full, needed, "%s/%s", directory, ent->d_name);
-    list.paths[list.count++] = full;
-  }
-  closedir(dir);
-
-  if (list.count > 1) {
-    qsort(list.paths, list.count, sizeof(char *), compare_numeric_paths);
-  }
-
-  return list;
-}
-
-static void free_images(ImageList *list) {
-  if (!list || !list->paths) return;
-  for (int i = 0; i < list->count; ++i) free(list->paths[i]);
-  free(list->paths);
-  list->paths = NULL;
-  list->count = 0;
-}
-
-static SDL_Texture *load_texture_scaled(SDL_Renderer *renderer, const char *path, int win_w, int win_h, SDL_Rect *dst) {
-  SDL_Texture *texture = IMG_LoadTexture(renderer, path);
-  if (!texture) {
-    fprintf(stderr, "IMG_LoadTexture failed for %s: %s\n", path, IMG_GetError());
-    return NULL;
-  }
-
-  int tex_w = 0, tex_h = 0;
-  if (SDL_QueryTexture(texture, NULL, NULL, &tex_w, &tex_h) != 0) {
-    fprintf(stderr, "SDL_QueryTexture failed: %s\n", SDL_GetError());
-    SDL_DestroyTexture(texture);
-    return NULL;
-  }
-
-  // Preserve aspect ratio and letterbox/pillarbox to fit window
-  double scale = 1.0;
-  if (tex_w > 0 && tex_h > 0) {
-    double sx = (double)win_w / (double)tex_w;
-    double sy = (double)win_h / (double)tex_h;
-    scale = sx < sy ? sx : sy;
-  }
-  int dst_w = (int)(tex_w * scale);
-  int dst_h = (int)(tex_h * scale);
-  dst->w = dst_w;
-  dst->h = dst_h;
-  dst->x = (win_w - dst_w) / 2;
-  dst->y = (win_h - dst_h) / 2;
-
-  return texture;
-}
+#include "base.h"
+#include "text.h"
+#include "ui.h"
 
 static void render_message(SDL_Renderer *renderer, int win_w, int win_h, const char *msg) {
   // Simple fallback message as a filled rectangle and we can't draw text without TTF; just clear and leave.
@@ -153,147 +19,189 @@ static void render_message(SDL_Renderer *renderer, int win_w, int win_h, const c
   SDL_RenderPresent(renderer);
 }
 
-// Simple font discovery (override with env var R36S_VIEWER_FONT)
-static const char *try_font_paths[] = {
-  "./DejaVuSans.ttf",
-  "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-  "/Library/Fonts/Arial.ttf",
-  "/System/Library/Fonts/Supplemental/Arial.ttf",
-  NULL
-};
+// Text helpers are provided by text.h/text.c
 
-static TTF_Font *open_any_font(int pixel_size) {
-  const char *env = SDL_getenv("R36S_VIEWER_FONT");
-  if (env && *env) {
-    TTF_Font *f = TTF_OpenFont(env, pixel_size);
-    if (f) return f;
-  }
-  for (int i = 0; try_font_paths[i]; ++i) {
-    TTF_Font *f = TTF_OpenFont(try_font_paths[i], pixel_size);
-    if (f) return f;
-  }
-  return NULL;
-}
+// Types and functions for menu/images come from ui.h/ui.c
 
-static int recreate_text(SDL_Renderer *renderer, int win_w, int win_h, const char *msg, SDL_Texture **out_tex, SDL_Rect *out_rect) {
-  if (*out_tex) { SDL_DestroyTexture(*out_tex); *out_tex = NULL; }
-  int font_px = win_h / 3;
-  if (font_px < 24) font_px = 24;
-  if (font_px > 200) font_px = 200;
-  TTF_Font *font = open_any_font(font_px);
-  if (!font) {
-    fprintf(stderr, "Failed to open a font. Set R36S_VIEWER_FONT to a TTF path.\n");
-    return -1;
-  }
-  SDL_Color white = {255, 255, 255, 255};
-  SDL_Surface *surf = TTF_RenderUTF8_Blended(font, msg, white);
-  if (!surf) {
-    fprintf(stderr, "TTF_RenderUTF8_Blended failed: %s\n", TTF_GetError());
-    TTF_CloseFont(font);
-    return -1;
-  }
-  *out_tex = SDL_CreateTextureFromSurface(renderer, surf);
-  out_rect->w = surf->w;
-  out_rect->h = surf->h;
-  // Position at top-center with a small margin
-  out_rect->x = (win_w - out_rect->w) / 2;
-  out_rect->y = 24; // top margin
-  SDL_FreeSurface(surf);
-  TTF_CloseFont(font);
-  return 0;
-}
+typedef struct WordSpan {
+  int start_cp; // inclusive
+  int end_cp;   // exclusive
+  int x;        // pixels within text texture
+  int w;        // width in pixels
+} WordSpan;
 
-typedef struct Menu {
-  char **names;           // folder names under assets/
+typedef struct WordLayout {
+  WordSpan *spans;
   int count;
-  SDL_Texture **tex;      // rendered name textures
-  SDL_Rect *rects;        // destination rects for each item
-  int selected;
-} Menu;
+} WordLayout;
 
-static void free_menu(Menu *menu) {
-  if (!menu) return;
-  if (menu->tex) {
-    for (int i = 0; i < menu->count; ++i) if (menu->tex[i]) SDL_DestroyTexture(menu->tex[i]);
-    free(menu->tex);
-  }
-  if (menu->rects) free(menu->rects);
-  if (menu->names) {
-    for (int i = 0; i < menu->count; ++i) free(menu->names[i]);
-    free(menu->names);
-  }
-  memset(menu, 0, sizeof(*menu));
+static void free_word_layout(WordLayout *wl) {
+  if (!wl) return;
+  free(wl->spans); wl->spans = NULL; wl->count = 0;
 }
 
-static int compare_cstr(const void *a, const void *b) {
-  const char *const *sa = (const char *const *)a;
-  const char *const *sb = (const char *const *)b;
-  return strcasecmp(*sa, *sb);
+static char *strdup_trim_range(const char *s, int start, int end) {
+  while (start < end && (s[start] == ' ' || s[start] == '\t')) start++;
+  while (end > start && (s[end-1] == ' ' || s[end-1] == '\t')) end--;
+  int len = end - start;
+  char *out = (char *)malloc((size_t)len + 1);
+  if (!out) return NULL;
+  memcpy(out, s + start, (size_t)len);
+  out[len] = '\0';
+  return out;
 }
 
-static bool is_directory(const char *base, const char *name) {
-  if (!base || !name) return false;
-  size_t need = strlen(base) + 1 + strlen(name) + 1;
-  char *full = (char *)malloc(need);
-  if (!full) return false;
-  snprintf(full, need, "%s/%s", base, name);
-  DIR *d = opendir(full);
-  if (d) { closedir(d); free(full); return true; }
-  free(full);
-  return false;
-}
-
-static Menu build_menu(SDL_Renderer *renderer, int win_w, int win_h, const char *assets_root) {
-  Menu menu = {0};
-  DIR *dir = opendir(assets_root);
-  if (!dir) {
-    fprintf(stderr, "Failed to open assets directory '%s': %s\n", assets_root, strerror(errno));
-    return menu;
-  }
-
-  // First pass: count eligible directories
-  struct dirent *ent;
-  size_t cap = 32;
-  menu.names = (char **)malloc(cap * sizeof(char *));
-  if (!menu.names) { closedir(dir); return menu; }
-
-  while ((ent = readdir(dir)) != NULL) {
-    if (ent->d_name[0] == '.') continue;
-    if (!is_directory(assets_root, ent->d_name)) continue;
-    if (menu.count == (int)cap) {
-      cap *= 2;
-      char **np = (char **)realloc(menu.names, cap * sizeof(char *));
-      if (!np) break;
-      menu.names = np;
+// Extract word tokens (left of ':') from a pairs string that is usually a JSON array of
+// strings formatted as "palavra: tradução". Returns array of strdup words.
+static void extract_words_from_pairs(const char *pairs_str, char ***out_words, int *out_count) {
+  *out_words = NULL; *out_count = 0;
+  if (!pairs_str || !*pairs_str) return;
+  const char *s = pairs_str;
+  // Heuristic JSON-like parsing
+  if (s[0] == '[') {
+    int cap = 8; char **words = (char **)malloc(sizeof(char *) * (size_t)cap);
+    int cnt = 0; int i = 0; int n = (int)strlen(s);
+    while (i < n) {
+      // find next opening quote
+      while (i < n && s[i] != '"') i++;
+      if (i >= n) break; int q1 = ++i; // after quote
+      while (i < n && s[i] != '"') i++;
+      if (i >= n) break; int q2 = i; // closing quote index
+      // content is s[q1:q2)
+      // split at ':' if present
+      int j = q1; while (j < q2 && s[j] != ':') j++;
+      int end = (s[j] == ':') ? j : q2;
+      char *w = strdup_trim_range(s, q1, end);
+      if (w && *w) {
+        if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); }
+        words[cnt++] = w;
+      } else if (w) { free(w); }
+      i = q2 + 1;
     }
-    menu.names[menu.count] = strdup(ent->d_name);
-    if (menu.names[menu.count]) menu.count++;
+    *out_words = words; *out_count = cnt; return;
   }
-  closedir(dir);
+  // Fallback: split by commas then by colon
+  int cap = 8; char **words = (char **)malloc(sizeof(char *) * (size_t)cap); int cnt = 0;
+  const char *p = s; const char *seg = p;
+  while (*p) {
+    if (*p == ',') {
+      int seglen = (int)(p - seg);
+      // find ':' inside seg
+      int k = 0; while (k < seglen && seg[k] != ':') k++;
+      char *w = strdup_trim_range(seg, 0, (seg[k] == ':') ? k : seglen);
+      if (w && *w) { if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); } words[cnt++] = w; } else if (w) free(w);
+      seg = p + 1;
+    }
+    p++;
+  }
+  if (p != seg) {
+    int seglen = (int)(p - seg);
+    int k = 0; while (k < seglen && seg[k] != ':') k++;
+    char *w = strdup_trim_range(seg, 0, (seg[k] == ':') ? k : seglen);
+    if (w && *w) { if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); } words[cnt++] = w; } else if (w) free(w);
+  }
+  *out_words = words; *out_count = cnt;
+}
 
-  if (menu.count <= 0) return menu;
-  qsort(menu.names, menu.count, sizeof(char *), compare_cstr);
+// Compute word spans based on zht text and list of words; uses subtitle layout mapping x offsets for cps
+static int byte_to_cp_linear(const int *cp_byte_index, int total_cp, int bidx) {
+  int i = 0; while (i + 1 < total_cp && cp_byte_index[i + 1] <= bidx) i++; return i;
+}
 
-  menu.tex = (SDL_Texture **)calloc(menu.count, sizeof(SDL_Texture *));
-  menu.rects = (SDL_Rect *)calloc(menu.count, sizeof(SDL_Rect));
-  if (!menu.tex || !menu.rects) return menu;
+static void build_word_layout(const char *zht_text, const SubtitleLayout *layout, char **words, int word_count, WordLayout *out_layout) {
+  free_word_layout(out_layout);
+  if (!zht_text || !*zht_text || !layout || layout->count <= 0 || word_count <= 0) return;
+  // Precompute byte positions of each codepoint start
+  int total_cp = layout->count;
+  const unsigned char *s = (const unsigned char *)zht_text;
+  int *cp_byte_index = (int *)malloc(sizeof(int) * (size_t)total_cp);
+  int cp = 0; int byte_idx = 0; int slen = (int)strlen(zht_text);
+  while (byte_idx < slen && cp < total_cp) {
+    cp_byte_index[cp++] = byte_idx;
+    unsigned char c = s[byte_idx];
+    int adv = 1; if ((c & 0xE0) == 0xC0) adv = 2; else if ((c & 0xF0) == 0xE0) adv = 3; else if ((c & 0xF8) == 0xF0) adv = 4;
+    byte_idx += adv;
+  }
 
-  // Render each name as a texture; layout vertically
-  int y = 80;
-  int padding_y = 16;
-  for (int i = 0; i < menu.count; ++i) {
-    SDL_Texture *t = NULL; SDL_Rect r = {0,0,0,0};
-    if (recreate_text(renderer, win_w, win_h, menu.names[i], &t, &r) == 0 && t) {
-      // Left align near 64px, keep y stacking
-      r.x = 64;
-      r.y = y;
-      y += r.h + padding_y;
-      menu.tex[i] = t;
-      menu.rects[i] = r;
+  int cap = 8; WordSpan *spans = (WordSpan *)malloc(sizeof(WordSpan) * (size_t)cap); int cnt = 0;
+  for (int w = 0; w < word_count; ++w) {
+    const char *needle = words[w]; if (!needle || !*needle) continue;
+    const char *pos = zht_text; int off = 0; int needle_len = (int)strlen(needle);
+    while ((pos = strstr(pos, needle)) != NULL) {
+      off = (int)(pos - zht_text);
+      int start_cp = byte_to_cp_linear(cp_byte_index, total_cp, off);
+      int len_cp = utf8_count_codepoints(needle);
+      int end_cp = start_cp + len_cp; if (end_cp > total_cp) end_cp = total_cp;
+      int x = layout->x_offsets[start_cp];
+      int end_x = (end_cp - 1 >= 0) ? (layout->x_offsets[end_cp - 1] + layout->widths[end_cp - 1]) : x;
+      int wpx = end_x - x; if (wpx <= 0) { pos += needle_len; continue; }
+      if (cnt == cap) { cap *= 2; spans = (WordSpan *)realloc(spans, sizeof(WordSpan) * (size_t)cap); }
+      spans[cnt++] = (WordSpan){ start_cp, end_cp, x, wpx };
+      pos += needle_len;
     }
   }
-  menu.selected = 0;
-  return menu;
+  free(cp_byte_index);
+  out_layout->spans = spans; out_layout->count = cnt;
+}
+
+static void rebuild_subtitle(
+    SDL_Renderer *renderer,
+    int win_w,
+    int win_h,
+    const char *msg,
+    SDL_Texture **text_tex,
+    SDL_Rect *text_rect,
+    SubtitleLayout *layout,
+    bool *show_text,
+    int *hover_index
+) {
+  if (!msg || !*msg) {
+    if (*text_tex) { SDL_DestroyTexture(*text_tex); *text_tex = NULL; }
+    free_subtitle_layout(layout);
+    *show_text = false;
+    *hover_index = -1;
+    return;
+  }
+  if (*text_tex) { SDL_DestroyTexture(*text_tex); *text_tex = NULL; }
+  free_subtitle_layout(layout);
+  if (recreate_text_with_layout(renderer, win_w, win_h, msg, text_tex, text_rect, layout) == 0 && *text_tex) {
+    text_rect->x = (win_w - text_rect->w) / 2;
+    text_rect->y = win_h - text_rect->h - 24;
+    *show_text = true;
+    *hover_index = -1;
+  } else {
+    *show_text = false;
+    *hover_index = -1;
+  }
+}
+
+static void refresh_word_layout_for_index(
+    const BaseData *base,
+    long img_idx,
+    const char *current_text_msg,
+    const SubtitleLayout *sub_layout,
+    WordLayout *word_layout
+) {
+  free_word_layout(word_layout);
+  if (!current_text_msg || !*current_text_msg || !sub_layout || sub_layout->count <= 0) return;
+  const char *pairs = (base && base->pairs_by_index && img_idx > 0 && base->capacity > img_idx)
+                          ? base->pairs_by_index[img_idx]
+                          : NULL;
+  char **words = NULL; int wc = 0;
+  extract_words_from_pairs(pairs, &words, &wc);
+  build_word_layout(current_text_msg, sub_layout, words, wc, word_layout);
+  for (int i = 0; i < wc; ++i) free(words[i]);
+  free(words);
+  // Fallback: if we didn't detect any words, make each codepoint a span so hover still works
+  if (word_layout->count == 0 && sub_layout->count > 0) {
+    word_layout->spans = (WordSpan *)malloc(sizeof(WordSpan) * (size_t)sub_layout->count);
+    word_layout->count = sub_layout->count;
+    for (int i = 0; i < sub_layout->count; ++i) {
+      int x = sub_layout->x_offsets[i];
+      int w = sub_layout->widths[i];
+      word_layout->spans[i] = (WordSpan){ i, i + 1, x, w };
+    }
+  }
 }
 
 int main(int argc, char **argv) {
@@ -362,18 +270,78 @@ int main(int argc, char **argv) {
 
   SDL_Texture *current = NULL;
   SDL_Rect dst_rect = {0, 0, 0, 0};
+  SDL_Rect src_rect = {0, 0, 0, 0}; // when using cover mode
+  bool cover_mode = true; // fill the screen by default
 
   // Text overlay state
   bool show_text = false;
   SDL_Texture *text_tex = NULL;
   SDL_Rect text_rect = (SDL_Rect){0, 0, 0, 0};
+  char *current_text_msg = NULL; // keep last message to reflow on resize
+  SubtitleLayout sub_layout = {0};
+  int hover_index = -1; // selected word index
+  WordLayout word_layout = {0};
+
+  // PT translation panel state (toggle with B)
+  bool show_pt = false;
+  SDL_Texture *pt_tex = NULL;
+  SDL_Rect pt_rect = (SDL_Rect){0, 0, 0, 0};
+  char *current_pt_msg = NULL;
+
+  // Small index label (top-left)
+  SDL_Texture *idx_tex = NULL;
+  SDL_Rect idx_rect = (SDL_Rect){0, 0, 0, 0};
+
+  // Base data for the current directory
+  BaseData base = {0};
 
   if (!menu_active) {
     if (list.count == 0) {
       render_message(renderer, win_w, win_h, "No images found");
     } else {
       current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+      if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
       if (current) fprintf(stdout, "Showing (1/%d): %s\n", list.count, list.paths[index]);
+      // On first load, attempt to load base file for the directory
+      // Determine directory from first image path
+      if (list.count > 0 && list.paths[0]) {
+        const char *first_path = list.paths[0];
+        // Build directory string
+        const char *last_slash = strrchr(first_path, '/');
+        if (last_slash) {
+          size_t dirlen = (size_t)(last_slash - first_path);
+          char *dircopy = (char *)malloc(dirlen + 1);
+          if (dircopy) {
+            memcpy(dircopy, first_path, dirlen);
+            dircopy[dirlen] = '\0';
+            free_base_data(&base);
+            base = load_base_file_for_directory(dircopy);
+            free(dircopy);
+          }
+        }
+      }
+      // If there is a base entry matching the image index, render its zht at bottom
+      long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
+      if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+        if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+        current_text_msg = strdup(base.zht_by_index[img_idx]);
+        rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+        // Build initial word layout
+        char **words = NULL; int wc = 0;
+        const char *pairs0 = (base.pairs_by_index && img_idx > 0 && base.capacity > img_idx) ? base.pairs_by_index[img_idx] : NULL;
+        extract_words_from_pairs(pairs0, &words, &wc);
+        build_word_layout(current_text_msg, &sub_layout, words, wc, &word_layout);
+        for (int i = 0; i < wc; ++i) free(words[i]);
+        free(words);
+      }
+      // Build top-left small label with current numeric index
+      {
+        char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+        if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+        if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) {
+          idx_rect.x = 8; idx_rect.y = 8;
+        }
+      }
     }
   }
 
@@ -390,51 +358,188 @@ int main(int argc, char **argv) {
     while (SDL_PollEvent(&e)) {
       if (e.type == SDL_QUIT) {
         running = false;
+      } else if (e.type == SDL_WINDOWEVENT) {
+        if (e.window.event == SDL_WINDOWEVENT_SIZE_CHANGED || e.window.event == SDL_WINDOWEVENT_RESIZED) {
+          SDL_GetRendererOutputSize(renderer, &win_w, &win_h);
+          // Recompute destination rect to fit new window while preserving aspect ratio
+          if (current) {
+            if (cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
+            else compute_dst_from_texture(current, win_w, win_h, &dst_rect);
+          }
+          // Recreate text at new size/position if visible
+          if (show_text && current_text_msg) rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+          // Rebuild word layout after bias change
+          if (current_text_msg) {
+            free_word_layout(&word_layout);
+            char **words = NULL; int wc = 0; const char *pairs = NULL;
+            long tmp_idx = 0; if (basename_numeric_value(list.paths[index], &tmp_idx)) {
+              if (base.pairs_by_index && tmp_idx > 0 && base.capacity > tmp_idx) pairs = base.pairs_by_index[tmp_idx];
+            }
+            extract_words_from_pairs(pairs, &words, &wc);
+            build_word_layout(current_text_msg, &sub_layout, words, wc, &word_layout);
+            for (int i = 0; i < wc; ++i) free(words[i]);
+            free(words);
+          }
+          // rebuild word layout on resize
+          if (current_text_msg) {
+            free_word_layout(&word_layout);
+            char **words = NULL; int wc = 0; const char *pairs = NULL;
+            long tmp_idx = 0; if (basename_numeric_value(list.paths[index], &tmp_idx)) {
+              if (base.pairs_by_index && tmp_idx > 0 && base.capacity > tmp_idx) pairs = base.pairs_by_index[tmp_idx];
+            }
+            extract_words_from_pairs(pairs, &words, &wc);
+            build_word_layout(current_text_msg, &sub_layout, words, wc, &word_layout);
+            for (int i = 0; i < wc; ++i) free(words[i]);
+            free(words);
+          }
+          if (show_pt && current_pt_msg) {
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              pt_rect.x = (win_w - pt_rect.w) / 2;
+              int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+              if (base_y < 8) base_y = 8;
+              pt_rect.y = base_y;
+            }
+          }
+          if (idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+        }
       } else if (e.type == SDL_KEYDOWN) {
         SDL_Keycode key = e.key.keysym.sym;
         if (key == SDLK_ESCAPE || key == SDLK_q) {
           running = false;
         } else if (key == SDLK_m) {
-          // Toggle menu
-          menu_active = !menu_active;
-          if (menu_active) {
-            // Enter menu: free image and build menu
-            if (current) { SDL_DestroyTexture(current); current = NULL; }
-            free_images(&list);
-            free_menu(&menu);
-            menu = build_menu(renderer, win_w, win_h, assets_root);
-          } else {
-            // Exit menu: load selected folder
-            if (menu.count > 0) {
-              char pathbuf[1024];
-              snprintf(pathbuf, sizeof(pathbuf), "%s/%s", assets_root, menu.names[menu.selected]);
-              free_images(&list);
-              list = scan_images(pathbuf);
-              index = 0;
-              if (current) { SDL_DestroyTexture(current); current = NULL; }
-              if (list.count > 0) current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+        } else if (!menu_active && (key == SDLK_y || key == SDLK_x)) {
+          // Manual font size bias for subtitle
+          int bias = get_subtitle_font_bias();
+          if (key == SDLK_y) bias += 2; // increase
+          else bias -= 2;               // decrease
+          if (bias < -50) bias = -50;
+          if (bias > 100) bias = 100;
+          set_subtitle_font_bias(bias);
+          // Recreate current subtitle texture with new bias
+          if (show_text && current_text_msg) rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+          // Also adjust PT panel position since subtitle height may change
+          if (show_pt && current_pt_msg) {
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              pt_rect.x = (win_w - pt_rect.w) / 2;
+              int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+              if (base_y < 8) base_y = 8;
+              pt_rect.y = base_y;
             }
           }
         } else if (!menu_active && key == SDLK_b) {
-          show_text = !show_text;
-          if (show_text) {
-            recreate_text(renderer, win_w, win_h, "palavras", &text_tex, &text_rect);
+          // Toggle PT translation panel (from base file column 5)
+          show_pt = !show_pt;
+          if (show_pt) {
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            const char *pt = NULL;
+            long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
+            if (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) pt = base.pt_by_index[img_idx];
+            if (!pt || !*pt) pt = "N/A";
+            current_pt_msg = strdup(pt);
+            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              pt_rect.x = (win_w - pt_rect.w) / 2;
+              int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+              if (base_y < 8) base_y = 8;
+              pt_rect.y = base_y;
+            }
           } else {
-            if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
           }
-        } else if (!menu_active && key == SDLK_RIGHT) {
+        } else if (!menu_active && key == SDLK_UP) {
           if (list.count > 0) {
             index = (index + 1) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+            if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
             if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
+            // Update overlay for this image
+            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
+            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+              refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout);
+            } else {
+              if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              show_text = false;
+            }
+            if (show_pt) {
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
+              if (!pt || !*pt) pt = "N/A";
+              current_pt_msg = strdup(pt);
+              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+                pt_rect.x = (win_w - pt_rect.w) / 2;
+                int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+                if (base_y < 8) base_y = 8;
+                pt_rect.y = base_y;
+              }
+            }
+            // Update small index label
+            {
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+              if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+            }
           }
-        } else if (!menu_active && key == SDLK_LEFT) {
+        } else if (!menu_active && key == SDLK_DOWN) {
           if (list.count > 0) {
             index = (index - 1 + list.count) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+            if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
             if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
+            // Update overlay for this image
+            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
+            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+              refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout);
+            } else {
+              if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              show_text = false;
+            }
+            if (show_pt) {
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
+              if (!pt || !*pt) pt = "N/A";
+              current_pt_msg = strdup(pt);
+              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+                pt_rect.x = (win_w - pt_rect.w) / 2;
+                int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+                if (base_y < 8) base_y = 8;
+                pt_rect.y = base_y;
+              }
+            }
+            // Update small index label
+            {
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+              if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+            }
+          }
+        } else if (!menu_active && key == SDLK_RIGHT) {
+          // Move hover to next word
+          if (show_text && word_layout.count > 0) {
+            if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
+          }
+        } else if (!menu_active && key == SDLK_LEFT) {
+          if (show_text && word_layout.count > 0) {
+            if (hover_index < 0) hover_index = word_layout.count - 1; else hover_index = (hover_index - 1 + word_layout.count) % word_layout.count;
           }
         } else if (menu_active && (key == SDLK_DOWN || key == SDLK_s)) {
           if (menu.count > 0) menu.selected = (menu.selected + 1) % menu.count;
@@ -446,9 +551,38 @@ int main(int argc, char **argv) {
             snprintf(pathbuf, sizeof(pathbuf), "%s/%s", assets_root, menu.names[menu.selected]);
             free_images(&list);
             list = scan_images(pathbuf);
+            free_base_data(&base);
+            base = load_base_file_for_directory(pathbuf);
             index = 0;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
-            if (list.count > 0) current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+            if (list.count > 0) {
+              current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+              // set overlay for first image
+              long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
+              if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+                if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+                current_text_msg = strdup(base.zht_by_index[img_idx]);
+                rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+                // Build word layout for the newly selected first image
+                free_word_layout(&word_layout);
+                char **words_m = NULL; int wc_m = 0;
+                const char *pairs_m = (base.pairs_by_index && img_idx > 0 && base.capacity > img_idx) ? base.pairs_by_index[img_idx] : NULL;
+                extract_words_from_pairs(pairs_m, &words_m, &wc_m);
+                build_word_layout(current_text_msg, &sub_layout, words_m, wc_m, &word_layout);
+                for (int ii = 0; ii < wc_m; ++ii) free(words_m[ii]);
+                free(words_m);
+              } else {
+                if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+                if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+                show_text = false;
+              }
+              // Update small index label
+              {
+                char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+                if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+                if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+              }
+            }
             menu_active = false;
           }
         }
@@ -471,28 +605,132 @@ int main(int argc, char **argv) {
           menu_active = false;
         }
       } else if (e.type == SDL_CONTROLLERBUTTONDOWN) {
-        if (e.cbutton.button == SDL_CONTROLLER_BUTTON_START && SDL_GameControllerGetButton(SDL_GameControllerFromInstanceID(e.cbutton.which), SDL_CONTROLLER_BUTTON_BACK)) {
+        if (!menu_active && (e.cbutton.button == SDL_CONTROLLER_BUTTON_Y || e.cbutton.button == SDL_CONTROLLER_BUTTON_X)) {
+          int bias = get_subtitle_font_bias();
+          if (e.cbutton.button == SDL_CONTROLLER_BUTTON_Y) bias += 2; else bias -= 2;
+          if (bias < -50) bias = -50;
+          if (bias > 100) bias = 100;
+          set_subtitle_font_bias(bias);
+          if (show_text && current_text_msg) {
+            set_bottom_text(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &current_text_msg, &show_text);
+          }
+          if (show_pt && current_pt_msg) {
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              pt_rect.x = (win_w - pt_rect.w) / 2;
+              int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+              if (base_y < 8) base_y = 8;
+              pt_rect.y = base_y;
+            }
+          }
+        } else if (e.cbutton.button == SDL_CONTROLLER_BUTTON_START && SDL_GameControllerGetButton(SDL_GameControllerFromInstanceID(e.cbutton.which), SDL_CONTROLLER_BUTTON_BACK)) {
           running = false; // Start+Back to quit
-        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
+        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
           if (list.count > 0) {
             index = (index + 1) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+            if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
             if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
+            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
+            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+            } else {
+              if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              show_text = false;
+            }
+            if (show_pt) {
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
+              if (!pt || !*pt) pt = "N/A";
+              current_pt_msg = strdup(pt);
+              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+                pt_rect.x = (win_w - pt_rect.w) / 2;
+                int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+                if (base_y < 8) base_y = 8;
+                pt_rect.y = base_y;
+              }
+            }
+            // Update small index label
+            {
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+              if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+            }
           }
-        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_LEFT) {
+        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
           if (list.count > 0) {
             index = (index - 1 + list.count) % list.count;
+        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
+          if (show_text && word_layout.count > 0) {
+            if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
+          }
+        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_LEFT) {
+          if (show_text && word_layout.count > 0) {
+            if (hover_index < 0) hover_index = word_layout.count - 1; else hover_index = (hover_index - 1 + word_layout.count) % word_layout.count;
+          }
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+            if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
             if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
+            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
+            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+            } else {
+              if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              show_text = false;
+            }
+            if (show_pt) {
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
+              if (!pt || !*pt) pt = "N/A";
+              current_pt_msg = strdup(pt);
+              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+                pt_rect.x = (win_w - pt_rect.w) / 2;
+                int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+                if (base_y < 8) base_y = 8;
+                pt_rect.y = base_y;
+              }
+            }
+            // Update small index label
+            {
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+              if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+            }
           }
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_B) {
-          show_text = !show_text;
-          if (show_text) {
-            recreate_text(renderer, win_w, win_h, "palavras", &text_tex, &text_rect);
+          // Mirror keyboard B for showing PT
+          show_pt = !show_pt;
+          if (show_pt) {
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            const char *pt = NULL;
+            long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
+            if (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) pt = base.pt_by_index[img_idx];
+            if (!pt || !*pt) pt = "N/A";
+            current_pt_msg = strdup(pt);
+            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
+            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              pt_rect.x = (win_w - pt_rect.w) / 2;
+              int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+              if (base_y < 8) base_y = 8;
+              pt_rect.y = base_y;
+            }
           } else {
-            if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
           }
         } else if (menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
           if (menu.count > 0) menu.selected = (menu.selected + 1) % menu.count;
@@ -516,7 +754,8 @@ int main(int argc, char **argv) {
     SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
     SDL_RenderClear(renderer);
     if (!menu_active && current) {
-      SDL_RenderCopy(renderer, current, NULL, &dst_rect);
+      if (cover_mode) SDL_RenderCopy(renderer, current, &src_rect, &dst_rect);
+      else SDL_RenderCopy(renderer, current, NULL, &dst_rect);
     }
     if (menu_active && menu.count > 0) {
       // Draw menu background dim
@@ -546,14 +785,48 @@ int main(int argc, char **argv) {
       SDL_RenderFillRect(renderer, &bg);
       SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
       SDL_RenderCopy(renderer, text_tex, NULL, &text_rect);
+      // Draw hover outline if any (word-based)
+      if (hover_index >= 0 && word_layout.count > 0 && hover_index < word_layout.count) {
+        int hx = text_rect.x + word_layout.spans[hover_index].x;
+        int hw = word_layout.spans[hover_index].w;
+        int hy = text_rect.y;
+        int hh = text_rect.h;
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 30, 200, 255, 220);
+        SDL_Rect outline = { hx - 2, hy - 2, hw + 4, hh + 4 };
+        // Draw rectangle outline (4 edges)
+        SDL_RenderDrawRect(renderer, &outline);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+      }
+    }
+    // Draw PT panel if visible
+    if (!menu_active && show_pt && pt_tex) {
+      SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 160);
+      SDL_Rect bg = { pt_rect.x - 12, pt_rect.y - 8, pt_rect.w + 24, pt_rect.h + 16 };
+      SDL_RenderFillRect(renderer, &bg);
+      SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+      SDL_RenderCopy(renderer, pt_tex, NULL, &pt_rect);
+    }
+    // Draw small index in the top-left when viewing images
+    if (!menu_active && idx_tex) {
+      SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 120);
+      SDL_Rect bg = { idx_rect.x - 4, idx_rect.y - 2, idx_rect.w + 8, idx_rect.h + 4 };
+      SDL_RenderFillRect(renderer, &bg);
+      SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+      SDL_RenderCopy(renderer, idx_tex, NULL, &idx_rect);
     }
     SDL_RenderPresent(renderer);
   }
 
   if (current) SDL_DestroyTexture(current);
   if (text_tex) SDL_DestroyTexture(text_tex);
+  if (idx_tex) SDL_DestroyTexture(idx_tex);
+  if (current_text_msg) free(current_text_msg);
   free_images(&list);
   free_menu(&menu);
+  free_base_data(&base);
   SDL_DestroyRenderer(renderer);
   SDL_DestroyWindow(window);
   TTF_Quit();
