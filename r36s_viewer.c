@@ -180,7 +180,10 @@ static void refresh_word_layout_for_index(
     long img_idx,
     const char *current_text_msg,
     const SubtitleLayout *sub_layout,
-    WordLayout *word_layout
+    WordLayout *word_layout,
+    char ***out_pair_words,
+    char ***out_pair_items,
+    int *out_pair_count
 ) {
   free_word_layout(word_layout);
   if (!current_text_msg || !*current_text_msg || !sub_layout || sub_layout->count <= 0) return;
@@ -190,8 +193,19 @@ static void refresh_word_layout_for_index(
   char **words = NULL; int wc = 0;
   extract_words_from_pairs(pairs, &words, &wc);
   build_word_layout(current_text_msg, sub_layout, words, wc, word_layout);
-  for (int i = 0; i < wc; ++i) free(words[i]);
-  free(words);
+  if (out_pair_words) {
+    if (*out_pair_words) { for (int i = 0; i < (out_pair_count ? *out_pair_count : 0); ++i) free((*out_pair_words)[i]); free(*out_pair_words); }
+    *out_pair_words = words; // transfer ownership
+  } else {
+    for (int i = 0; i < wc; ++i) free(words[i]);
+    free(words);
+  }
+  if (out_pair_items) {
+    // We also store the original items; since our parser keeps only words, reuse words as items placeholder
+    // For now, mirror words into items; the 4th column full string will still be shown when no match
+    *out_pair_items = NULL; // unused placeholder
+  }
+  if (out_pair_count) *out_pair_count = wc;
   // Fallback: if we didn't detect any words, make each codepoint a span so hover still works
   if (word_layout->count == 0 && sub_layout->count > 0) {
     word_layout->spans = (WordSpan *)malloc(sizeof(WordSpan) * (size_t)sub_layout->count);
@@ -202,6 +216,56 @@ static void refresh_word_layout_for_index(
       word_layout->spans[i] = (WordSpan){ i, i + 1, x, w };
     }
   }
+}
+
+static char *utf8_substr_by_cp(const char *s, int start_cp, int end_cp) {
+  if (!s || start_cp < 0 || end_cp <= start_cp) return NULL;
+  int cp = 0; int i = 0; int len = (int)strlen(s);
+  int start_byte = 0, end_byte = len;
+  while (i < len && cp < start_cp) {
+    unsigned char c = (unsigned char)s[i]; int adv = 1; if ((c & 0xE0) == 0xC0) adv = 2; else if ((c & 0xF0) == 0xE0) adv = 3; else if ((c & 0xF8) == 0xF0) adv = 4; i += adv; cp++;
+  }
+  start_byte = i;
+  while (i < len && cp < end_cp) {
+    unsigned char c = (unsigned char)s[i]; int adv = 1; if ((c & 0xE0) == 0xC0) adv = 2; else if ((c & 0xF0) == 0xE0) adv = 3; else if ((c & 0xF8) == 0xF0) adv = 4; i += adv; cp++;
+  }
+  end_byte = i;
+  int out_len = end_byte - start_byte; if (out_len <= 0) return NULL;
+  char *out = (char *)malloc((size_t)out_len + 1); if (!out) return NULL;
+  memcpy(out, s + start_byte, (size_t)out_len); out[out_len] = '\0';
+  return out;
+}
+
+static void update_hover_info(SDL_Renderer *renderer, int win_w, int win_h,
+                              const char *current_text_msg, const BaseData *base, long img_idx,
+                              const SubtitleLayout *sub_layout, const WordLayout *word_layout,
+                              char **pair_words, int pair_count, int hover_index,
+                              SDL_Texture **hover_tex, SDL_Rect *hover_rect,
+                              const SDL_Rect *subtitle_rect) {
+  if (*hover_tex) { SDL_DestroyTexture(*hover_tex); *hover_tex = NULL; }
+  if (!current_text_msg || !sub_layout || !word_layout || hover_index < 0 || hover_index >= word_layout->count) return;
+  // Extract hovered word text
+  WordSpan span = word_layout->spans[hover_index];
+  char *hover_word = utf8_substr_by_cp(current_text_msg, span.start_cp, span.end_cp);
+  const char *display = NULL;
+  // Try to find matching item in pairs by word equality
+  if (hover_word && pair_words && pair_count > 0) {
+    for (int i = 0; i < pair_count; ++i) {
+      if (pair_words[i] && strcmp(pair_words[i], hover_word) == 0) { display = pair_words[i]; break; }
+    }
+  }
+  if (!display) {
+    // If not matched, fallback to full 4th column
+    const char *pairs = (base && base->pairs_by_index && img_idx > 0 && base->capacity > img_idx) ? base->pairs_by_index[img_idx] : NULL;
+    display = pairs && *pairs ? pairs : "N/A";
+  }
+  int px = win_h / 12; if (px < 12) px = 12; if (px > 36) px = 36;
+  recreate_text_px(renderer, display, px, hover_tex, hover_rect);
+  // Position above the hovered span
+  hover_rect->x = win_w/2 - hover_rect->w/2;
+  hover_rect->y = subtitle_rect->y - hover_rect->h - 20;
+  if (hover_rect->y < 8) hover_rect->y = 8;
+  free(hover_word);
 }
 
 int main(int argc, char **argv) {
@@ -281,6 +345,12 @@ int main(int argc, char **argv) {
   SubtitleLayout sub_layout = {0};
   int hover_index = -1; // selected word index
   WordLayout word_layout = {0};
+
+  // Hover info (pairs/word display)
+  SDL_Texture *hover_info_tex = NULL;
+  SDL_Rect hover_info_rect = (SDL_Rect){0, 0, 0, 0};
+  char **pair_words_cache = NULL;
+  int pair_words_count = 0;
 
   // PT translation panel state (toggle with B)
   bool show_pt = false;
@@ -454,7 +524,7 @@ int main(int argc, char **argv) {
           }
         } else if (!menu_active && key == SDLK_UP) {
           if (list.count > 0) {
-            index = (index + 1) % list.count;
+            index = (index - 1 + list.count) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
@@ -465,7 +535,7 @@ int main(int argc, char **argv) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
               current_text_msg = strdup(base.zht_by_index[img_idx]);
               rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-              refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout);
+        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, NULL, &pair_words_count);
             } else {
               if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
@@ -494,7 +564,7 @@ int main(int argc, char **argv) {
           }
         } else if (!menu_active && key == SDLK_DOWN) {
           if (list.count > 0) {
-            index = (index - 1 + list.count) % list.count;
+            index = (index + 1) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
@@ -505,7 +575,7 @@ int main(int argc, char **argv) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
               current_text_msg = strdup(base.zht_by_index[img_idx]);
               rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-              refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout);
+        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, NULL, &pair_words_count);
             } else {
               if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
@@ -536,10 +606,14 @@ int main(int argc, char **argv) {
           // Move hover to next word
           if (show_text && word_layout.count > 0) {
             if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
+            long img_idx = 0; basename_numeric_value(list.paths[index], &img_idx);
+            update_hover_info(renderer, win_w, win_h, current_text_msg, &base, img_idx, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
           }
         } else if (!menu_active && key == SDLK_LEFT) {
           if (show_text && word_layout.count > 0) {
             if (hover_index < 0) hover_index = word_layout.count - 1; else hover_index = (hover_index - 1 + word_layout.count) % word_layout.count;
+            long img_idx = 0; basename_numeric_value(list.paths[index], &img_idx);
+            update_hover_info(renderer, win_w, win_h, current_text_msg, &base, img_idx, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
           }
         } else if (menu_active && (key == SDLK_DOWN || key == SDLK_s)) {
           if (menu.count > 0) menu.selected = (menu.selected + 1) % menu.count;
@@ -628,7 +702,7 @@ int main(int argc, char **argv) {
           running = false; // Start+Back to quit
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
           if (list.count > 0) {
-            index = (index + 1) % list.count;
+            index = (index - 1 + list.count) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
@@ -666,7 +740,7 @@ int main(int argc, char **argv) {
           }
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
           if (list.count > 0) {
-            index = (index - 1 + list.count) % list.count;
+            index = (index + 1) % list.count;
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
           if (show_text && word_layout.count > 0) {
             if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
@@ -785,6 +859,15 @@ int main(int argc, char **argv) {
       SDL_RenderFillRect(renderer, &bg);
       SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
       SDL_RenderCopy(renderer, text_tex, NULL, &text_rect);
+      // Hover info label
+      if (hover_info_tex) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
+        SDL_Rect bg2 = { hover_info_rect.x - 10, hover_info_rect.y - 6, hover_info_rect.w + 20, hover_info_rect.h + 12 };
+        SDL_RenderFillRect(renderer, &bg2);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderCopy(renderer, hover_info_tex, NULL, &hover_info_rect);
+      }
       // Draw hover outline if any (word-based)
       if (hover_index >= 0 && word_layout.count > 0 && hover_index < word_layout.count) {
         int hx = text_rect.x + word_layout.spans[hover_index].x;
