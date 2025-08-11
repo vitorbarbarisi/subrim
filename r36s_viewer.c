@@ -51,8 +51,9 @@ static char *strdup_trim_range(const char *s, int start, int end) {
   return out;
 }
 
-// Extract word tokens (left of ':') from a pairs string that is usually a JSON array of
-// strings formatted as "palavra: tradução". Returns array of strdup words.
+// Extract word tokens (left of '(' preferred, else ':' fallback) from a pairs string that is
+// usually uma lista JSON de strings no formato "palavra(pinyin): tradução" ou "palavra: tradução".
+// Retorna array de palavras (strdup) para mapeamento na frase.
 static void extract_words_from_pairs(const char *pairs_str, char ***out_words, int *out_count) {
   *out_words = NULL; *out_count = 0;
   if (!pairs_str || !*pairs_str) return;
@@ -68,9 +69,13 @@ static void extract_words_from_pairs(const char *pairs_str, char ***out_words, i
       while (i < n && s[i] != '"') i++;
       if (i >= n) break; int q2 = i; // closing quote index
       // content is s[q1:q2)
-      // split at ':' if present
-      int j = q1; while (j < q2 && s[j] != ':') j++;
-      int end = (s[j] == ':') ? j : q2;
+      // split preferring '(' or '（' (fullwidth). Fallback to ':'
+      int j = q1; int end = q2;
+      while (j < q2 && s[j] != '(') j++;
+      if (j < q2) end = j; else {
+        j = q1; while (j < q2 && s[j] != ':') j++;
+        if (j < q2) end = j;
+      }
       char *w = strdup_trim_range(s, q1, end);
       if (w && *w) {
         if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); }
@@ -86,9 +91,9 @@ static void extract_words_from_pairs(const char *pairs_str, char ***out_words, i
   while (*p) {
     if (*p == ',') {
       int seglen = (int)(p - seg);
-      // find ':' inside seg
-      int k = 0; while (k < seglen && seg[k] != ':') k++;
-      char *w = strdup_trim_range(seg, 0, (seg[k] == ':') ? k : seglen);
+      // find '(' or '（' inside seg; fallback ':'
+      int k = 0; while (k < seglen && seg[k] != '(' && seg[k] != ':') k++;
+      char *w = strdup_trim_range(seg, 0, (k < seglen) ? k : seglen);
       if (w && *w) { if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); } words[cnt++] = w; } else if (w) free(w);
       seg = p + 1;
     }
@@ -96,13 +101,69 @@ static void extract_words_from_pairs(const char *pairs_str, char ***out_words, i
   }
   if (p != seg) {
     int seglen = (int)(p - seg);
-    int k = 0; while (k < seglen && seg[k] != ':') k++;
-    char *w = strdup_trim_range(seg, 0, (seg[k] == ':') ? k : seglen);
+    int k = 0; while (k < seglen && seg[k] != '(' && seg[k] != ':') k++;
+    char *w = strdup_trim_range(seg, 0, (k < seglen) ? k : seglen);
     if (w && *w) { if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); } words[cnt++] = w; } else if (w) free(w);
   }
   *out_words = words; *out_count = cnt;
 }
 
+// Parse words and their full "word: tradução" items from pairs
+static void extract_words_and_items_from_pairs(const char *pairs_str, char ***out_words, char ***out_items, int *out_count) {
+  *out_words = NULL; if (out_items) *out_items = NULL; if (out_count) *out_count = 0;
+  if (!pairs_str || !*pairs_str) return;
+  const char *s = pairs_str;
+  int cap = 8; int cnt = 0;
+  char **words = (char **)malloc(sizeof(char *) * (size_t)cap);
+  char **items = (char **)malloc(sizeof(char *) * (size_t)cap);
+  if (!words || !items) { if (words) free(words); if (items) free(items); return; }
+  if (s[0] == '[') {
+    int i = 0; int n = (int)strlen(s);
+    while (i < n) {
+      while (i < n && s[i] != '"') i++;
+      if (i >= n) break; int q1 = ++i;
+      while (i < n && s[i] != '"') i++;
+      if (i >= n) break; int q2 = i; // [q1,q2)
+      int j = q1; int end = q2;
+      while (j < q2 && s[j] != '(') j++;
+      if (j < q2) end = j; else { j = q1; while (j < q2 && s[j] != ':') j++; if (j < q2) end = j; }
+      char *w = strdup_trim_range(s, q1, end);
+      char *it = strdup_trim_range(s, q1, q2);
+      if (w && *w && it && *it) {
+        if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); items = (char **)realloc(items, sizeof(char *) * (size_t)cap); }
+        words[cnt] = w; items[cnt] = it; cnt++;
+      } else { if (w) free(w); if (it) free(it); }
+      i = q2 + 1;
+    }
+  } else {
+    const char *p = s; const char *seg = p;
+    while (*p) {
+      if (*p == ',') {
+        int seglen = (int)(p - seg);
+        int k = 0; while (k < seglen && seg[k] != '(' && seg[k] != ':') k++;
+        char *w = strdup_trim_range(seg, 0, (k < seglen) ? k : seglen);
+        char *it = strdup_trim_range(seg, 0, seglen);
+        if (w && *w && it && *it) {
+          if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); items = (char **)realloc(items, sizeof(char *) * (size_t)cap); }
+          words[cnt] = w; items[cnt] = it; cnt++;
+        } else { if (w) free(w); if (it) free(it); }
+        seg = p + 1;
+      }
+      p++;
+    }
+    if (p != seg) {
+      int seglen = (int)(p - seg);
+      int k = 0; while (k < seglen && seg[k] != '(' && seg[k] != ':') k++;
+      char *w = strdup_trim_range(seg, 0, (k < seglen) ? k : seglen);
+      char *it = strdup_trim_range(seg, 0, seglen);
+      if (w && *w && it && *it) {
+        if (cnt == cap) { cap *= 2; words = (char **)realloc(words, sizeof(char *) * (size_t)cap); items = (char **)realloc(items, sizeof(char *) * (size_t)cap); }
+        words[cnt] = w; items[cnt] = it; cnt++;
+      } else { if (w) free(w); if (it) free(it); }
+    }
+  }
+  *out_words = words; if (out_items) *out_items = items; if (out_count) *out_count = cnt;
+}
 // Compute word spans based on zht text and list of words; uses subtitle layout mapping x offsets for cps
 static int byte_to_cp_linear(const int *cp_byte_index, int total_cp, int bidx) {
   int i = 0; while (i + 1 < total_cp && cp_byte_index[i + 1] <= bidx) i++; return i;
@@ -247,25 +308,54 @@ static void update_hover_info(SDL_Renderer *renderer, int win_w, int win_h,
   // Extract hovered word text
   WordSpan span = word_layout->spans[hover_index];
   char *hover_word = utf8_substr_by_cp(current_text_msg, span.start_cp, span.end_cp);
-  const char *display = NULL;
+  char *display_owned = NULL; // we will allocate a safe copy to avoid use-after-free
   // Try to find matching item in pairs by word equality
   if (hover_word && pair_words && pair_count > 0) {
-    for (int i = 0; i < pair_count; ++i) {
-      if (pair_words[i] && strcmp(pair_words[i], hover_word) == 0) { display = pair_words[i]; break; }
+    // We will search for the full string "word: tradução" in the base column
+    const char *pairs_full = (base && base->pairs_by_index && img_idx > 0 && base->capacity > img_idx) ? base->pairs_by_index[img_idx] : NULL;
+    if (pairs_full && *pairs_full) {
+      // find item whose prefix before ':' equals hover_word
+      int cnt = 0; char **words = NULL; char **items = NULL; extract_words_and_items_from_pairs(pairs_full, &words, &items, &cnt);
+      for (int i = 0; i < cnt; ++i) {
+        if (words[i] && strcmp(words[i], hover_word) == 0) {
+          // duplicate the matched item so we can safely free arrays
+          display_owned = strdup(items[i]);
+          break;
+        }
+      }
+      for (int i = 0; i < cnt; ++i) { if (words && words[i]) free(words[i]); if (items && items[i]) free(items[i]); }
+      free(words); free(items);
     }
   }
-  if (!display) {
+  if (!display_owned) {
     // If not matched, fallback to full 4th column
     const char *pairs = (base && base->pairs_by_index && img_idx > 0 && base->capacity > img_idx) ? base->pairs_by_index[img_idx] : NULL;
-    display = pairs && *pairs ? pairs : "N/A";
+    display_owned = strdup(pairs && *pairs ? pairs : "N/A");
+  }
+  // Normalize formatting: ensure single space before '(' if missing
+  if (display_owned) {
+    char *lp = strchr(display_owned, '(');
+    if (lp && lp > display_owned && *(lp - 1) != ' ') {
+      size_t pre_len = (size_t)(lp - display_owned);
+      size_t rest_len = strlen(lp); // includes '('
+      char *norm = (char *)malloc(pre_len + 1 + rest_len + 1);
+      if (norm) {
+        memcpy(norm, display_owned, pre_len);
+        norm[pre_len] = ' ';
+        memcpy(norm + pre_len + 1, lp, rest_len + 1);
+        free(display_owned);
+        display_owned = norm;
+      }
+    }
   }
   int px = win_h / 12; if (px < 12) px = 12; if (px > 36) px = 36;
-  recreate_text_px(renderer, display, px, hover_tex, hover_rect);
+  recreate_text_px(renderer, display_owned ? display_owned : "N/A", px, hover_tex, hover_rect);
   // Position above the hovered span
   hover_rect->x = win_w/2 - hover_rect->w/2;
   hover_rect->y = subtitle_rect->y - hover_rect->h - 20;
   if (hover_rect->y < 8) hover_rect->y = 8;
   free(hover_word);
+  if (display_owned) free(display_owned);
 }
 
 int main(int argc, char **argv) {
@@ -350,6 +440,7 @@ int main(int argc, char **argv) {
   SDL_Texture *hover_info_tex = NULL;
   SDL_Rect hover_info_rect = (SDL_Rect){0, 0, 0, 0};
   char **pair_words_cache = NULL;
+  char **pair_items_cache = NULL; // full "word: tradução"
   int pair_words_count = 0;
 
   // PT translation panel state (toggle with B)
@@ -438,30 +529,9 @@ int main(int argc, char **argv) {
           }
           // Recreate text at new size/position if visible
           if (show_text && current_text_msg) rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-          // Rebuild word layout after bias change
-          if (current_text_msg) {
-            free_word_layout(&word_layout);
-            char **words = NULL; int wc = 0; const char *pairs = NULL;
-            long tmp_idx = 0; if (basename_numeric_value(list.paths[index], &tmp_idx)) {
-              if (base.pairs_by_index && tmp_idx > 0 && base.capacity > tmp_idx) pairs = base.pairs_by_index[tmp_idx];
-            }
-            extract_words_from_pairs(pairs, &words, &wc);
-            build_word_layout(current_text_msg, &sub_layout, words, wc, &word_layout);
-            for (int i = 0; i < wc; ++i) free(words[i]);
-            free(words);
-          }
           // rebuild word layout on resize
-          if (current_text_msg) {
-            free_word_layout(&word_layout);
-            char **words = NULL; int wc = 0; const char *pairs = NULL;
-            long tmp_idx = 0; if (basename_numeric_value(list.paths[index], &tmp_idx)) {
-              if (base.pairs_by_index && tmp_idx > 0 && base.capacity > tmp_idx) pairs = base.pairs_by_index[tmp_idx];
-            }
-            extract_words_from_pairs(pairs, &words, &wc);
-            build_word_layout(current_text_msg, &sub_layout, words, wc, &word_layout);
-            for (int i = 0; i < wc; ++i) free(words[i]);
-            free(words);
-          }
+          if (current_text_msg) { long tmp_idx = 0; basename_numeric_value(list.paths[index], &tmp_idx);
+            refresh_word_layout_for_index(&base, tmp_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count); }
           if (show_pt && current_pt_msg) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
             int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
@@ -535,7 +605,7 @@ int main(int argc, char **argv) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
               current_text_msg = strdup(base.zht_by_index[img_idx]);
               rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, NULL, &pair_words_count);
+        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
             } else {
               if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }

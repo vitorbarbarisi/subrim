@@ -244,10 +244,10 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     prompt = (
         "Você é um extrator. Dada a frase em chinês tradicional (zht), responda EXTRAINDO "
         "apenas as palavras da própria frase com suas traduções para pt-BR.\n"
-        "RETORNE SOMENTE uma lista JSON de strings no formato \"palavra: tradução\";\n"
+        "RETORNE SOMENTE uma lista JSON de strings no formato \"palavra (pinyin): tradução\";\n"
         "sem explicações, sem texto extra, sem rótulos, sem markdown.\n"
-        "Exemplo de formato: [\"三: três\", \"號: número\", \"碼頭: cais\"].\n"
-        "Não inclua pinyin. Não invente palavras fora da frase.\n\n"
+        "Exemplo de formato: [\"三 (sān): três\", \"號 (hào): número\", \"碼頭 (mǎ tóu): cais\"].\n"
+        "Não invente palavras fora da frase.\n\n"
         f"Frase: {zht_text}"
     )
 
