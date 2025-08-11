@@ -145,6 +145,65 @@ int recreate_text_px(SDL_Renderer *renderer, const char *msg, int pixel_size, SD
   return 0;
 }
 
+int recreate_pt_panel(SDL_Renderer *renderer, int win_w, int win_h, const char *msg, SDL_Texture **out_tex, SDL_Rect *out_rect) {
+  if (*out_tex) { SDL_DestroyTexture(*out_tex); *out_tex = NULL; }
+  
+  // Start with a base size and adjust for screen constraints
+  int font_px = win_h / 6; // Base size
+  if (font_px < 12) font_px = 12;
+  if (font_px > 48) font_px = 48;
+  
+  SDL_Color white = {255,255,255,255};
+  const int max_width = win_w - 64;  // Leave margins
+  const int max_height = win_h / 4;  // Max 25% of screen height
+  
+  for (int attempt = 0; attempt < 6; ++attempt) {
+    TTF_Font *font = open_any_font(font_px);
+    if (!font) {
+      fprintf(stderr, "Failed to open a font for PT panel.\n");
+      return -1;
+    }
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, msg, white);
+    if (!surf) {
+      TTF_CloseFont(font);
+      fprintf(stderr, "TTF_RenderUTF8_Blended failed for PT panel: %s\n", TTF_GetError());
+      return -1;
+    }
+    
+    // Check if it fits within constraints
+    int too_wide = (surf->w > max_width);
+    int too_tall = (surf->h > max_height);
+    
+    if (!too_wide && !too_tall) {
+      *out_tex = SDL_CreateTextureFromSurface(renderer, surf);
+      out_rect->w = surf->w;
+      out_rect->h = surf->h;
+      SDL_FreeSurface(surf);
+      TTF_CloseFont(font);
+      return 0;
+    }
+    
+    SDL_FreeSurface(surf);
+    TTF_CloseFont(font);
+    
+    // Reduce size and retry
+    font_px = (int)(font_px * 0.85);
+    if (font_px < 10) font_px = 10;
+  }
+  
+  // Last resort: render with minimal size
+  TTF_Font *font = open_any_font(10);
+  if (!font) return -1;
+  SDL_Surface *surf = TTF_RenderUTF8_Blended(font, msg, white);
+  if (!surf) { TTF_CloseFont(font); return -1; }
+  *out_tex = SDL_CreateTextureFromSurface(renderer, surf);
+  out_rect->w = surf->w;
+  out_rect->h = surf->h;
+  SDL_FreeSurface(surf);
+  TTF_CloseFont(font);
+  return 0;
+}
+
 static void allocate_layout_arrays(SubtitleLayout *layout, int count) {
   layout->count = count;
   layout->x_offsets = (int *)calloc((size_t)count, sizeof(int));

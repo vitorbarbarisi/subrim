@@ -584,8 +584,7 @@ int main(int argc, char **argv) {
             refresh_word_layout_for_index(&base, tmp_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count); }
           if (show_pt && current_pt_msg) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
-            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+            if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
               pt_rect.x = (win_w - pt_rect.w) / 2;
               int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
               if (base_y < 8) base_y = 8;
@@ -612,8 +611,7 @@ int main(int argc, char **argv) {
           // Also adjust PT panel position since subtitle height may change
           if (show_pt && current_pt_msg) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
-            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+            if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
               pt_rect.x = (win_w - pt_rect.w) / 2;
               int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
               if (base_y < 8) base_y = 8;
@@ -634,8 +632,7 @@ int main(int argc, char **argv) {
             if (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) pt = base.pt_by_index[img_idx];
             if (!pt || !*pt) pt = "N/A";
             current_pt_msg = strdup(pt);
-            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+            if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
               pt_rect.x = (win_w - pt_rect.w) / 2;
               int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
               if (base_y < 8) base_y = 8;
@@ -690,8 +687,7 @@ int main(int argc, char **argv) {
               const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
               if (!pt || !*pt) pt = "N/A";
               current_pt_msg = strdup(pt);
-              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
                 pt_rect.x = (win_w - pt_rect.w) / 2;
                 int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
                 if (base_y < 8) base_y = 8;
@@ -735,8 +731,7 @@ int main(int argc, char **argv) {
               const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
               if (!pt || !*pt) pt = "N/A";
               current_pt_msg = strdup(pt);
-              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
                 pt_rect.x = (win_w - pt_rect.w) / 2;
                 int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
                 if (base_y < 8) base_y = 8;
@@ -850,8 +845,7 @@ int main(int argc, char **argv) {
           }
           if (show_pt && current_pt_msg) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
-            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+            if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
               pt_rect.x = (win_w - pt_rect.w) / 2;
               int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
               if (base_y < 8) base_y = 8;
@@ -888,8 +882,7 @@ int main(int argc, char **argv) {
               const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
               if (!pt || !*pt) pt = "N/A";
               current_pt_msg = strdup(pt);
-              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+              if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
                 pt_rect.x = (win_w - pt_rect.w) / 2;
                 int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
                 if (base_y < 8) base_y = 8;
@@ -989,8 +982,7 @@ int main(int argc, char **argv) {
             if (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) pt = base.pt_by_index[img_idx];
             if (!pt || !*pt) pt = "N/A";
             current_pt_msg = strdup(pt);
-            int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-            if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
+            if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
               pt_rect.x = (win_w - pt_rect.w) / 2;
               int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
               if (base_y < 8) base_y = 8;
