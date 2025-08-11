@@ -410,6 +410,33 @@ int main(int argc, char **argv) {
   Menu menu = {0};
   if (menu_active) {
     menu = build_menu(renderer, win_w, win_h, assets_root);
+    
+    // Render initial menu immediately so it's visible on startup
+    fprintf(stdout, "DEBUG: Rendering initial menu (count=%d)\n", menu.count);
+    SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+    SDL_RenderClear(renderer);
+    if (menu.count > 0) {
+      // Draw menu background dim
+      SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 200);
+      SDL_Rect bg = { 40, 40, win_w - 80, win_h - 80 };
+      SDL_RenderFillRect(renderer, &bg);
+      // Draw each item; highlight selected
+      for (int i = 0; i < menu.count; ++i) {
+        SDL_Rect r = menu.rects[i];
+        if (i == menu.selected) {
+          SDL_SetRenderDrawColor(renderer, 40, 40, 80, 220);
+          SDL_Rect hl = { r.x - 16, r.y - 8, r.w + 32, r.h + 16 };
+          SDL_RenderFillRect(renderer, &hl);
+        }
+        if (menu.tex[i]) {
+          SDL_RenderCopy(renderer, menu.tex[i], NULL, &r);
+        }
+      }
+      SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+    }
+    SDL_RenderPresent(renderer);
+    fprintf(stdout, "DEBUG: Initial menu render complete\n");
   } else {
     // If directory provided and not an absolute path, treat as assets/<directory>
     char pathbuf[1024];
@@ -487,13 +514,11 @@ int main(int argc, char **argv) {
         if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
         current_text_msg = strdup(base.zht_by_index[img_idx]);
         rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-        // Build initial word layout
-        char **words = NULL; int wc = 0;
-        const char *pairs0 = (base.pairs_by_index && img_idx > 0 && base.capacity > img_idx) ? base.pairs_by_index[img_idx] : NULL;
-        extract_words_from_pairs(pairs0, &words, &wc);
-        build_word_layout(current_text_msg, &sub_layout, words, wc, &word_layout);
-        for (int i = 0; i < wc; ++i) free(words[i]);
-        free(words);
+        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+      } else {
+        if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+        if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+        show_text = false;
       }
       // Build top-left small label with current numeric index
       {
@@ -503,6 +528,31 @@ int main(int argc, char **argv) {
           idx_rect.x = 8; idx_rect.y = 8;
         }
       }
+      
+      // Render the first image immediately so it's visible on startup
+      SDL_SetRenderDrawColor(renderer, 0, 0, 0, 255);
+      SDL_RenderClear(renderer);
+      if (current) {
+        if (cover_mode) SDL_RenderCopy(renderer, current, &src_rect, &dst_rect);
+        else SDL_RenderCopy(renderer, current, NULL, &dst_rect);
+      }
+      if (show_text && text_tex) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 160);
+        SDL_Rect bg = { text_rect.x - 12, text_rect.y - 8, text_rect.w + 24, text_rect.h + 16 };
+        SDL_RenderFillRect(renderer, &bg);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderCopy(renderer, text_tex, NULL, &text_rect);
+      }
+      if (idx_tex) {
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
+        SDL_SetRenderDrawColor(renderer, 0, 0, 0, 120);
+        SDL_Rect bg = { idx_rect.x - 4, idx_rect.y - 2, idx_rect.w + 8, idx_rect.h + 4 };
+        SDL_RenderFillRect(renderer, &bg);
+        SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
+        SDL_RenderCopy(renderer, idx_tex, NULL, &idx_rect);
+      }
+      SDL_RenderPresent(renderer);
     }
   }
 
@@ -572,6 +622,9 @@ int main(int argc, char **argv) {
           }
         } else if (!menu_active && key == SDLK_b) {
           // Toggle PT translation panel (from base file column 5)
+          // Clear hover state and label when toggling PT
+          hover_index = -1;
+          if (hover_info_tex) { SDL_DestroyTexture(hover_info_tex); hover_info_tex = NULL; }
           show_pt = !show_pt;
           if (show_pt) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
@@ -592,8 +645,28 @@ int main(int argc, char **argv) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
             if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
           }
+        } else if (!menu_active && key == SDLK_a) {
+          // Restore default view via keyboard 'A': image + ZHT, no hover, no translation label, PT panel closed
+          show_pt = false;
+          if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+          if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+          hover_index = -1;
+          if (hover_info_tex) { SDL_DestroyTexture(hover_info_tex); hover_info_tex = NULL; }
+          long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
+          const char *zht = (ok && img_idx > 0 && base.capacity > img_idx) ? base.zht_by_index[img_idx] : NULL;
+          if (zht && *zht) {
+            if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+            current_text_msg = strdup(zht);
+            rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+            refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+          }
         } else if (!menu_active && key == SDLK_UP) {
           if (list.count > 0) {
+            // Hide PT panel when changing images
+            show_pt = false;
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            
             index = (index - 1 + list.count) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
@@ -634,6 +707,11 @@ int main(int argc, char **argv) {
           }
         } else if (!menu_active && key == SDLK_DOWN) {
           if (list.count > 0) {
+            // Hide PT panel when changing images
+            show_pt = false;
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            
             index = (index + 1) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
@@ -675,12 +753,24 @@ int main(int argc, char **argv) {
         } else if (!menu_active && key == SDLK_RIGHT) {
           // Move hover to next word
           if (show_text && word_layout.count > 0) {
+            // Hide PT panel when navigating hover
+            if (show_pt) {
+              show_pt = false;
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            }
             if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
             long img_idx = 0; basename_numeric_value(list.paths[index], &img_idx);
             update_hover_info(renderer, win_w, win_h, current_text_msg, &base, img_idx, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
           }
         } else if (!menu_active && key == SDLK_LEFT) {
           if (show_text && word_layout.count > 0) {
+            // Hide PT panel when navigating hover
+            if (show_pt) {
+              show_pt = false;
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            }
             if (hover_index < 0) hover_index = word_layout.count - 1; else hover_index = (hover_index - 1 + word_layout.count) % word_layout.count;
             long img_idx = 0; basename_numeric_value(list.paths[index], &img_idx);
             update_hover_info(renderer, win_w, win_h, current_text_msg, &base, img_idx, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
@@ -772,6 +862,11 @@ int main(int argc, char **argv) {
           running = false; // Start+Back to quit
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
           if (list.count > 0) {
+            // Hide PT panel when changing images
+            show_pt = false;
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            
             index = (index - 1 + list.count) % list.count;
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
@@ -810,15 +905,12 @@ int main(int argc, char **argv) {
           }
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
           if (list.count > 0) {
+            // Hide PT panel when changing images
+            show_pt = false;
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            
             index = (index + 1) % list.count;
-        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
-          if (show_text && word_layout.count > 0) {
-            if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
-          }
-        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_LEFT) {
-          if (show_text && word_layout.count > 0) {
-            if (hover_index < 0) hover_index = word_layout.count - 1; else hover_index = (hover_index - 1 + word_layout.count) % word_layout.count;
-          }
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
@@ -833,20 +925,6 @@ int main(int argc, char **argv) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
               show_text = false;
             }
-            if (show_pt) {
-              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
-              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
-              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
-              if (!pt || !*pt) pt = "N/A";
-              current_pt_msg = strdup(pt);
-              int px = win_h / 6; if (px < 12) px = 12; if (px > 48) px = 48;
-              if (recreate_text_px(renderer, current_pt_msg, px, &pt_tex, &pt_rect) == 0 && pt_tex) {
-                pt_rect.x = (win_w - pt_rect.w) / 2;
-                int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
-                if (base_y < 8) base_y = 8;
-                pt_rect.y = base_y;
-              }
-            }
             // Update small index label
             {
               char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
@@ -854,8 +932,54 @@ int main(int argc, char **argv) {
               if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
             }
           }
+        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_RIGHT) {
+          if (show_text && word_layout.count > 0) {
+            // Hide PT panel when navigating hover
+            if (show_pt) {
+              show_pt = false;
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            }
+            if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
+          }
+                  } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_LEFT) {
+            if (show_text && word_layout.count > 0) {
+              // Hide PT panel when navigating hover
+              if (show_pt) {
+                show_pt = false;
+                if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+                if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+              }
+              if (hover_index < 0) hover_index = word_layout.count - 1; else hover_index = (hover_index - 1 + word_layout.count) % word_layout.count;
+            }
+        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_A) {
+          // Restore to default viewing state: image + ZHT text visible, no hover, no translation label, PT panel closed
+          // Close PT panel
+          show_pt = false;
+          if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+          if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+          // Clear hover state and its label
+          hover_index = -1;
+          if (hover_info_tex) { SDL_DestroyTexture(hover_info_tex); hover_info_tex = NULL; }
+          // Ensure ZHT subtitle is visible for current image (when available)
+          long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
+          const char *zht = (ok && img_idx > 0 && base.capacity > img_idx) ? base.zht_by_index[img_idx] : NULL;
+          if (zht && *zht) {
+            if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+            current_text_msg = strdup(zht);
+            rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+            // Prepare word layout for future hovers (even though hover is off now)
+            refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+          }
+        } else if (menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
+          if (menu.count > 0) menu.selected = (menu.selected + 1) % menu.count;
+        } else if (menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
+          if (menu.count > 0) menu.selected = (menu.selected - 1 + menu.count) % menu.count;
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_B) {
-          // Mirror keyboard B for showing PT
+          // Controller B toggles PT (mirrors keyboard B)
+          // Clear hover state and label when toggling PT
+          hover_index = -1;
+          if (hover_info_tex) { SDL_DestroyTexture(hover_info_tex); hover_info_tex = NULL; }
           show_pt = !show_pt;
           if (show_pt) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
@@ -876,11 +1000,7 @@ int main(int argc, char **argv) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
             if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
           }
-        } else if (menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
-          if (menu.count > 0) menu.selected = (menu.selected + 1) % menu.count;
-        } else if (menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_UP) {
-          if (menu.count > 0) menu.selected = (menu.selected - 1 + menu.count) % menu.count;
-        } else if (menu_active && (e.cbutton.button == SDL_CONTROLLER_BUTTON_A)) {
+        } else if (menu_active && (e.cbutton.button == SDL_CONTROLLER_BUTTON_B)) {
           if (menu.count > 0) {
             char pathbuf[1024];
             snprintf(pathbuf, sizeof(pathbuf), "%s/%s", assets_root, menu.names[menu.selected]);
@@ -929,8 +1049,8 @@ int main(int argc, char **argv) {
       SDL_RenderFillRect(renderer, &bg);
       SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
       SDL_RenderCopy(renderer, text_tex, NULL, &text_rect);
-      // Hover info label
-      if (hover_info_tex) {
+      // Hover info label (draw only if there's an active hover)
+      if (hover_index >= 0 && hover_info_tex) {
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(renderer, 0, 0, 0, 180);
         SDL_Rect bg2 = { hover_info_rect.x - 10, hover_info_rect.y - 6, hover_info_rect.w + 20, hover_info_rect.h + 12 };
@@ -946,9 +1066,11 @@ int main(int argc, char **argv) {
         int hh = text_rect.h;
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_BLEND);
         SDL_SetRenderDrawColor(renderer, 30, 200, 255, 220);
-        SDL_Rect outline = { hx - 2, hy - 2, hw + 4, hh + 4 };
-        // Draw rectangle outline (4 edges)
-        SDL_RenderDrawRect(renderer, &outline);
+        // Draw thicker outline by drawing multiple rectangles
+        for (int thickness = 0; thickness < 3; thickness++) {
+          SDL_Rect outline = { hx - 2 - thickness, hy - 2 - thickness, hw + 4 + 2*thickness, hh + 4 + 2*thickness };
+          SDL_RenderDrawRect(renderer, &outline);
+        }
         SDL_SetRenderDrawBlendMode(renderer, SDL_BLENDMODE_NONE);
       }
     }
