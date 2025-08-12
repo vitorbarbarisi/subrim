@@ -348,8 +348,7 @@ static void update_hover_info(SDL_Renderer *renderer, int win_w, int win_h,
       }
     }
   }
-  int px = win_h / 12; if (px < 12) px = 12; if (px > 36) px = 36;
-  recreate_text_px(renderer, display_owned ? display_owned : "N/A", px, hover_tex, hover_rect);
+  recreate_hover_label(renderer, win_w, win_h, display_owned ? display_owned : "N/A", hover_tex, hover_rect);
   // Position above the hovered span
   hover_rect->x = win_w/2 - hover_rect->w/2;
   hover_rect->y = subtitle_rect->y - hover_rect->h - 20;

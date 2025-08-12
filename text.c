@@ -204,6 +204,65 @@ int recreate_pt_panel(SDL_Renderer *renderer, int win_w, int win_h, const char *
   return 0;
 }
 
+int recreate_hover_label(SDL_Renderer *renderer, int win_w, int win_h, const char *msg, SDL_Texture **out_tex, SDL_Rect *out_rect) {
+  if (*out_tex) { SDL_DestroyTexture(*out_tex); *out_tex = NULL; }
+  
+  // Start with a smaller base size for hover labels
+  int font_px = win_h / 14; // Smaller than PT panel (was /6)
+  if (font_px < 10) font_px = 10;
+  if (font_px > 32) font_px = 32;
+  
+  SDL_Color white = {255,255,255,255};
+  const int max_width = win_w - 80;   // Leave more margins than PT panel
+  const int max_height = win_h / 6;   // Max ~16% of screen height
+  
+  for (int attempt = 0; attempt < 6; ++attempt) {
+    TTF_Font *font = open_any_font(font_px);
+    if (!font) {
+      fprintf(stderr, "Failed to open a font for hover label.\n");
+      return -1;
+    }
+    SDL_Surface *surf = TTF_RenderUTF8_Blended(font, msg, white);
+    if (!surf) {
+      TTF_CloseFont(font);
+      fprintf(stderr, "TTF_RenderUTF8_Blended failed for hover label: %s\n", TTF_GetError());
+      return -1;
+    }
+    
+    // Check if it fits within constraints
+    int too_wide = (surf->w > max_width);
+    int too_tall = (surf->h > max_height);
+    
+    if (!too_wide && !too_tall) {
+      *out_tex = SDL_CreateTextureFromSurface(renderer, surf);
+      out_rect->w = surf->w;
+      out_rect->h = surf->h;
+      SDL_FreeSurface(surf);
+      TTF_CloseFont(font);
+      return 0;
+    }
+    
+    SDL_FreeSurface(surf);
+    TTF_CloseFont(font);
+    
+    // Reduce size and retry
+    font_px = (int)(font_px * 0.85);
+    if (font_px < 8) font_px = 8;
+  }
+  
+  // Last resort: render with minimal size
+  TTF_Font *font = open_any_font(8);
+  if (!font) return -1;
+  SDL_Surface *surf = TTF_RenderUTF8_Blended(font, msg, white);
+  if (!surf) { TTF_CloseFont(font); return -1; }
+  *out_tex = SDL_CreateTextureFromSurface(renderer, surf);
+  out_rect->w = surf->w;
+  out_rect->h = surf->h;
+  SDL_FreeSurface(surf);
+  TTF_CloseFont(font);
+  return 0;
+}
+
 static void allocate_layout_arrays(SubtitleLayout *layout, int count) {
   layout->count = count;
   layout->x_offsets = (int *)calloc((size_t)count, sizeof(int));

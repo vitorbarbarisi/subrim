@@ -19,6 +19,9 @@ int recreate_text_px(SDL_Renderer *renderer, const char *msg, int pixel_size, SD
 // Render PT panel text with automatic size adjustment to fit screen constraints.
 int recreate_pt_panel(SDL_Renderer *renderer, int win_w, int win_h, const char *msg, SDL_Texture **out_tex, SDL_Rect *out_rect);
 
+// Render hover label text with automatic size adjustment to fit screen constraints.
+int recreate_hover_label(SDL_Renderer *renderer, int win_w, int win_h, const char *msg, SDL_Texture **out_tex, SDL_Rect *out_rect);
+
 // Helper to set bottom-centered text with backdrop bookkeeping.
 void set_bottom_text(SDL_Renderer *renderer, int win_w, int win_h, const char *msg,
                      SDL_Texture **text_tex, SDL_Rect *text_rect, char **current_msg,
