@@ -11,6 +11,7 @@ Examples:
   python3 screenshoter.py
   python3 screenshoter.py --interval 5 --duration 60 --outdir screenshots \
     --crop-percent 30 --target-width 640 --target-height 480
+  python3 screenshoter.py flipper --resume-from-seconds 120.5  # Resume from 2m 0.5s
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "directory",
         nargs="?",
         default=None,
-        help="Optional directory name inside local 'assets' to auto-find *_secs_base.txt and save output in that folder (e.g., 'flipper')",
+        help="Optional directory name inside local 'assets' to auto-find *_secs_base.txt and save output in that folder - e.g., 'flipper'",
     )
     parser.add_argument(
         "--base-file",
@@ -47,43 +48,49 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         "--offset-seconds",
         type=float,
         default=0.0,
-        help="Time offset added to each timestamp read from --base-file (can be negative) to synchronize with current playback position",
+        help="Time offset added to each timestamp read from --base-file - can be negative - to synchronize with current playback position",
+    )
+    parser.add_argument(
+        "--resume-from-seconds",
+        type=float,
+        default=None,
+        help="Resume capture from this timestamp onwards",
     )
     parser.add_argument(
         "--interval",
         type=float,
         default=5.0,
-        help="Interval between screenshots in seconds (default: 5)",
+        help="Interval between screenshots in seconds - default: 5",
     )
     parser.add_argument(
         "--duration",
         type=float,
         default=60.0,
-        help="Total duration to run in seconds (default: 60)",
+        help="Total duration to run in seconds - default: 60",
     )
     parser.add_argument(
         "--outdir",
         type=str,
         default="screenshots",
-        help="Output directory to save screenshots (default: screenshots)",
+        help="Output directory to save screenshots - default: screenshots",
     )
     parser.add_argument(
         "--crop-percent",
         type=float,
         default=30.0,
-        help="Percentage to crop from each dimension (central crop). 30 keeps 70% (default: 30)",
+        help="Percentage to crop from each dimension - central crop - 30 keeps 70% - default: 30",
     )
     parser.add_argument(
         "--target-width",
         type=int,
         default=640,
-        help="Target output width in pixels (default: 640)",
+        help="Target output width in pixels - default: 640",
     )
     parser.add_argument(
         "--target-height",
         type=int,
         default=480,
-        help="Target output height in pixels (default: 480)",
+        help="Target output height in pixels - default: 480",
     )
     return parser.parse_args(argv)
 
@@ -266,6 +273,7 @@ def run_from_base_file(
     crop_percent: float,
     target_w: int,
     target_h: int,
+    resume_from_seconds: float | None = None,
 ) -> int:
     if Image is None:
         print("Pillow not installed. Run: pip install pillow", file=sys.stderr)
@@ -286,6 +294,17 @@ def run_from_base_file(
     if not schedule:
         print("No valid timestamps found in base file.", file=sys.stderr)
         return 2
+
+    # Filter schedule to resume from specified timestamp if provided
+    if resume_from_seconds is not None:
+        original_count = len(schedule)
+        schedule = [(idx, secs) for idx, secs in schedule if secs >= resume_from_seconds]
+        filtered_count = len(schedule)
+        print(f"Resuming from {resume_from_seconds:.3f}s: {original_count - filtered_count} timestamps skipped, {filtered_count} remaining")
+        
+        if not schedule:
+            print(f"No timestamps found at or after {resume_from_seconds:.3f}s in base file.", file=sys.stderr)
+            return 2
 
     # Pre-start 5s countdown
     countdown(5)
@@ -338,6 +357,7 @@ def main(argv: list[str]) -> int:
             crop_percent=args.crop_percent,
             target_w=args.target_width,
             target_h=args.target_height,
+            resume_from_seconds=args.resume_from_seconds,
         )
 
     output_dir = Path(args.outdir).resolve()
@@ -350,6 +370,7 @@ def main(argv: list[str]) -> int:
             crop_percent=args.crop_percent,
             target_w=args.target_width,
             target_h=args.target_height,
+            resume_from_seconds=args.resume_from_seconds,
         )
     else:
         return run_scheduler(
