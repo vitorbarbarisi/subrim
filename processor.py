@@ -9,6 +9,9 @@ ttp:tickRate parameter.
 
 Usage:
   python3 processor.py <folder_name_inside_assets>
+  
+The processor automatically detects existing base files and resumes from the last
+processed timestamp. Manual resume is also available:
   python3 processor.py <folder_name_inside_assets> --resume-from-seconds 220.5
 
 Searches the folder under the local "assets" directory (recursively) for one XML file containing "zht"
@@ -311,39 +314,56 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
     p_nodes = list(_iter_p_elements(root))
     total_nodes = len(p_nodes)
     
-    # Handle resume functionality
+    # Handle automatic resume functionality
     processed_timestamps = set()
     base_out_path = determine_base_output_path(zht_secs_path)
+    auto_resume_from_seconds = None
     
-    # Determine if we need to resume or start fresh
+    # Check if base file exists and determine auto-resume point
     file_mode = 'w'  # Default: overwrite
+    existing_lines = []
     
-    if resume_from_seconds is not None and base_out_path.exists():
-        # Load existing entries to determine what's already been processed
+    if base_out_path.exists():
         try:
-            existing_content = base_out_path.read_text(encoding="utf-8")
-            existing_lines = []
-            for line in existing_content.strip().split('\n'):
-                if line.strip():
-                    parts = line.split('\t')
-                    if len(parts) >= 2:
-                        timestamp_str = parts[1]
-                        if timestamp_str.endswith('s'):
-                            try:
-                                timestamp = float(timestamp_str[:-1])
-                                processed_timestamps.add(timestamp_str)
-                                if timestamp < resume_from_seconds:
+            existing_content = base_out_path.read_text(encoding="utf-8").strip()
+            if existing_content:
+                lines = existing_content.split('\n')
+                last_timestamp = None
+                
+                for line in lines:
+                    if line.strip():
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            timestamp_str = parts[1]
+                            if timestamp_str.endswith('s'):
+                                try:
+                                    timestamp = float(timestamp_str[:-1])
+                                    processed_timestamps.add(timestamp_str)
                                     existing_lines.append(line)
                                     index_counter = max(index_counter, int(parts[0]) + 1)
-                            except (ValueError, IndexError):
-                                pass
-            
-            if existing_lines:
-                print(f"Retomando processamento a partir de {resume_from_seconds}s. {len(existing_lines)} entradas já processadas.")
-                # Rewrite file with only the entries before resume point
-                base_out_path.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
-                file_mode = 'a'  # Append mode for new entries
-        except Exception:
+                                    last_timestamp = timestamp
+                                except (ValueError, IndexError):
+                                    pass
+                
+                # Determine resume strategy
+                if resume_from_seconds is not None:
+                    # Manual resume parameter provided
+                    auto_resume_from_seconds = resume_from_seconds
+                    existing_lines = [line for line in existing_lines 
+                                    if line.split('\t')[1].endswith('s') and 
+                                    float(line.split('\t')[1][:-1]) < resume_from_seconds]
+                    print(f"Retomando manualmente a partir de {resume_from_seconds}s. {len(existing_lines)} entradas preservadas.")
+                elif last_timestamp is not None:
+                    # Auto-resume from last processed timestamp
+                    auto_resume_from_seconds = last_timestamp
+                    print(f"Arquivo base existente detectado. Retomando automaticamente a partir de {last_timestamp}s. {len(existing_lines)} entradas já processadas.")
+                
+                if existing_lines:
+                    # Rewrite file with existing entries
+                    base_out_path.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+                    file_mode = 'a'  # Append mode for new entries
+        except Exception as e:
+            print(f"Aviso: Erro ao ler arquivo base existente: {e}. Iniciando do zero.")
             pass
     
     # Open file for writing (either fresh or append mode)
@@ -357,12 +377,12 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
                 continue
                 
             # Skip if resume mode and timestamp is before resume point or already processed
-            if resume_from_seconds is not None:
+            if auto_resume_from_seconds is not None:
                 if begin_time in processed_timestamps:
                     continue
                 try:
                     current_timestamp = float(begin_time.rstrip('s'))
-                    if current_timestamp < resume_from_seconds:
+                    if current_timestamp <= auto_resume_from_seconds:
                         continue
                 except (ValueError, AttributeError):
                     pass

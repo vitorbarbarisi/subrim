@@ -11,7 +11,8 @@ Examples:
   python3 screenshoter.py
   python3 screenshoter.py --interval 5 --duration 60 --outdir screenshots \
     --crop-percent 30 --target-width 640 --target-height 480
-  python3 screenshoter.py flipper --resume-from-seconds 120.5  # Resume from 2m 0.5s
+  python3 screenshoter.py flipper  # Auto-detects existing PNGs and resumes
+  python3 screenshoter.py flipper --resume-from-seconds 120.5  # Manual resume
 """
 
 from __future__ import annotations
@@ -295,15 +296,57 @@ def run_from_base_file(
         print("No valid timestamps found in base file.", file=sys.stderr)
         return 2
 
-    # Filter schedule to resume from specified timestamp if provided
+    # Auto-detect existing images and determine resume point
+    auto_resume_from_seconds = None
+    existing_images = set()
+    
+    # Scan output directory for existing PNG files
+    if output_dir.exists():
+        for png_file in output_dir.glob("*.png"):
+            try:
+                # Extract index from filename (e.g., "25.png" -> 25)
+                index_str = png_file.stem
+                if index_str.isdigit():
+                    existing_images.add(int(index_str))
+            except (ValueError, AttributeError):
+                pass
+    
+    # Determine resume strategy
     if resume_from_seconds is not None:
+        # Manual resume parameter provided
+        auto_resume_from_seconds = resume_from_seconds
+        print(f"Manual resume from {resume_from_seconds:.3f}s specified.")
+    elif existing_images:
+        # Auto-resume: find the first missing image index
+        all_indices = {idx for idx, _ in schedule}
+        missing_indices = all_indices - existing_images
+        
+        if missing_indices:
+            # Find the timestamp for the first missing index
+            first_missing_idx = min(missing_indices)
+            for idx, secs in schedule:
+                if idx == first_missing_idx:
+                    auto_resume_from_seconds = secs
+                    break
+            
+            print(f"Detected {len(existing_images)} existing images. Auto-resuming from index {first_missing_idx} ({auto_resume_from_seconds:.3f}s).")
+        else:
+            print(f"All {len(existing_images)} images already exist. Nothing to process.")
+            return 0
+    
+    # Filter schedule based on resume point
+    if auto_resume_from_seconds is not None:
         original_count = len(schedule)
-        schedule = [(idx, secs) for idx, secs in schedule if secs >= resume_from_seconds]
+        schedule = [(idx, secs) for idx, secs in schedule if secs >= auto_resume_from_seconds]
         filtered_count = len(schedule)
-        print(f"Resuming from {resume_from_seconds:.3f}s: {original_count - filtered_count} timestamps skipped, {filtered_count} remaining")
+        
+        if resume_from_seconds is not None:
+            print(f"Manual resume: {original_count - filtered_count} timestamps skipped, {filtered_count} remaining")
+        else:
+            print(f"Auto-resume: {original_count - filtered_count} timestamps skipped, {filtered_count} remaining")
         
         if not schedule:
-            print(f"No timestamps found at or after {resume_from_seconds:.3f}s in base file.", file=sys.stderr)
+            print(f"No timestamps found at or after {auto_resume_from_seconds:.3f}s in base file.", file=sys.stderr)
             return 2
 
     # Pre-start 5s countdown
