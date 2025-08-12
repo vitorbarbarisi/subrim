@@ -9,6 +9,7 @@ ttp:tickRate parameter.
 
 Usage:
   python3 processor.py <folder_name_inside_assets>
+  python3 processor.py <folder_name_inside_assets> --resume-from-seconds 220.5
 
 Searches the folder under the local "assets" directory (recursively) for one XML file containing "zht"
 in its name and one containing "pt" (ignoring files that already contain
@@ -284,7 +285,7 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
         return "N/A"
 
 
-def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path) -> Path:
+def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_seconds: float | None = None) -> Path:
     """Create a TSV file with: index, begin, zht text, pairs, pt text.
 
     PT matched by time within ZHT window; pairs fetched via DeepSeek if configured.
@@ -292,9 +293,7 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path) -> Path:
     tree = ET.parse(zht_secs_path)
     root = tree.getroot()
 
-    lines: list[str] = []
     index_counter = 1
-
     pt_entries = _load_pt_entries(pt_secs_path)
     pairs_cache: dict[str, str] = {}
 
@@ -311,40 +310,94 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path) -> Path:
 
     p_nodes = list(_iter_p_elements(root))
     total_nodes = len(p_nodes)
-    for idx, p in enumerate(p_nodes, start=1):
-        begin_time = p.get("begin", "")
-        end_time = p.get("end") or begin_time or ""
-        text_content = _extract_text_content(p)
-        # Skip empty lines (no text and no begin)
-        if not begin_time and not text_content:
-            continue
-        # Determine PT translation match
-        try:
-            z_begin = _parse_seconds_value(begin_time or "0s")
-            z_end = _parse_seconds_value(end_time or begin_time or "0s")
-        except Exception:
-            z_begin = Decimal(0)
-            z_end = z_begin
-        pt_text = match_pt_text(z_begin, z_end)
-        # Fetch pairs for zht text (with simple cache)
-        zht_norm = text_content
-        if zht_norm in pairs_cache:
-            pairs_str = pairs_cache[zht_norm]
-        else:
-            pairs_str = _call_deepseek_pairs(zht_norm)
-            pairs_cache[zht_norm] = pairs_str
-        # Use tab-separated fields for safety; insert pairs between zht and pt
-        line = (
-            f"{index_counter}\t{_sanitize_tsv_field(begin_time)}\t"
-            f"{_sanitize_tsv_field(text_content)}\t{_sanitize_tsv_field(pairs_str)}\t"
-            f"{_sanitize_tsv_field(pt_text)}"
-        )
-        lines.append(line)
-        index_counter += 1
-        _print_progress(idx, total_nodes, prefix="Gerando base/LLM")
-
+    
+    # Handle resume functionality
+    processed_timestamps = set()
     base_out_path = determine_base_output_path(zht_secs_path)
-    base_out_path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    
+    # Determine if we need to resume or start fresh
+    file_mode = 'w'  # Default: overwrite
+    
+    if resume_from_seconds is not None and base_out_path.exists():
+        # Load existing entries to determine what's already been processed
+        try:
+            existing_content = base_out_path.read_text(encoding="utf-8")
+            existing_lines = []
+            for line in existing_content.strip().split('\n'):
+                if line.strip():
+                    parts = line.split('\t')
+                    if len(parts) >= 2:
+                        timestamp_str = parts[1]
+                        if timestamp_str.endswith('s'):
+                            try:
+                                timestamp = float(timestamp_str[:-1])
+                                processed_timestamps.add(timestamp_str)
+                                if timestamp < resume_from_seconds:
+                                    existing_lines.append(line)
+                                    index_counter = max(index_counter, int(parts[0]) + 1)
+                            except (ValueError, IndexError):
+                                pass
+            
+            if existing_lines:
+                print(f"Retomando processamento a partir de {resume_from_seconds}s. {len(existing_lines)} entradas já processadas.")
+                # Rewrite file with only the entries before resume point
+                base_out_path.write_text("\n".join(existing_lines) + "\n", encoding="utf-8")
+                file_mode = 'a'  # Append mode for new entries
+        except Exception:
+            pass
+    
+    # Open file for writing (either fresh or append mode)
+    with base_out_path.open(file_mode, encoding="utf-8") as output_file:
+        for idx, p in enumerate(p_nodes, start=1):
+            begin_time = p.get("begin", "")
+            end_time = p.get("end") or begin_time or ""
+            text_content = _extract_text_content(p)
+            # Skip empty lines (no text and no begin)
+            if not begin_time and not text_content:
+                continue
+                
+            # Skip if resume mode and timestamp is before resume point or already processed
+            if resume_from_seconds is not None:
+                if begin_time in processed_timestamps:
+                    continue
+                try:
+                    current_timestamp = float(begin_time.rstrip('s'))
+                    if current_timestamp < resume_from_seconds:
+                        continue
+                except (ValueError, AttributeError):
+                    pass
+            
+            # Determine PT translation match
+            try:
+                z_begin = _parse_seconds_value(begin_time or "0s")
+                z_end = _parse_seconds_value(end_time or begin_time or "0s")
+            except Exception:
+                z_begin = Decimal(0)
+                z_end = z_begin
+            pt_text = match_pt_text(z_begin, z_end)
+            
+            # Fetch pairs for zht text (with simple cache)
+            zht_norm = text_content
+            if zht_norm in pairs_cache:
+                pairs_str = pairs_cache[zht_norm]
+            else:
+                pairs_str = _call_deepseek_pairs(zht_norm)
+                pairs_cache[zht_norm] = pairs_str
+            
+            # Use tab-separated fields for safety; insert pairs between zht and pt
+            line = (
+                f"{index_counter}\t{_sanitize_tsv_field(begin_time)}\t"
+                f"{_sanitize_tsv_field(text_content)}\t{_sanitize_tsv_field(pairs_str)}\t"
+                f"{_sanitize_tsv_field(pt_text)}"
+            )
+            
+            # Write line immediately to file
+            output_file.write(line + "\n")
+            output_file.flush()  # Ensure it's written to disk immediately
+            
+            index_counter += 1
+            _print_progress(idx, total_nodes, prefix="Gerando base/LLM")
+
     return base_out_path
 
 
@@ -353,6 +406,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument(
         "directory",
         help="Directory to search for 'zht' and 'pt' XML files and produce *_secs.xml outputs",
+    )
+    parser.add_argument(
+        "--resume-from-seconds",
+        type=float,
+        default=None,
+        help="Resume LLM processing from this timestamp onwards - useful to continue interrupted runs",
     )
     return parser.parse_args(argv)
 
@@ -434,7 +493,7 @@ def main(argv: list[str]) -> int:
         process_file(pt_file, pt_out)
         print(f"Arquivo convertido: {pt_out}")
 
-        base_txt = generate_zht_base_file(zht_out, pt_out)
+        base_txt = generate_zht_base_file(zht_out, pt_out, args.resume_from_seconds)
         print(f"Arquivo base gerado: {base_txt}")
     except Exception as exc:  # noqa: BLE001
         print(f"Erro ao processar: {exc}", file=sys.stderr)
