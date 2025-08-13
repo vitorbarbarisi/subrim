@@ -196,23 +196,15 @@ def _print_progress(current: int, total: int, prefix: str = "") -> None:
     """Render a simple progress bar to stderr. Falls back to sparse counters if not a TTY."""
     if total <= 0:
         return
-    try:
-        is_tty = sys.stderr.isatty()
-    except Exception:
-        is_tty = False
-
-    if not is_tty:
-        # Print occasionally to avoid noisy logs
-        if current == total or current % 50 == 0:
-            print(f"{prefix} {current}/{total}", file=sys.stderr)
-        return
-
-    bar_len = 40
-    filled = int(bar_len * current / total)
-    bar = "█" * filled + " " * (bar_len - filled)
+    
+    # Simple text-only progress without fancy characters
     percent = int((current / total) * 100)
-    sys.stderr.write(f"\r{prefix} [{bar}] {percent}% ({current}/{total})")
+    progress_text = f"{prefix} {percent}% ({current}/{total})"
+    
+    # Use only carriage return - no special characters or complex formatting
+    sys.stderr.write(f"\r{progress_text}")
     sys.stderr.flush()
+    
     if current >= total:
         sys.stderr.write("\n")
         sys.stderr.flush()
