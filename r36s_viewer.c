@@ -750,6 +750,60 @@ int main(int argc, char **argv) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
             if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
           }
+        } else if (!menu_active && key == SDLK_r) {
+          // R key unlocks navigation (mirrors R1 shoulder button)
+          locked_on_subtitle = false;
+        } else if (!menu_active && key == SDLK_l) {
+          // L key jumps forward 100 images (mirrors L1 shoulder button)
+          if (list.count > 0) {
+            // Hide PT panel when changing images
+            show_pt = false;
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            
+            // Jump forward 100 images (with wrap-around)
+            index = (index + 100) % list.count;
+            if (current) { SDL_DestroyTexture(current); current = NULL; }
+            current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+            if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
+            
+            // Check if this image has a subtitle - if so, lock navigation
+            long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+            const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+            if (zht_entry && zht_entry->zht_text) {
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              current_text_msg = strdup(zht_entry->zht_text);
+              rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+              refresh_word_layout_for_time(&base, (int)img_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+              locked_on_subtitle = true; // Lock when we find an image with subtitle
+              hover_index = -1; // Reset hover to start
+            } else {
+              if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              show_text = false;
+              locked_on_subtitle = false; // Don't lock on images without subtitle
+            }
+            if (show_pt) {
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+              const BaseEntry *pt_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+              const char *pt = pt_entry ? pt_entry->pt_text : NULL;
+              if (!pt || !*pt) pt = "N/A";
+              current_pt_msg = strdup(pt);
+              if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
+                pt_rect.x = (win_w - pt_rect.w) / 2;
+                int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+                if (base_y < 8) base_y = 8;
+                pt_rect.y = base_y;
+              }
+            }
+            // Update small index label
+            {
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
+              if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+              if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+            }
+          }
         } else if (!menu_active && key == SDLK_a) {
           // Restore default view via keyboard 'A': image + ZHT, no hover, no translation label, PT panel closed, and unlock navigation
           show_pt = false;
@@ -1156,6 +1210,57 @@ int main(int argc, char **argv) {
         } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_RIGHTSHOULDER) {
           // R1 button unlocks navigation (allows continuing navigation after being locked on subtitle)
           locked_on_subtitle = false;
+        } else if (!menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_LEFTSHOULDER) {
+          // L1 button jumps forward 100 images (mirrors keyboard L)
+          if (list.count > 0) {
+            // Hide PT panel when changing images
+            show_pt = false;
+            if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+            if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+            
+            // Jump forward 100 images (with wrap-around)
+            index = (index + 100) % list.count;
+            if (current) { SDL_DestroyTexture(current); current = NULL; }
+            current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
+            if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
+            
+            // Check if this image has a subtitle - if so, lock navigation
+            long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+            const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+            if (zht_entry && zht_entry->zht_text) {
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              current_text_msg = strdup(zht_entry->zht_text);
+              rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
+              refresh_word_layout_for_time(&base, (int)img_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+              locked_on_subtitle = true; // Lock when we find an image with subtitle
+              hover_index = -1; // Reset hover to start
+            } else {
+              if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
+              if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
+              show_text = false;
+              locked_on_subtitle = false; // Don't lock on images without subtitle
+            }
+            if (show_pt) {
+              if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
+              if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
+              const BaseEntry *pt_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+              const char *pt = pt_entry ? pt_entry->pt_text : NULL;
+              if (!pt || !*pt) pt = "N/A";
+              current_pt_msg = strdup(pt);
+              if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
+                pt_rect.x = (win_w - pt_rect.w) / 2;
+                int base_y = show_text ? (text_rect.y - pt_rect.h - 16) : (win_h - pt_rect.h - 24);
+                if (base_y < 8) base_y = 8;
+                pt_rect.y = base_y;
+              }
+            }
+            // Update small index label
+            {
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
+              if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
+              if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
+            }
+          }
         }
       }
     }
