@@ -236,6 +236,41 @@ static void rebuild_subtitle(
   }
 }
 
+static void refresh_word_layout_for_time(
+    const BaseData *base,
+    int time_seconds,
+    const char *current_text_msg,
+    const SubtitleLayout *sub_layout,
+    WordLayout *word_layout,
+    char ***out_pair_words,
+    char ***out_pair_items,
+    int *out_pair_count
+) {
+  free_word_layout(word_layout);
+  if (!current_text_msg || !*current_text_msg || !sub_layout || sub_layout->count <= 0) return;
+  
+  // Find entry by time instead of index
+  const BaseEntry *entry = find_entry_by_time(base, time_seconds);
+  const char *pairs = entry ? entry->pairs_text : NULL;
+  
+  char **words = NULL; int wc = 0;
+  extract_words_from_pairs(pairs, &words, &wc);
+  build_word_layout(current_text_msg, sub_layout, words, wc, word_layout);
+  if (out_pair_words) {
+    if (*out_pair_words) { for (int i = 0; i < (out_pair_count ? *out_pair_count : 0); ++i) free((*out_pair_words)[i]); free(*out_pair_words); }
+    *out_pair_words = words; // transfer ownership
+  } else {
+    for (int i = 0; i < wc; ++i) free(words[i]);
+    free(words);
+  }
+  if (out_pair_items) {
+    // We also store the original items; since our parser keeps only words, reuse words as items placeholder
+    // For now, mirror words into items; the 4th column full string will still be shown when no match
+    *out_pair_items = NULL; // unused placeholder
+  }
+  if (out_pair_count) *out_pair_count = wc;
+}
+
 static void refresh_word_layout_for_index(
     const BaseData *base,
     long img_idx,
@@ -295,6 +330,70 @@ static char *utf8_substr_by_cp(const char *s, int start_cp, int end_cp) {
   char *out = (char *)malloc((size_t)out_len + 1); if (!out) return NULL;
   memcpy(out, s + start_byte, (size_t)out_len); out[out_len] = '\0';
   return out;
+}
+
+static void update_hover_info_by_time(SDL_Renderer *renderer, int win_w, int win_h,
+                              const char *current_text_msg, const BaseData *base, int time_seconds,
+                              const SubtitleLayout *sub_layout, const WordLayout *word_layout,
+                              char **pair_words, int pair_count, int hover_index,
+                              SDL_Texture **hover_tex, SDL_Rect *hover_rect,
+                              const SDL_Rect *subtitle_rect) {
+  if (*hover_tex) { SDL_DestroyTexture(*hover_tex); *hover_tex = NULL; }
+  if (!current_text_msg || !sub_layout || !word_layout || hover_index < 0 || hover_index >= word_layout->count) return;
+  // Extract hovered word text
+  WordSpan span = word_layout->spans[hover_index];
+  char *hover_word = utf8_substr_by_cp(current_text_msg, span.start_cp, span.end_cp);
+  char *display_owned = NULL; // we will allocate a safe copy to avoid use-after-free
+  // Try to find matching item in pairs by word equality
+  if (hover_word && pair_words && pair_count > 0) {
+    // Find entry by time and get pairs text
+    const BaseEntry *entry = find_entry_by_time(base, time_seconds);
+    const char *pairs_full = entry ? entry->pairs_text : NULL;
+    if (pairs_full && *pairs_full) {
+      // find item whose prefix before ':' equals hover_word
+      int cnt = 0; char **words = NULL; char **items = NULL; extract_words_and_items_from_pairs(pairs_full, &words, &items, &cnt);
+      for (int i = 0; i < cnt; ++i) {
+        if (words[i] && strcmp(words[i], hover_word) == 0) {
+          // duplicate the matched item so we can safely free arrays
+          display_owned = strdup(items[i]);
+          break;
+        }
+      }
+      for (int i = 0; i < cnt; ++i) { if (words && words[i]) free(words[i]); if (items && items[i]) free(items[i]); }
+      free(words); free(items);
+    }
+  }
+  if (!display_owned) {
+    // If not matched, fallback to full pairs text from entry
+    const BaseEntry *entry = find_entry_by_time(base, time_seconds);
+    const char *pairs = entry ? entry->pairs_text : NULL;
+    display_owned = strdup(pairs && *pairs ? pairs : "N/A");
+  }
+  // Normalize formatting: ensure single space before '(' if missing
+  if (display_owned) {
+    char *lp = strchr(display_owned, '(');
+    if (lp && lp > display_owned && *(lp - 1) != ' ') {
+      size_t pre_len = (size_t)(lp - display_owned);
+      size_t rest_len = strlen(lp); // includes '('
+      char *norm = (char *)malloc(pre_len + 1 + rest_len + 1);
+      if (norm) {
+        memcpy(norm, display_owned, pre_len);
+        norm[pre_len] = ' ';
+        memcpy(norm + pre_len + 1, lp, rest_len + 1); // includes terminator
+        free(display_owned);
+        display_owned = norm;
+      }
+    }
+  }
+  if (display_owned) {
+    if (recreate_hover_label(renderer, win_w, win_h, display_owned, hover_tex, hover_rect) == 0 && *hover_tex) {
+      // Position above the subtitle (ZHT text), centered horizontally like PT panel
+      hover_rect->x = (win_w - hover_rect->w) / 2;
+      hover_rect->y = subtitle_rect->y - hover_rect->h - 8;
+    }
+    free(display_owned);
+  }
+  if (hover_word) free(hover_word);
 }
 
 static void update_hover_info(SDL_Renderer *renderer, int win_w, int win_h,
@@ -488,7 +587,7 @@ int main(int argc, char **argv) {
     } else {
       current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
       if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
-      if (current) fprintf(stdout, "Showing (1/%d): %s\n", list.count, list.paths[index]);
+
       // On first load, attempt to load base file for the directory
       // Determine directory from first image path
       if (list.count > 0 && list.paths[0]) {
@@ -507,13 +606,14 @@ int main(int argc, char **argv) {
           }
         }
       }
-      // If there is a base entry matching the image index, render its zht at bottom
-      long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
-      if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+      // If there is a base entry matching the image time, render its zht at bottom
+      long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+      const BaseEntry *entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+      if (entry && entry->zht_text) {
         if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
-        current_text_msg = strdup(base.zht_by_index[img_idx]);
+        current_text_msg = strdup(entry->zht_text);
         rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+        refresh_word_layout_for_time(&base, (int)img_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
       } else {
         if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
         if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
@@ -521,7 +621,7 @@ int main(int argc, char **argv) {
       }
       // Build top-left small label with current numeric index
       {
-        char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+        char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
         if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
         if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) {
           idx_rect.x = 8; idx_rect.y = 8;
@@ -579,8 +679,8 @@ int main(int argc, char **argv) {
           // Recreate text at new size/position if visible
           if (show_text && current_text_msg) rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
           // rebuild word layout on resize
-          if (current_text_msg) { long tmp_idx = 0; basename_numeric_value(list.paths[index], &tmp_idx);
-            refresh_word_layout_for_index(&base, tmp_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count); }
+          if (current_text_msg) { long tmp_time = 0; basename_numeric_value(list.paths[index], &tmp_time);
+            refresh_word_layout_for_time(&base, (int)tmp_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count); }
           if (show_pt && current_pt_msg) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
             if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
@@ -627,8 +727,14 @@ int main(int argc, char **argv) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
             if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
             const char *pt = NULL;
-            long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
-            if (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) pt = base.pt_by_index[img_idx];
+            long img_time = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_time) : false;
+            if (ok) {
+              const BaseEntry *entry = find_entry_by_time(&base, (int)img_time);
+              pt = entry ? entry->pt_text : NULL;
+            } else {
+              pt = NULL;
+            }
+            if (pt) { /* found via time lookup */ }
             if (!pt || !*pt) pt = "N/A";
             current_pt_msg = strdup(pt);
             if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
@@ -648,13 +754,14 @@ int main(int argc, char **argv) {
           if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
           hover_index = -1;
           if (hover_info_tex) { SDL_DestroyTexture(hover_info_tex); hover_info_tex = NULL; }
-          long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
-          const char *zht = (ok && img_idx > 0 && base.capacity > img_idx) ? base.zht_by_index[img_idx] : NULL;
+          long img_time = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_time) : false;
+          const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+          const char *zht = zht_entry ? zht_entry->zht_text : NULL;
           if (zht && *zht) {
             if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
             current_text_msg = strdup(zht);
             rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-            refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+            refresh_word_layout_for_time(&base, (int)img_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
           }
         } else if (!menu_active && key == SDLK_UP) {
           if (list.count > 0) {
@@ -667,14 +774,15 @@ int main(int argc, char **argv) {
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
-            if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
+
             // Update overlay for this image
-            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
-            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+            long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+            const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+            if (zht_entry && zht_entry->zht_text) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
-              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              current_text_msg = strdup(zht_entry->zht_text);
               rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+        refresh_word_layout_for_time(&base, (int)img_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
             } else {
               if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
@@ -683,7 +791,8 @@ int main(int argc, char **argv) {
             if (show_pt) {
               if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
               if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
-              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
+              const BaseEntry *pt_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+              const char *pt = pt_entry ? pt_entry->pt_text : NULL;
               if (!pt || !*pt) pt = "N/A";
               current_pt_msg = strdup(pt);
               if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
@@ -695,7 +804,7 @@ int main(int argc, char **argv) {
             }
             // Update small index label
             {
-              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
               if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
               if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
             }
@@ -711,14 +820,15 @@ int main(int argc, char **argv) {
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
-            if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
+
             // Update overlay for this image
-            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
-            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+            long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+            const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+            if (zht_entry && zht_entry->zht_text) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
-              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              current_text_msg = strdup(zht_entry->zht_text);
               rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
-        refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, NULL, &pair_words_count);
+        refresh_word_layout_for_time(&base, (int)img_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, NULL, &pair_words_count);
             } else {
               if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
@@ -727,7 +837,8 @@ int main(int argc, char **argv) {
             if (show_pt) {
               if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
               if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
-              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
+              const BaseEntry *pt_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+              const char *pt = pt_entry ? pt_entry->pt_text : NULL;
               if (!pt || !*pt) pt = "N/A";
               current_pt_msg = strdup(pt);
               if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
@@ -739,7 +850,7 @@ int main(int argc, char **argv) {
             }
             // Update small index label
             {
-              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
               if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
               if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
             }
@@ -754,8 +865,8 @@ int main(int argc, char **argv) {
               if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
             }
             if (hover_index < 0) hover_index = 0; else hover_index = (hover_index + 1) % word_layout.count;
-            long img_idx = 0; basename_numeric_value(list.paths[index], &img_idx);
-            update_hover_info(renderer, win_w, win_h, current_text_msg, &base, img_idx, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
+            long img_time = 0; basename_numeric_value(list.paths[index], &img_time);
+            update_hover_info_by_time(renderer, win_w, win_h, current_text_msg, &base, (int)img_time, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
           }
         } else if (!menu_active && key == SDLK_LEFT) {
           if (show_text && word_layout.count > 0) {
@@ -766,8 +877,8 @@ int main(int argc, char **argv) {
               if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
             }
             if (hover_index < 0) hover_index = word_layout.count - 1; else hover_index = (hover_index - 1 + word_layout.count) % word_layout.count;
-            long img_idx = 0; basename_numeric_value(list.paths[index], &img_idx);
-            update_hover_info(renderer, win_w, win_h, current_text_msg, &base, img_idx, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
+            long img_time = 0; basename_numeric_value(list.paths[index], &img_time);
+            update_hover_info_by_time(renderer, win_w, win_h, current_text_msg, &base, (int)img_time, &sub_layout, &word_layout, pair_words_cache, pair_words_count, hover_index, &hover_info_tex, &hover_info_rect, &text_rect);
           }
         } else if (menu_active && (key == SDLK_DOWN || key == SDLK_s)) {
           if (menu.count > 0) menu.selected = (menu.selected + 1) % menu.count;
@@ -786,15 +897,16 @@ int main(int argc, char **argv) {
             if (list.count > 0) {
               current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
               // set overlay for first image
-              long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
-              if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+              long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+              const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+              if (zht_entry && zht_entry->zht_text) {
                 if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
-                current_text_msg = strdup(base.zht_by_index[img_idx]);
+                current_text_msg = strdup(zht_entry->zht_text);
                 rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
                 // Build word layout for the newly selected first image
                 free_word_layout(&word_layout);
                 char **words_m = NULL; int wc_m = 0;
-                const char *pairs_m = (base.pairs_by_index && img_idx > 0 && base.capacity > img_idx) ? base.pairs_by_index[img_idx] : NULL;
+                const char *pairs_m = zht_entry ? zht_entry->pairs_text : NULL;
                 extract_words_from_pairs(pairs_m, &words_m, &wc_m);
                 build_word_layout(current_text_msg, &sub_layout, words_m, wc_m, &word_layout);
                 for (int ii = 0; ii < wc_m; ++ii) free(words_m[ii]);
@@ -806,7 +918,7 @@ int main(int argc, char **argv) {
               }
               // Update small index label
               {
-                char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+                char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
                 if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
                 if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
               }
@@ -864,11 +976,12 @@ int main(int argc, char **argv) {
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
-            if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
-            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
-            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+
+            long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+            const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+            if (zht_entry && zht_entry->zht_text) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
-              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              current_text_msg = strdup(zht_entry->zht_text);
               rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
             } else {
               if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
@@ -878,7 +991,8 @@ int main(int argc, char **argv) {
             if (show_pt) {
               if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
               if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
-              const char *pt = (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) ? base.pt_by_index[img_idx] : NULL;
+              const BaseEntry *pt_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+              const char *pt = pt_entry ? pt_entry->pt_text : NULL;
               if (!pt || !*pt) pt = "N/A";
               current_pt_msg = strdup(pt);
               if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {
@@ -890,7 +1004,7 @@ int main(int argc, char **argv) {
             }
             // Update small index label
             {
-              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
               if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
               if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
             }
@@ -906,11 +1020,12 @@ int main(int argc, char **argv) {
             if (current) { SDL_DestroyTexture(current); current = NULL; }
             current = load_texture_scaled(renderer, list.paths[index], win_w, win_h, &dst_rect);
             if (current && cover_mode) compute_cover_src_dst(current, win_w, win_h, &src_rect, &dst_rect);
-            if (current) fprintf(stdout, "Showing (%d/%d): %s\n", index + 1, list.count, list.paths[index]);
-            long img_idx = 0; bool ok = basename_numeric_value(list.paths[index], &img_idx);
-            if (ok && img_idx > 0 && base.capacity > img_idx && base.zht_by_index[img_idx]) {
+
+            long img_time = 0; bool ok = basename_numeric_value(list.paths[index], &img_time);
+            const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+            if (zht_entry && zht_entry->zht_text) {
               if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
-              current_text_msg = strdup(base.zht_by_index[img_idx]);
+              current_text_msg = strdup(zht_entry->zht_text);
               rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
             } else {
               if (text_tex) { SDL_DestroyTexture(text_tex); text_tex = NULL; }
@@ -919,7 +1034,7 @@ int main(int argc, char **argv) {
             }
             // Update small index label
             {
-              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_idx > 0) ? img_idx : (index + 1));
+              char buf[32]; snprintf(buf, sizeof(buf), "%ld", (ok && img_time > 0) ? img_time : (index + 1));
               if (idx_tex) { SDL_DestroyTexture(idx_tex); idx_tex = NULL; }
               if (recreate_text_px(renderer, buf, 14, &idx_tex, &idx_rect) == 0 && idx_tex) { idx_rect.x = 8; idx_rect.y = 8; }
             }
@@ -954,14 +1069,15 @@ int main(int argc, char **argv) {
           hover_index = -1;
           if (hover_info_tex) { SDL_DestroyTexture(hover_info_tex); hover_info_tex = NULL; }
           // Ensure ZHT subtitle is visible for current image (when available)
-          long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
-          const char *zht = (ok && img_idx > 0 && base.capacity > img_idx) ? base.zht_by_index[img_idx] : NULL;
+          long img_time = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_time) : false;
+          const BaseEntry *zht_entry = ok ? find_entry_by_time(&base, (int)img_time) : NULL;
+          const char *zht = zht_entry ? zht_entry->zht_text : NULL;
           if (zht && *zht) {
             if (current_text_msg) { free(current_text_msg); current_text_msg = NULL; }
             current_text_msg = strdup(zht);
             rebuild_subtitle(renderer, win_w, win_h, current_text_msg, &text_tex, &text_rect, &sub_layout, &show_text, &hover_index);
             // Prepare word layout for future hovers (even though hover is off now)
-            refresh_word_layout_for_index(&base, img_idx, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
+            refresh_word_layout_for_time(&base, (int)img_time, current_text_msg, &sub_layout, &word_layout, &pair_words_cache, &pair_items_cache, &pair_words_count);
           }
         } else if (menu_active && e.cbutton.button == SDL_CONTROLLER_BUTTON_DPAD_DOWN) {
           if (menu.count > 0) menu.selected = (menu.selected + 1) % menu.count;
@@ -977,8 +1093,14 @@ int main(int argc, char **argv) {
             if (pt_tex) { SDL_DestroyTexture(pt_tex); pt_tex = NULL; }
             if (current_pt_msg) { free(current_pt_msg); current_pt_msg = NULL; }
             const char *pt = NULL;
-            long img_idx = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_idx) : false;
-            if (ok && img_idx > 0 && base.capacity > img_idx && base.pt_by_index) pt = base.pt_by_index[img_idx];
+            long img_time = 0; bool ok = (!menu_active && list.count > 0) ? basename_numeric_value(list.paths[index], &img_time) : false;
+            if (ok) {
+              const BaseEntry *entry = find_entry_by_time(&base, (int)img_time);
+              pt = entry ? entry->pt_text : NULL;
+            } else {
+              pt = NULL;
+            }
+            if (pt) { /* found via time lookup */ }
             if (!pt || !*pt) pt = "N/A";
             current_pt_msg = strdup(pt);
             if (recreate_pt_panel(renderer, win_w, win_h, current_pt_msg, &pt_tex, &pt_rect) == 0 && pt_tex) {

@@ -33,6 +33,24 @@ static char *strdup_safe(const char *s) {
   return d;
 }
 
+static void ensure_capacity_entries(BaseData *bd, int needed_capacity) {
+  if (needed_capacity <= bd->entries_capacity) return;
+  int new_cap = bd->entries_capacity > 0 ? bd->entries_capacity : 16;
+  while (new_cap < needed_capacity) new_cap *= 2;
+  
+  BaseEntry *new_entries = (BaseEntry *)calloc((size_t)new_cap, sizeof(BaseEntry));
+  if (!new_entries) return;
+  
+  // Copy existing entries
+  for (int i = 0; i < bd->count; ++i) {
+    new_entries[i] = bd->entries[i];
+  }
+  
+  if (bd->entries) free(bd->entries);
+  bd->entries = new_entries;
+  bd->entries_capacity = new_cap;
+}
+
 static void ensure_capacity_zht(BaseData *bd, int needed_index) {
   if (needed_index < bd->capacity) return;
   int new_cap = bd->capacity > 0 ? bd->capacity : 16;
@@ -57,6 +75,18 @@ static void ensure_capacity_zht(BaseData *bd, int needed_index) {
 
 void free_base_data(BaseData *bd) {
   if (!bd) return;
+  
+  // Free new entries structure
+  if (bd->entries) {
+    for (int i = 0; i < bd->count; ++i) {
+      if (bd->entries[i].zht_text) free(bd->entries[i].zht_text);
+      if (bd->entries[i].pairs_text) free(bd->entries[i].pairs_text);
+      if (bd->entries[i].pt_text) free(bd->entries[i].pt_text);
+    }
+    free(bd->entries);
+  }
+  
+  // Free legacy structure
   if (bd->zht_by_index) {
     for (int i = 0; i < bd->capacity; ++i) {
       if (bd->zht_by_index[i]) free(bd->zht_by_index[i]);
@@ -75,6 +105,11 @@ void free_base_data(BaseData *bd) {
     }
     free(bd->pt_by_index);
   }
+  
+  // Reset all fields
+  bd->entries = NULL;
+  bd->count = 0;
+  bd->entries_capacity = 0;
   bd->zht_by_index = NULL;
   bd->pairs_by_index = NULL;
   bd->pt_by_index = NULL;
@@ -134,26 +169,50 @@ BaseData load_base_file_for_directory(const char *directory) {
     strip_trailing_newline(line);
     if (line[0] == '\0') continue;
     char *saveptr = NULL;
-    char *field0 = strtok_r(line, "\t", &saveptr);
+    char *field0 = strtok_r(line, "\t", &saveptr); // index (for legacy compatibility)
     if (!field0) continue;
-    char *field1 = strtok_r(NULL, "\t", &saveptr); (void)field1;
-    char *field2 = strtok_r(NULL, "\t", &saveptr);
-    char *field3 = strtok_r(NULL, "\t", &saveptr);
+    char *field1 = strtok_r(NULL, "\t", &saveptr); // time (e.g., "120s")
+    char *field2 = strtok_r(NULL, "\t", &saveptr); // zht text
+    char *field3 = strtok_r(NULL, "\t", &saveptr); // pairs
     char *field4 = strtok_r(NULL, "\t", &saveptr); // pt (optional)
-    if (!field2) continue;
+    if (!field1 || !field2) continue;
+    
+    // Parse time from field1 (e.g., "120s" -> 120)
+    int time_seconds = 0;
+    if (field1) {
+      char *endptr = NULL;
+      long time_val = strtol(field1, &endptr, 10);
+      if (endptr != field1 && time_val >= 0 && time_val <= 1000000) {
+        time_seconds = (int)time_val;
+      } else {
+        continue; // Invalid time format
+      }
+    }
+    
+    // Add to new entries structure
+    ensure_capacity_entries(&bd, bd.count + 1);
+    BaseEntry *entry = &bd.entries[bd.count];
+    entry->time_seconds = time_seconds;
+    entry->zht_text = strdup_safe(field2);
+    entry->pairs_text = field3 ? strdup_safe(field3) : NULL;
+    entry->pt_text = field4 ? strdup_safe(field4) : NULL;
+    bd.count++;
+    
+    // Also populate legacy structure for backward compatibility
     char *endptr = NULL;
     long idx = strtol(field0, &endptr, 10);
-    if (endptr == field0 || idx <= 0 || idx > 1000000) continue;
-    ensure_capacity_zht(&bd, (int)idx + 1);
-    if (bd.zht_by_index[(int)idx]) { free(bd.zht_by_index[(int)idx]); bd.zht_by_index[(int)idx] = NULL; }
-    bd.zht_by_index[(int)idx] = strdup_safe(field2);
-    if (field3) {
-      if (bd.pairs_by_index[(int)idx]) { free(bd.pairs_by_index[(int)idx]); bd.pairs_by_index[(int)idx] = NULL; }
-      bd.pairs_by_index[(int)idx] = strdup_safe(field3);
-    }
-    if (field4) {
-      if (bd.pt_by_index[(int)idx]) { free(bd.pt_by_index[(int)idx]); bd.pt_by_index[(int)idx] = NULL; }
-      bd.pt_by_index[(int)idx] = strdup_safe(field4);
+    if (endptr != field0 && idx > 0 && idx <= 1000000) {
+      ensure_capacity_zht(&bd, (int)idx + 1);
+      if (bd.zht_by_index[(int)idx]) { free(bd.zht_by_index[(int)idx]); bd.zht_by_index[(int)idx] = NULL; }
+      bd.zht_by_index[(int)idx] = strdup_safe(field2);
+      if (field3) {
+        if (bd.pairs_by_index[(int)idx]) { free(bd.pairs_by_index[(int)idx]); bd.pairs_by_index[(int)idx] = NULL; }
+        bd.pairs_by_index[(int)idx] = strdup_safe(field3);
+      }
+      if (field4) {
+        if (bd.pt_by_index[(int)idx]) { free(bd.pt_by_index[(int)idx]); bd.pt_by_index[(int)idx] = NULL; }
+        bd.pt_by_index[(int)idx] = strdup_safe(field4);
+      }
     }
   }
 
@@ -161,6 +220,19 @@ BaseData load_base_file_for_directory(const char *directory) {
   if (preferred) free(preferred);
   if (fallback) free(fallback);
   return bd;
+}
+
+const BaseEntry* find_entry_by_time(const BaseData *bd, int time_seconds) {
+  if (!bd || !bd->entries) return NULL;
+  
+  // Linear search for now (could be optimized with binary search if entries are sorted)
+  for (int i = 0; i < bd->count; ++i) {
+    if (bd->entries[i].time_seconds == time_seconds) {
+      return &bd->entries[i];
+    }
+  }
+  
+  return NULL; // Not found
 }
 
 

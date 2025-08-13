@@ -1,432 +1,290 @@
 #!/usr/bin/env python3
 """
-Periodic screenshoter for macOS with crop-and-scale for R36S
+Simple periodic screenshoter for macOS
 
-- Captures the screen every N seconds for a given duration (default: 5s for 60s)
-- Crops the central area by a percentage (default: 30%)
-- Produces images sized for R36S compatibility (default: 640x480) using
-  letterboxing to preserve aspect ratio
+Takes a screenshot every second for up to 1 hour (3600 screenshots max).
+Resizes images for R36S compatibility with letterboxing.
 
-Examples:
-  python3 screenshoter.py
-  python3 screenshoter.py --interval 5 --duration 60 --outdir screenshots \
-    --crop-percent 30 --target-width 640 --target-height 480
-  python3 screenshoter.py flipper  # Auto-detects existing PNGs and resumes
-  python3 screenshoter.py flipper --resume-from-seconds 120.5  # Manual resume
+Usage:
+  python3 screenshoter.py <directory_name>
+  
+Example:
+  python3 screenshoter.py test       # Saves to assets/test/
+  python3 screenshoter.py flipper    # Saves to assets/flipper/
 """
 
-from __future__ import annotations
-
 import argparse
-from datetime import datetime, timezone
-from pathlib import Path
 import subprocess
 import sys
 import time
+from pathlib import Path
 from typing import Tuple
 
 try:
     from PIL import Image
-except Exception as _exc:  # noqa: BLE001
-    Image = None  # type: ignore[assignment]
+except ImportError:
+    print("Erro: PIL (Pillow) não encontrado. Instale com: pip install Pillow")
+    sys.exit(1)
 
 
-def parse_args(argv: list[str]) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Take periodic screenshots using macOS screencapture")
-    parser.add_argument(
-        "directory",
-        nargs="?",
-        default=None,
-        help="Optional directory name inside local 'assets' to auto-find *_secs_base.txt and save output in that folder - e.g., 'flipper'",
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="Tira screenshots a cada segundo por até 1 hora",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Exemplos:
+  python3 screenshoter.py test       # Salva em assets/test/
+  python3 screenshoter.py flipper    # Salva em assets/flipper/
+        """
     )
+    
     parser.add_argument(
-        "--base-file",
-        type=str,
-        default=None,
-        help="Optional path to a *_base.txt file (TSV) with seconds in the second column; if provided, screenshots are taken at those timestamps instead of at a fixed interval",
+        "directory", 
+        help="Nome do diretório dentro de assets/ onde salvar as imagens"
     )
+    
+
+    
     parser.add_argument(
-        "--offset-seconds",
-        type=float,
-        default=0.0,
-        help="Time offset added to each timestamp read from --base-file - can be negative - to synchronize with current playback position",
-    )
-    parser.add_argument(
-        "--resume-from-seconds",
-        type=float,
-        default=None,
-        help="Resume capture from this timestamp onwards",
-    )
-    parser.add_argument(
-        "--interval",
-        type=float,
-        default=5.0,
-        help="Interval between screenshots in seconds - default: 5",
-    )
-    parser.add_argument(
-        "--duration",
-        type=float,
-        default=60.0,
-        help="Total duration to run in seconds - default: 60",
-    )
-    parser.add_argument(
-        "--outdir",
-        type=str,
-        default="screenshots",
-        help="Output directory to save screenshots - default: screenshots",
-    )
-    parser.add_argument(
-        "--crop-percent",
-        type=float,
-        default=30.0,
-        help="Percentage to crop from each dimension - central crop - 30 keeps 70% - default: 30",
-    )
-    parser.add_argument(
-        "--target-width",
-        type=int,
+        "--target-width", 
+        type=int, 
         default=640,
-        help="Target output width in pixels - default: 640",
+        help="Largura alvo das imagens. Padrão: 640"
     )
+    
     parser.add_argument(
-        "--target-height",
-        type=int,
+        "--target-height", 
+        type=int, 
         default=480,
-        help="Target output height in pixels - default: 480",
+        help="Altura alvo das imagens. Padrão: 480"
     )
-    return parser.parse_args(argv)
+    
+    parser.add_argument(
+        "--max-duration", 
+        type=int, 
+        default=3600,
+        help="Duração máxima em segundos - 1h = 3600s. Padrão: 3600"
+    )
+    
+    parser.add_argument(
+        "--assets-root", 
+        default="assets",
+        help="Diretório raiz dos assets. Padrão: assets"
+    )
+    
+    return parser.parse_args()
 
 
-def ensure_output_directory(directory_path: Path) -> None:
-    directory_path.mkdir(parents=True, exist_ok=True)
+def countdown(seconds: int) -> None:
+    """Display a countdown timer."""
+    for i in range(seconds, 0, -1):
+        print(f"Iniciando em {i} segundos...", end="\r", flush=True)
+        time.sleep(1)
+    print(" " * 30, end="\r")  # Clear the line
+    print("🚀 Iniciando capturas!")
 
 
-def generate_filename(output_dir: Path, sequence_index: int) -> Path:
-    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
-    return output_dir / f"screenshot_{sequence_index:03d}_{timestamp}.png"
-
-
-def countdown(seconds: int = 5) -> None:
-    if seconds <= 0:
-        return
-    for remaining in range(seconds, 0, -1):
+def take_screenshot() -> bytes | None:
+    """Take a screenshot using macOS screencapture and return raw image data."""
+    import tempfile
+    import os
+    
+    try:
+        # Create temporary file
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as temp_file:
+            temp_path = temp_file.name
+        
+        # Take screenshot to file
+        result = subprocess.run(
+            ["screencapture", "-x", "-t", "png", temp_path],
+            capture_output=True,
+            check=True,
+            timeout=10
+        )
+        
+        # Read file content
+        with open(temp_path, 'rb') as f:
+            image_data = f.read()
+        
+        # Clean up temporary file
+        os.unlink(temp_path)
+        
+        return image_data
+        
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, OSError) as e:
+        print(f"Erro ao capturar tela: {e}")
+        # Clean up temp file if it exists
         try:
-            print(f"Iniciando em {remaining}…")
-        except Exception:
+            if 'temp_path' in locals():
+                os.unlink(temp_path)
+        except:
             pass
-        time.sleep(1.0)
-    print(f"Agora!")
-
-def take_screenshot(destination_path: Path) -> None:
-    completed = subprocess.run(
-        ["screencapture", "-x", str(destination_path)],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"screencapture failed: {completed.stderr.strip() or completed.stdout.strip()}")
+        return None
 
 
-def compute_central_crop_box(width: int, height: int, crop_percent: float) -> Tuple[int, int, int, int]:
-    if crop_percent < 0:
-        crop_percent = 0.0
-    if crop_percent > 90:
-        crop_percent = 90.0  # prevent degenerate tiny region
-    keep_ratio = 1.0 - (crop_percent / 100.0)
-    new_w = int(width * keep_ratio)
-    new_h = int(height * keep_ratio)
-    left = (width - new_w) // 2
-    top = (height - new_h) // 2
-    right = left + new_w
-    bottom = top + new_h
-    return left, top, right, bottom
-
-
-def letterbox_resize(image: Image.Image, target_w: int, target_h: int) -> Image.Image:  # type: ignore[name-defined]
-    src_w, src_h = image.size
-    if src_w == 0 or src_h == 0 or target_w <= 0 or target_h <= 0:
-        return image
-    scale = min(target_w / src_w, target_h / src_h)
-    new_w = max(1, int(src_w * scale))
-    new_h = max(1, int(src_h * scale))
-    resized = image.resize((new_w, new_h), Image.LANCZOS)
-    canvas = Image.new("RGB", (target_w, target_h), (0, 0, 0))
-    x = (target_w - new_w) // 2
-    y = (target_h - new_h) // 2
-    canvas.paste(resized, (x, y))
-    return canvas
-
-
-def crop_and_scale_inplace(path: Path, crop_percent: float, target_w: int, target_h: int) -> None:
-    if Image is None:
-        raise RuntimeError("Pillow is required. Install with: pip install pillow")
-    with Image.open(path) as im:
-        im = im.convert("RGB")
-        box = compute_central_crop_box(im.width, im.height, crop_percent)
-        cropped = im.crop(box)
-        final_img = letterbox_resize(cropped, target_w, target_h)
-        final_img.save(path, format="PNG", optimize=True)
-
-
-def run_scheduler(interval_seconds: float, total_duration_seconds: float, output_dir: Path, crop_percent: float, target_w: int, target_h: int) -> int:
-    if interval_seconds <= 0:
-        print("Interval must be positive.", file=sys.stderr)
-        return 2
-    if total_duration_seconds <= 0:
-        print("Duration must be positive.", file=sys.stderr)
-        return 2
-    if Image is None:
-        print("Pillow not installed. Run: pip install pillow", file=sys.stderr)
-        return 2
-
-    ensure_output_directory(output_dir)
-
-    # Pre-start 5s countdown
-    countdown(5)
-
-    start_time = time.monotonic()
-    next_fire_time = start_time
-    end_time = start_time + total_duration_seconds
-    sequence_index = 0
-
-    while True:
-        now = time.monotonic()
-        if now >= end_time:
-            break
-
-        if now < next_fire_time:
-            time.sleep(next_fire_time - now)
-            now = time.monotonic()
-
-        destination = generate_filename(output_dir, sequence_index)
-        try:
-            take_screenshot(destination)
-            crop_and_scale_inplace(destination, crop_percent=crop_percent, target_w=target_w, target_h=target_h)
-        except Exception as exc:  # noqa: BLE001 - surface error and exit
-            print(f"Error taking screenshot: {exc}", file=sys.stderr)
-            return 1
-
-        sequence_index += 1
-        next_fire_time += interval_seconds
-
-    return 0
-
-
-def _parse_seconds_field(field_text: str) -> float | None:
-    """Parse a field like '186.645s' to float seconds. Returns None if unparsable.
-
-    Accepts integers and decimals, requires trailing 's' (case-insensitive).
+def scale_image(image_data: bytes, target_size: Tuple[int, int]) -> Image.Image | None:
     """
-    if not field_text:
-        return None
-    value = field_text.strip().lower()
-    if not value.endswith("s"):
-        return None
-    numeric = value[:-1]
-    try:
-        return float(numeric)
-    except Exception:
-        return None
-
-
-def load_schedule_from_base_file(base_file_path: Path) -> list[tuple[int, float]]:
-    """Read a TSV base file and return a list of (index, seconds).
-
-    Expected layout per line: index<TAB>seconds<TAB>...
-    Falls back to scanning fields to find the first seconds-shaped value.
-    Lines that cannot be parsed are skipped.
+    Scale image to target size with letterboxing to preserve aspect ratio.
+    
+    Args:
+        image_data: Raw PNG image data
+        target_size: (width, height) tuple for final size
+        
+    Returns:
+        Processed PIL Image or None if error
     """
-    lines = base_file_path.read_text(encoding="utf-8").splitlines()
-    schedule: list[tuple[int, float]] = []
-    for raw_line in lines:
-        line = raw_line.strip()
-        if not line:
-            continue
-        parts = line.split("\t")
-        if not parts:
-            continue
-        # Try to parse index (first column)
-        try:
-            idx = int(parts[0].strip())
-        except Exception:
-            # If no leading index, use running length + 1 later
-            idx = len(schedule) + 1
-        # Prefer the second column as seconds
-        seconds_value: float | None = None
-        if len(parts) >= 2:
-            seconds_value = _parse_seconds_field(parts[1])
-        if seconds_value is None:
-            # Fallback: find the first seconds-shaped field
-            for field in parts:
-                seconds_value = _parse_seconds_field(field)
-                if seconds_value is not None:
-                    break
-        if seconds_value is None:
-            continue
-        schedule.append((idx, seconds_value))
-    return schedule
-
-
-def run_from_base_file(
-    base_file: Path,
-    offset_seconds: float,
-    output_dir: Path,
-    crop_percent: float,
-    target_w: int,
-    target_h: int,
-    resume_from_seconds: float | None = None,
-) -> int:
-    if Image is None:
-        print("Pillow not installed. Run: pip install pillow", file=sys.stderr)
-        return 2
-
-    if not base_file.exists() or not base_file.is_file():
-        print(f"Base file not found: {base_file}", file=sys.stderr)
-        return 2
-
-    ensure_output_directory(output_dir)
-
     try:
-        schedule = load_schedule_from_base_file(base_file)
-    except Exception as exc:  # noqa: BLE001
-        print(f"Failed to read base file: {exc}", file=sys.stderr)
-        return 2
-
-    if not schedule:
-        print("No valid timestamps found in base file.", file=sys.stderr)
-        return 2
-
-    # Auto-detect existing images and determine resume point
-    auto_resume_from_seconds = None
-    existing_images = set()
-    
-    # Scan output directory for existing PNG files
-    if output_dir.exists():
-        for png_file in output_dir.glob("*.png"):
-            try:
-                # Extract index from filename (e.g., "25.png" -> 25)
-                index_str = png_file.stem
-                if index_str.isdigit():
-                    existing_images.add(int(index_str))
-            except (ValueError, AttributeError):
-                pass
-    
-    # Determine resume strategy
-    if resume_from_seconds is not None:
-        # Manual resume parameter provided
-        auto_resume_from_seconds = resume_from_seconds
-        print(f"Manual resume from {resume_from_seconds:.3f}s specified.")
-    elif existing_images:
-        # Auto-resume: find the first missing image index
-        all_indices = {idx for idx, _ in schedule}
-        missing_indices = all_indices - existing_images
+        # Load image from bytes
+        from io import BytesIO
+        img = Image.open(BytesIO(image_data))
         
-        if missing_indices:
-            # Find the timestamp for the first missing index
-            first_missing_idx = min(missing_indices)
-            for idx, secs in schedule:
-                if idx == first_missing_idx:
-                    auto_resume_from_seconds = secs
-                    break
-            
-            print(f"Detected {len(existing_images)} existing images. Auto-resuming from index {first_missing_idx} ({auto_resume_from_seconds:.3f}s).")
-        else:
-            print(f"All {len(existing_images)} images already exist. Nothing to process.")
-            return 0
+        # Scale with letterboxing to preserve aspect ratio
+        target_w, target_h = target_size
+        img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
+        
+        # Create final image with black letterboxing
+        final_img = Image.new('RGB', (target_w, target_h), (0, 0, 0))
+        
+        # Center the thumbnail
+        paste_x = (target_w - img.width) // 2
+        paste_y = (target_h - img.height) // 2
+        final_img.paste(img, (paste_x, paste_y))
+        
+        return final_img
+        
+    except Exception as e:
+        print(f"Erro ao processar imagem: {e}")
+        return None
+
+
+def find_next_index(output_dir: Path) -> int:
+    """Find the next index to continue from by looking at existing PNG files."""
+    if not output_dir.exists():
+        return 1
     
-    # Filter schedule based on resume point
-    if auto_resume_from_seconds is not None:
-        original_count = len(schedule)
-        schedule = [(idx, secs) for idx, secs in schedule if secs >= auto_resume_from_seconds]
-        filtered_count = len(schedule)
-        
-        if resume_from_seconds is not None:
-            print(f"Manual resume: {original_count - filtered_count} timestamps skipped, {filtered_count} remaining")
-        else:
-            print(f"Auto-resume: {original_count - filtered_count} timestamps skipped, {filtered_count} remaining")
-        
-        if not schedule:
-            print(f"No timestamps found at or after {auto_resume_from_seconds:.3f}s in base file.", file=sys.stderr)
-            return 2
-
-    # Pre-start 5s countdown
-    countdown(5)
-
-    start_monotonic = time.monotonic()
-    sequence_index = 0
-
-    for idx_value, seconds_value in schedule:
-        fire_time = start_monotonic + seconds_value + offset_seconds
-        now = time.monotonic()
-        if fire_time > now:
-            time.sleep(fire_time - now)
-        # Name screenshot file exactly as the base index (e.g., 1.png)
-        safe_index = idx_value if idx_value > 0 else (sequence_index + 1)
-        destination = output_dir / f"{safe_index}.png"
+    max_index = 0
+    for png_file in output_dir.glob("*.png"):
         try:
-            take_screenshot(destination)
-            crop_and_scale_inplace(destination, crop_percent=crop_percent, target_w=target_w, target_h=target_h)
-        except Exception as exc:  # noqa: BLE001
-            print(f"Error taking screenshot at {seconds_value:.3f}s (idx {idx_value}): {exc}", file=sys.stderr)
-            return 1
-        sequence_index += 1
+            index = int(png_file.stem)
+            max_index = max(max_index, index)
+        except ValueError:
+            continue
+    
+    # Continue from the last index + 1
+    return max_index + 1
 
-    return 0
 
-
-def main(argv: list[str]) -> int:
-    args = parse_args(argv)
-    # Auto mode via positional 'directory'
-    assets_root = Path(__file__).resolve().parent / "assets"
-    if args.directory:
-        base_dir = (assets_root / args.directory).resolve()
-        if not base_dir.exists() or not base_dir.is_dir():
-            print(f"Erro: diretório dentro de 'assets' não encontrado: {base_dir}", file=sys.stderr)
-            return 1
-        # Find one *_zht_secs_base.txt (prefer) or any *_secs_base.txt
-        candidates = list(base_dir.rglob("*_zht_secs_base.txt"))
-        if not candidates:
-            candidates = list(base_dir.rglob("*_secs_base.txt"))
-        if not candidates:
-            print("Erro: *_secs_base.txt não encontrado no diretório informado", file=sys.stderr)
-            return 1
-        # Deterministic pick: first by name
-        base_file_path = sorted(candidates)[0]
-        output_dir = base_dir
-        return run_from_base_file(
-            base_file=base_file_path,
-            offset_seconds=args.offset_seconds,
-            output_dir=output_dir,
-            crop_percent=args.crop_percent,
-            target_w=args.target_width,
-            target_h=args.target_height,
-            resume_from_seconds=args.resume_from_seconds,
-        )
-
-    output_dir = Path(args.outdir).resolve()
-    # If --base-file is provided, run timestamp-driven mode; otherwise periodic mode
-    if args.base_file:
-        return run_from_base_file(
-            base_file=Path(args.base_file).resolve(),
-            offset_seconds=args.offset_seconds,
-            output_dir=output_dir,
-            crop_percent=args.crop_percent,
-            target_w=args.target_width,
-            target_h=args.target_height,
-            resume_from_seconds=args.resume_from_seconds,
-        )
+def main() -> int:
+    args = parse_args()
+    
+    # Setup output directory
+    assets_dir = Path(args.assets_root)
+    output_dir = assets_dir / args.directory
+    output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Find starting index
+    start_index = find_next_index(output_dir)
+    
+    # Check for existing images
+    existing_pngs = list(output_dir.glob("*.png"))
+    last_index = start_index - 1 if start_index > 1 else 0
+    
+    # Configuration
+    target_size = (args.target_width, args.target_height)
+    max_screenshots = args.max_duration  # 1 screenshot per second
+    end_index = start_index + max_screenshots - 1
+    
+    print("🎬 Screenshot Simples")
+    print(f"📁 Diretório: {output_dir}")
+    print(f"📐 Tamanho alvo: {target_size[0]}x{target_size[1]}")
+    print(f"⏱️  Intervalo: 1 segundo")
+    print(f"⏰ Duração máxima: {args.max_duration}s ({args.max_duration//60}min)")
+    
+    if existing_pngs:
+        print(f"📋 Imagens existentes: {len(existing_pngs)} (último índice: {last_index})")
+        print(f"🔄 Continuando do índice: {start_index}")
     else:
-        return run_scheduler(
-            args.interval,
-            args.duration,
-            output_dir,
-            args.crop_percent,
-            args.target_width,
-            args.target_height,
-        )
+        print(f"🆕 Primeira execução - iniciando do índice: {start_index}")
+    
+    print(f"🏁 Capturará de {start_index} até {end_index}")
+    print("-" * 50)
+    
+    # Pre-start countdown
+    countdown(3)
+    
+    start_time = time.time()
+    current_index = start_index
+    successful_captures = 0
+    errors = 0
+    
+    try:
+        for screenshot_num in range(max_screenshots):
+            loop_start = time.time()
+            
+            # Take screenshot
+            image_data = take_screenshot()
+            if not image_data:
+                errors += 1
+                print(f"❌ Erro na captura {current_index}")
+                current_index += 1
+                time.sleep(max(0, 1.0 - (time.time() - loop_start)))
+                continue
+            
+            # Process image
+            processed_img = scale_image(image_data, target_size)
+            if not processed_img:
+                errors += 1
+                print(f"❌ Erro no processamento {current_index}")
+                current_index += 1
+                time.sleep(max(0, 1.0 - (time.time() - loop_start)))
+                continue
+            
+            # Save image
+            output_path = output_dir / f"{current_index}.png"
+            try:
+                processed_img.save(output_path, "PNG")
+                successful_captures += 1
+                
+                # Progress indicator
+                elapsed = time.time() - start_time
+                if current_index % 10 == 0 or current_index <= 10:
+                    print(f"📸 {current_index:4d} | {elapsed:6.1f}s | {successful_captures} ok, {errors} err")
+                elif current_index % 60 == 0:  # Every minute
+                    print(f"⏰ {current_index:4d} | {elapsed/60:5.1f}min | {successful_captures} ok, {errors} err")
+                
+            except Exception as e:
+                errors += 1
+                print(f"❌ Erro ao salvar {current_index}: {e}")
+            
+            current_index += 1
+            
+            # Sleep to maintain 1 second interval
+            elapsed_this_loop = time.time() - loop_start
+            sleep_time = max(0, 1.0 - elapsed_this_loop)
+            if sleep_time > 0:
+                time.sleep(sleep_time)
+    
+    except KeyboardInterrupt:
+        print(f"\n⏹️  Interrompido pelo usuário após {current_index - start_index} capturas")
+    
+    # Final statistics
+    total_time = time.time() - start_time
+    print("\n" + "=" * 50)
+    print("📊 ESTATÍSTICAS FINAIS")
+    print("=" * 50)
+    print(f"⏱️  Tempo total: {total_time:.1f}s ({total_time/60:.1f}min)")
+    print(f"📸 Capturas realizadas: {current_index - start_index}")
+    print(f"✅ Sucessos: {successful_captures}")
+    print(f"❌ Erros: {errors}")
+    print(f"📁 Pasta de saída: {output_dir}")
+    print(f"🔢 Índices: {start_index} - {current_index - 1}")
+    
+    if successful_captures > 0:
+        avg_fps = successful_captures / total_time
+        print(f"📈 Taxa média: {avg_fps:.2f} capturas/segundo")
+    
+    return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
-
-
+    sys.exit(main())
