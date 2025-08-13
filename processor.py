@@ -15,15 +15,16 @@ processed timestamp. Manual resume is also available:
   python3 processor.py <folder_name_inside_assets> --resume-from-seconds 220.5
 
 Searches the folder under the local "assets" directory (recursively) for one XML file containing "zht"
-in its name and one containing "pt" (ignoring files that already contain
-"_secs" or "_real"). Writes new files alongside each input with the "_secs"
-suffix before the extension.
+in its name and one containing either "pt" or "es" (ignoring files that already contain
+"_secs" or "_real"). If a "zht" XML is not found, it is created by translating the
+non-zht file (pt-BR or es) into Traditional Chinese using the DeepSeek API. Writes new
+files alongside each input with the "_secs" suffix before the extension.
 
 Additionally, a base TXT file is generated from the zht_secs XML with one line
 per subtitle: an incremental index (starting at 1), the begin time, the zht
 text, a list of strings generated via LLM no formato ["palavra: tradução", ...],
-and the matched pt translation. The file is named "<zht_secs_stem>_base.txt" and saved
-alongside the zht_secs file.
+and the matched translation from the other language (pt or es). The file is named
+"<zht_secs_stem>_base.txt" and saved alongside the zht_secs file.
 
 If a ".env" file is present next to this script, variables defined there (e.g.,
 DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL) will be loaded if not
@@ -49,6 +50,7 @@ NS_TTML = "http://www.w3.org/ns/ttml"
 NS_TTP = "http://www.w3.org/ns/ttml#parameter"
 NS_TTS = "http://www.w3.org/ns/ttml#styling"
 NS_NTTM = "http://www.netflix.com/ns/ttml#metadata"
+NS_XML = "http://www.w3.org/XML/1998/namespace"
 
 
 def register_namespaces() -> None:
@@ -172,7 +174,7 @@ def _parse_seconds_value(seconds_text: str) -> Decimal:
 
 
 def _load_pt_entries(pt_secs_path: Path) -> list[tuple[Decimal, Decimal, str]]:
-    """Load PT entries as a list of (begin_sec, end_sec, text)."""
+    """Load PT/ES entries as a list of (begin_sec, end_sec, text)."""
     tree = ET.parse(pt_secs_path)
     root = tree.getroot()
     entries: list[tuple[Decimal, Decimal, str]] = []
@@ -278,6 +280,159 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
             return _sanitize_tsv_field(content)
     except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError):
         return "N/A"
+
+
+def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 20.0) -> str:
+    """Translate 'text' from source_lang ("pt" or "es") to Traditional Chinese (zht).
+
+    On any failure (missing API key, HTTP/timeout, or empty response), raises
+    RuntimeError to stop the pipeline, avoiding writing untranslated content.
+    """
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key:
+        raise RuntimeError("DEEPSEEK_API_KEY não encontrada no ambiente para tradução via LLM")
+
+    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    url = f"{api_base.rstrip('/')}/chat/completions"
+
+    if source_lang.lower().startswith("pt"):
+        src_label = "português do Brasil"
+    else:
+        src_label = "espanhol"
+
+    prompt = (
+        f"Traduza do {src_label} para chinês tradicional (zht).\n"
+        "RETORNE SOMENTE o texto traduzido (sem marcações, sem explicações).\n\n"
+        f"Texto: {text}"
+    )
+
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
+    data = json.dumps(body).encode("utf-8")
+
+    req = urlrequest.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_sec) as resp:
+            resp_data = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(resp_data)
+            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
+            if not content:
+                raise RuntimeError("DeepSeek retornou resposta vazia para tradução")
+            return content.strip()
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError) as exc:
+        raise RuntimeError(f"Falha ao chamar DeepSeek para tradução: {exc}")
+
+
+def _determine_zht_secs_output_from(source_secs: Path) -> Path:
+    """Return a path for the zht_secs file derived from a pt/es *_secs.xml filename."""
+    src = source_secs
+    name_lower = src.name.lower()
+    if "_secs" not in name_lower:
+        # Ensure we always output *_secs.xml
+        base = src.with_suffix("")
+        return src.with_name(f"{base.name}_zht_secs{src.suffix or '.xml'}")
+    # Replace language token if present, otherwise inject zht
+    if "pt" in name_lower:
+        new_name = name_lower.replace("pt", "zht")
+        return src.with_name(new_name)
+    if "es" in name_lower:
+        new_name = name_lower.replace("es", "zht")
+        return src.with_name(new_name)
+    return src.with_name(name_lower.replace("_secs", "_zht_secs"))
+
+
+def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
+    """Create a zht_secs XML by translating each <p> text from source_lang (pt or es).
+
+    - Preserves structure/timings
+    - Saves to disk after EVERY translated line to enable auto-resume on interruption
+    - If an output file already exists, resumes by skipping already translated lines
+    """
+    out_path = _determine_zht_secs_output_from(source_secs)
+
+    # Load source (pt/es) as reference ordering and ids
+    src_tree = ET.parse(source_secs)
+    src_root = src_tree.getroot()
+
+    # Load or initialize destination tree (zht)
+    if out_path.exists():
+        dest_tree = ET.parse(out_path)
+        dest_root = dest_tree.getroot()
+    else:
+        # Start from a copy of the source structure and blank texts,
+        # so the resume logic knows these lines still need translation.
+        dest_tree = ET.parse(source_secs)
+        dest_root = dest_tree.getroot()
+        for dp in _iter_p_elements(dest_root):
+            for child in list(dp):
+                dp.remove(child)
+            dp.text = ""
+
+    # Build id -> <p> maps for both trees
+    xml_id_attr = f"{{{NS_XML}}}id"
+    def map_p_by_id(root: ET.Element) -> dict[str, ET.Element]:
+        mapping: dict[str, ET.Element] = {}
+        for p in _iter_p_elements(root):
+            pid = p.get(xml_id_attr) or p.get("id") or ""
+            if pid:
+                mapping[pid] = p
+        return mapping
+
+    src_map = map_p_by_id(src_root)
+    dest_map = map_p_by_id(dest_root)
+
+    # If ids are missing, we will fall back to index-based traversal
+    src_ps = list(_iter_p_elements(src_root))
+
+    total = len(src_ps)
+    for idx, p in enumerate(src_ps, start=1):
+        pid = p.get(xml_id_attr) or p.get("id") or ""
+        original_text = _extract_text_content(p)
+
+        # Find corresponding destination <p>
+        dest_p: ET.Element | None
+        if pid and pid in dest_map:
+            dest_p = dest_map[pid]
+        else:
+            # Fallback by position (index)
+            try:
+                dest_p = list(_iter_p_elements(dest_root))[idx - 1]
+            except Exception:
+                dest_p = None
+
+        if dest_p is None:
+            continue
+
+        # Skip only if destination already contains a non-empty text
+        # that is different from the original (assume already translated).
+        dest_text_now = _extract_text_content(dest_p)
+        if dest_text_now and dest_text_now != original_text:
+            _print_progress(idx, total, prefix="Gerando zht via LLM")
+            continue
+
+        translated = _call_deepseek_translate_to_zht(original_text, source_lang)
+
+        # Clear children and set translated text on destination node
+        for child in list(dest_p):
+            dest_p.remove(child)
+        dest_p.text = translated
+
+        # Persist to disk immediately for auto-resume
+        dest_tree.write(out_path, encoding="utf-8", xml_declaration=True)
+        _print_progress(idx, total, prefix="Gerando zht via LLM")
+
+    # Ensure final write
+    dest_tree.write(out_path, encoding="utf-8", xml_declaration=True)
+    return out_path
 
 
 def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_seconds: float | None = None) -> Path:
@@ -438,11 +593,11 @@ def _select_unique(files: list[Path], label: str) -> Path:
     return files[0]
 
 
-def find_language_files(directory: Path) -> tuple[Path, Path]:
-    """Find exactly one 'zht' and one 'pt' XML file under directory (recursive).
+def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
+    """Find up to one 'zht' and exactly one 'pt' or 'es' XML under directory (recursive).
 
     Ignores files that already appear to be processed (contain '_secs' or '_real').
-    Case-insensitive matching on substrings 'zht' and 'pt'.
+    Returns: (zht_file_or_none, other_file, other_lang) where other_lang is 'pt' or 'es'.
     """
     if not directory.is_dir():
         raise ValueError(f"Diretório inválido: {directory}")
@@ -458,13 +613,26 @@ def find_language_files(directory: Path) -> tuple[Path, Path]:
     candidates = [p for p in all_xml if is_candidate(p)]
 
     zht_candidates = [p for p in candidates if re.search(r"zht", p.name, re.IGNORECASE)]
-    # Simplify: substring 'pt' anywhere in the filename
     pt_candidates = [p for p in candidates if re.search(r"pt", p.name, re.IGNORECASE)]
+    es_candidates = [p for p in candidates if re.search(r"es", p.name, re.IGNORECASE)]
 
-    zht_file = _select_unique(zht_candidates, "com 'zht'")
-    pt_file = _select_unique(pt_candidates, "com 'pt'")
+    zht_file: Path | None
+    if not zht_candidates:
+        zht_file = None
+    else:
+        zht_file = _select_unique(zht_candidates, "com 'zht'")
 
-    return zht_file, pt_file
+    # Prefer PT if available; otherwise ES
+    other_file: Path
+    other_lang: str
+    if pt_candidates:
+        other_file = _select_unique(pt_candidates, "com 'pt'")
+        other_lang = "pt"
+    else:
+        other_file = _select_unique(es_candidates, "com 'es'")
+        other_lang = "es"
+
+    return zht_file, other_file, other_lang
 
 
 def main(argv: list[str]) -> int:
@@ -491,21 +659,28 @@ def main(argv: list[str]) -> int:
         print(f"Erro: diretório dentro de 'assets' não encontrado: {dir_path}", file=sys.stderr)
         return 1
     try:
-        zht_file, pt_file = find_language_files(dir_path)
+        zht_file, other_file, other_lang = find_language_files(dir_path)
     except Exception as exc:  # noqa: BLE001 - broad to surface CLI errors
         print(f"Erro: {exc}", file=sys.stderr)
         return 1
 
     try:
-        zht_out = determine_output_path_secs(zht_file)
-        process_file(zht_file, zht_out)
-        print(f"Arquivo convertido: {zht_out}")
+        # Always convert the non-zht file first (pt or es)
+        other_out = determine_output_path_secs(other_file)
+        process_file(other_file, other_out)
+        print(f"Arquivo convertido: {other_out}")
 
-        pt_out = determine_output_path_secs(pt_file)
-        process_file(pt_file, pt_out)
-        print(f"Arquivo convertido: {pt_out}")
+        # If no zht found, create zht from the converted other language file
+        if zht_file is None:
+            print(f"Nenhum XML 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
+            zht_out = create_zht_secs_from_source(other_out, other_lang)
+            print(f"Arquivo gerado (zht_secs): {zht_out}")
+        else:
+            zht_out = determine_output_path_secs(zht_file)
+            process_file(zht_file, zht_out)
+            print(f"Arquivo convertido: {zht_out}")
 
-        base_txt = generate_zht_base_file(zht_out, pt_out, args.resume_from_seconds)
+        base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds)
         print(f"Arquivo base gerado: {base_txt}")
     except Exception as exc:  # noqa: BLE001
         print(f"Erro ao processar: {exc}", file=sys.stderr)
