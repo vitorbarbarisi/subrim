@@ -377,62 +377,158 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
                 dp.remove(child)
             dp.text = ""
 
-    # Build id -> <p> maps for both trees
-    xml_id_attr = f"{{{NS_XML}}}id"
-    def map_p_by_id(root: ET.Element) -> dict[str, ET.Element]:
-        mapping: dict[str, ET.Element] = {}
-        for p in _iter_p_elements(root):
-            pid = p.get(xml_id_attr) or p.get("id") or ""
-            if pid:
-                mapping[pid] = p
-        return mapping
+    # Helper to find a parent of a node (ElementTree doesn't keep parent refs)
+    def _find_parent(root: ET.Element, child: ET.Element) -> ET.Element | None:
+        for elem in root.iter():
+            for c in list(elem):
+                if c is child:
+                    return elem
+        return None
 
-    src_map = map_p_by_id(src_root)
-    dest_map = map_p_by_id(dest_root)
-
-    # If ids are missing, we will fall back to index-based traversal
+    # Build groups of consecutive <p> that share the same 'begin' time (in seconds string)
     src_ps = list(_iter_p_elements(src_root))
-
-    total = len(src_ps)
-    for idx, p in enumerate(src_ps, start=1):
-        pid = p.get(xml_id_attr) or p.get("id") or ""
-        original_text = _extract_text_content(p)
-
-        # Find corresponding destination <p>
-        dest_p: ET.Element | None
-        if pid and pid in dest_map:
-            dest_p = dest_map[pid]
+    groups: list[list[ET.Element]] = []
+    for p in src_ps:
+        begin_val = p.get("begin", "")
+        if not groups:
+            groups.append([p])
         else:
-            # Fallback by position (index)
-            try:
-                dest_p = list(_iter_p_elements(dest_root))[idx - 1]
-            except Exception:
-                dest_p = None
+            prev_begin = groups[-1][0].get("begin", "")
+            if begin_val == prev_begin:
+                groups[-1].append(p)
+            else:
+                groups.append([p])
 
-        if dest_p is None:
+    total = len(groups)
+    for g_idx, group in enumerate(groups, start=1):
+        # Compute merged original text and max end time
+        merged_text = " ".join(_extract_text_content(p) for p in group if _extract_text_content(p))
+        if not merged_text:
+            _print_progress(g_idx, total, prefix="Gerando zht via LLM")
+            continue
+        # Determine combined end as max of group's end
+        try:
+            max_end = max((_parse_seconds_value(p.get("end") or p.get("begin") or "0s") for p in group))
+            combined_end = f"{format(max_end, '.3f')}s"
+        except Exception:
+            combined_end = group[-1].get("end") or group[-1].get("begin") or "0s"
+
+        # In destination tree, find all <p> with this begin
+        begin_key = group[0].get("begin", "")
+        dest_candidates = [dp for dp in _iter_p_elements(dest_root) if dp.get("begin", "") == begin_key]
+        if not dest_candidates:
+            _print_progress(g_idx, total, prefix="Gerando zht via LLM")
+            continue
+        dest_first = dest_candidates[0]
+
+        # If already has non-empty text, assume translated and skip
+        if _extract_text_content(dest_first):
+            _print_progress(g_idx, total, prefix="Gerando zht via LLM")
             continue
 
-        # Skip only if destination already contains a non-empty text
-        # that is different from the original (assume already translated).
-        dest_text_now = _extract_text_content(dest_p)
-        if dest_text_now and dest_text_now != original_text:
-            _print_progress(idx, total, prefix="Gerando zht via LLM")
-            continue
+        translated = _call_deepseek_translate_to_zht(merged_text, source_lang)
 
-        translated = _call_deepseek_translate_to_zht(original_text, source_lang)
+        # Keep only the first node for this begin; remove the rest
+        for extra in dest_candidates[1:]:
+            parent = _find_parent(dest_root, extra)
+            if parent is not None:
+                try:
+                    parent.remove(extra)
+                except Exception:
+                    pass
 
-        # Clear children and set translated text on destination node
-        for child in list(dest_p):
-            dest_p.remove(child)
-        dest_p.text = translated
+        # Set translated text and combined end on the kept node
+        for child in list(dest_first):
+            dest_first.remove(child)
+        dest_first.text = translated
+        if combined_end:
+            dest_first.set("end", combined_end)
 
-        # Persist to disk immediately for auto-resume
+        # Persist after each group
         dest_tree.write(out_path, encoding="utf-8", xml_declaration=True)
-        _print_progress(idx, total, prefix="Gerando zht via LLM")
+        _print_progress(g_idx, total, prefix="Gerando zht via LLM")
 
     # Ensure final write
     dest_tree.write(out_path, encoding="utf-8", xml_declaration=True)
     return out_path
+
+
+def _merge_consecutive_same_begin(root: ET.Element) -> None:
+    """Merge consecutive <p> nodes that share the exact same 'begin' value.
+
+    - Concatenates texts with a single space
+    - Sets 'end' to the maximum end within the group
+    - Removes the extra nodes, keeping only the first in each group
+    """
+    def _find_parent(r: ET.Element, child: ET.Element) -> ET.Element | None:
+        for elem in r.iter():
+            for c in list(elem):
+                if c is child:
+                    return elem
+        return None
+
+    p_nodes = list(_iter_p_elements(root))
+    if not p_nodes:
+        return
+
+    # Build groups by consecutive equal 'begin'
+    groups: list[list[ET.Element]] = []
+    for p in p_nodes:
+        begin_val = p.get("begin", "")
+        if not groups:
+            groups.append([p])
+        else:
+            prev_begin = groups[-1][0].get("begin", "")
+            if begin_val == prev_begin:
+                groups[-1].append(p)
+            else:
+                groups.append([p])
+
+    for group in groups:
+        if len(group) == 1:
+            continue
+        first = group[0]
+        # Merge texts
+        merged_text = " ".join(
+            _extract_text_content(g) for g in group if _extract_text_content(g)
+        ).strip()
+        # Max end within group
+        try:
+            max_end = max(
+                (
+                    _parse_seconds_value(g.get("end") or g.get("begin") or "0s")
+                    for g in group
+                )
+            )
+            first.set("end", f"{format(max_end, '.3f')}s")
+        except Exception:
+            pass
+
+        # Update first text
+        for child in list(first):
+            first.remove(child)
+        first.text = merged_text
+
+        # Remove the remaining nodes
+        for extra in group[1:]:
+            parent = _find_parent(root, extra)
+            if parent is not None:
+                try:
+                    parent.remove(extra)
+                except Exception:
+                    pass
+
+
+def merge_same_begin_in_file(xml_path: Path) -> None:
+    """Parse XML at xml_path, merge consecutive same-begin <p> nodes, and write back."""
+    try:
+        tree = ET.parse(xml_path)
+        root = tree.getroot()
+        _merge_consecutive_same_begin(root)
+        tree.write(xml_path, encoding="utf-8", xml_declaration=True)
+    except Exception:
+        # Silent no-op to avoid breaking main flow
+        pass
 
 
 def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_seconds: float | None = None) -> Path:
@@ -668,6 +764,8 @@ def main(argv: list[str]) -> int:
         # Always convert the non-zht file first (pt or es)
         other_out = determine_output_path_secs(other_file)
         process_file(other_file, other_out)
+        # Merge same-begin lines in the converted other language file
+        merge_same_begin_in_file(other_out)
         print(f"Arquivo convertido: {other_out}")
 
         # If no zht found, create zht from the converted other language file
@@ -678,6 +776,8 @@ def main(argv: list[str]) -> int:
         else:
             zht_out = determine_output_path_secs(zht_file)
             process_file(zht_file, zht_out)
+            # Ensure same-begin merges in zht as well (original zht files may have this too)
+            merge_same_begin_in_file(zht_out)
             print(f"Arquivo convertido: {zht_out}")
 
         base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds)
