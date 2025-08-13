@@ -74,9 +74,9 @@ def add_letterbox(image_path: Path, shift_up: int, bar_height: int, output_path:
             from PIL import ImageDraw
             draw = ImageDraw.Draw(new_img)
             
-            # Calcula alturas das faixas (inferior é 50px maior que superior)
+            # Calcula alturas das faixas (inferior é 85px maior que superior)
             top_bar_height = bar_height
-            bottom_bar_height = bar_height + 50
+            bottom_bar_height = bar_height + 85
             
             # Faixa preta superior
             if top_bar_height > 0:
@@ -105,7 +105,7 @@ def process_images(directory: Path, shift_up: int, bar_height: int, backup: bool
     """
     print(f"Processando imagens em: {directory}")
     print(f"Deslocamento para cima: {shift_up} pixels")
-    print(f"Faixas pretas: {bar_height}px (topo) / {bar_height + 50}px (base)")
+    print(f"Faixas pretas: {bar_height}px (topo) / {bar_height + 85}px (base)")
     
     png_files = find_png_files(directory)
     if not png_files:
@@ -146,7 +146,7 @@ def process_images(directory: Path, shift_up: int, bar_height: int, backup: bool
                         if shift_up > 0:
                             operations.append(f"shift {shift_up}px")
                         if bar_height > 0:
-                            operations.append(f"faixas {bar_height}px(topo)/{bar_height + 50}px(base)")
+                            operations.append(f"faixas {bar_height}px(topo)/{bar_height + 85}px(base)")
                         print(f"[DRY RUN] {', '.join(operations)}")
                         success_count += 1
             except Exception as e:
@@ -188,7 +188,7 @@ def process_images(directory: Path, shift_up: int, bar_height: int, backup: bool
                 if shift_up > 0:
                     operations.append(f"shift {shift_up}px")
                 if bar_height > 0:
-                    operations.append(f"faixas {bar_height}px(topo)/{bar_height + 50}px(base)")
+                    operations.append(f"faixas {bar_height}px(topo)/{bar_height + 85}px(base)")
                 print(f"PROCESSADA ({', '.join(operations)})")
                 success_count += 1
         else:
@@ -203,10 +203,10 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
-  python3 image_letterbox.py test                              # Shift 50px + faixas 30px/80px (padrão)
-  python3 image_letterbox.py flipper --shift 80 --bars 40      # Shift 80px + faixas 40px/90px
+  python3 image_letterbox.py test                              # Shift 50px + faixas 50px/135px (padrão)
+  python3 image_letterbox.py flipper --shift 80 --bars 40      # Shift 80px + faixas 40px/125px
   python3 image_letterbox.py test --shift 30 --bars 0          # Apenas shift 30px
-  python3 image_letterbox.py test --shift 0 --bars 20          # Apenas faixas 20px/70px
+  python3 image_letterbox.py test --shift 0 --bars 30          # Apenas faixas 30px/115px
   python3 image_letterbox.py test --dry-run                    # Simula processamento
   python3 image_letterbox.py test --backup                     # Cria backup antes de processar
         """
@@ -218,8 +218,8 @@ Exemplos:
     parser.add_argument('--shift', type=int, default=50,
                        help='Quantidade de pixels para deslocar a imagem para cima. Padrão: 50')
     
-    parser.add_argument('--bars', type=int, default=30,
-                       help='Altura da faixa preta superior em pixels (base será +50px). Padrão: 30')
+    parser.add_argument('--bars', type=int, default=50,
+                       help='Altura da faixa preta superior em pixels (base será +85px). Padrão: 50')
     
     parser.add_argument('--dry-run', '-n', action='store_true',
                        help='Simular operação sem modificar arquivos')
@@ -256,7 +256,7 @@ Exemplos:
     print(f"⬆️⬛ Image Shift + Letterbox - Duplo Processamento")
     print(f"📁 Diretório: {target_dir}")
     print(f"📏 Deslocamento para cima: {args.shift} pixels")
-    print(f"⬛ Faixas pretas: {args.bars}px (topo) / {args.bars + 50}px (base)")
+    print(f"⬛ Faixas pretas: {args.bars}px (topo) / {args.bars + 85}px (base)")
     print(f"💾 Backup: {'Sim' if args.backup else 'Não'}")
     print(f"🔍 Modo: {'DRY RUN (simulação)' if args.dry_run else 'PROCESSAMENTO REAL'}")
     print("-" * 60)
