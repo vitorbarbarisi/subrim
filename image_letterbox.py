@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """
-Image Letterbox - Adiciona faixas pretas horizontais nas imagens
+Image Letterbox - Adiciona faixas pretas sobrepostas nas extremidades horizontais
 
-Usage: python3 image_letterbox.py <directory_name>
-Example: python3 image_letterbox.py test
+Usage: python3 image_letterbox.py <directory_name> [--height PIXELS]
+Example: python3 image_letterbox.py test --height 60
 
 Este script processa todas as imagens PNG em assets/<directory_name>,
-adicionando faixas pretas nas extremidades horizontais (letterboxing)
-para ajustar as imagens a um aspect ratio específico.
+adicionando faixas pretas sobrepostas nas extremidades horizontais (topo e base)
+como overlay sobre a imagem original, sem alterar suas dimensões.
 """
 
 import sys
@@ -34,13 +34,13 @@ def find_png_files(directory: Path) -> List[Path]:
     
     return sorted(png_files, key=sort_key)
 
-def add_letterbox(image_path: Path, target_aspect_ratio: float, output_path: Path = None) -> bool:
+def add_letterbox(image_path: Path, bar_height: int, output_path: Path = None) -> bool:
     """
-    Adiciona faixas pretas horizontais para ajustar ao aspect ratio desejado.
+    Adiciona faixas pretas horizontais sobrepostas nas extremidades da imagem.
     
     Args:
         image_path: Caminho da imagem original
-        target_aspect_ratio: Aspect ratio alvo (largura/altura)
+        bar_height: Altura das faixas pretas em pixels
         output_path: Caminho de saída (se None, sobrescreve a original)
     
     Returns:
@@ -48,39 +48,30 @@ def add_letterbox(image_path: Path, target_aspect_ratio: float, output_path: Pat
     """
     try:
         with Image.open(image_path) as img:
-            original_width, original_height = img.size
-            original_aspect = original_width / original_height
+            # Converte para RGB se necessário
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
             
-            # Se já está no aspect ratio correto (com tolerância), não faz nada
-            if abs(original_aspect - target_aspect_ratio) < 0.01:
+            original_width, original_height = img.size
+            
+            # Se a altura das faixas é maior que metade da altura da imagem, não faz nada
+            if bar_height * 2 >= original_height:
                 if output_path and output_path != image_path:
                     img.save(output_path, "PNG")
                 return True
             
-            # Calcula as novas dimensões
-            if original_aspect > target_aspect_ratio:
-                # Imagem muito larga - adiciona faixas em cima e embaixo
-                new_width = original_width
-                new_height = int(original_width / target_aspect_ratio)
-            else:
-                # Imagem muito alta - adiciona faixas nas laterais
-                # Para letterboxing horizontal, queremos sempre adicionar nas extremidades horizontais
-                # então vamos ajustar a altura mantendo a largura
-                new_width = original_width
-                new_height = int(original_width / target_aspect_ratio)
+            # Cria uma cópia da imagem para modificar
+            new_img = img.copy()
             
-            # Cria nova imagem com fundo preto
-            new_img = Image.new('RGB', (new_width, new_height), (0, 0, 0))
+            # Cria retângulos pretos nas extremidades horizontais
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(new_img)
             
-            # Calcula posição para centralizar a imagem original
-            paste_x = (new_width - original_width) // 2
-            paste_y = (new_height - original_height) // 2
+            # Faixa superior
+            draw.rectangle([0, 0, original_width, bar_height], fill=(0, 0, 0))
             
-            # Cola a imagem original no centro
-            if img.mode == 'RGBA':
-                new_img.paste(img, (paste_x, paste_y), img)
-            else:
-                new_img.paste(img, (paste_x, paste_y))
+            # Faixa inferior
+            draw.rectangle([0, original_height - bar_height, original_width, original_height], fill=(0, 0, 0))
             
             # Salva a imagem processada
             save_path = output_path if output_path else image_path
@@ -92,7 +83,7 @@ def add_letterbox(image_path: Path, target_aspect_ratio: float, output_path: Pat
         print(f"Erro ao processar {image_path}: {e}")
         return False
 
-def process_images(directory: Path, target_aspect_ratio: float, backup: bool = False, dry_run: bool = False) -> Tuple[int, int, int]:
+def process_images(directory: Path, bar_height: int, backup: bool = False, dry_run: bool = False) -> Tuple[int, int, int]:
     """
     Processa todas as imagens PNG no diretório.
     
@@ -100,7 +91,7 @@ def process_images(directory: Path, target_aspect_ratio: float, backup: bool = F
         (processadas_com_sucesso, erros, inalteradas)
     """
     print(f"Processando imagens em: {directory}")
-    print(f"Target aspect ratio: {target_aspect_ratio:.3f}")
+    print(f"Altura das faixas pretas: {bar_height} pixels")
     
     png_files = find_png_files(directory)
     if not png_files:
@@ -129,14 +120,12 @@ def process_images(directory: Path, target_aspect_ratio: float, backup: bool = F
             try:
                 with Image.open(file_path) as img:
                     original_width, original_height = img.size
-                    original_aspect = original_width / original_height
                     
-                    if abs(original_aspect - target_aspect_ratio) < 0.01:
-                        print("INALTERADA (aspect ratio correto)")
+                    if bar_height * 2 >= original_height:
+                        print("INALTERADA (faixas muito grandes)")
                         unchanged_count += 1
                     else:
-                        new_height = int(original_width / target_aspect_ratio)
-                        print(f"[DRY RUN] {original_width}x{original_height} → {original_width}x{new_height}")
+                        print(f"[DRY RUN] Adicionará faixas de {bar_height}px no topo e base")
                         success_count += 1
             except Exception as e:
                 print(f"ERRO: {e}")
@@ -159,29 +148,18 @@ def process_images(directory: Path, target_aspect_ratio: float, backup: bool = F
         try:
             with Image.open(file_path) as img:
                 original_width, original_height = img.size
-                original_aspect = original_width / original_height
                 original_size = (original_width, original_height)
         except Exception:
             pass
         
-        success = add_letterbox(file_path, target_aspect_ratio)
+        success = add_letterbox(file_path, bar_height)
         
         if success:
-            if original_size:
-                try:
-                    with Image.open(file_path) as img:
-                        new_width, new_height = img.size
-                        if (new_width, new_height) == original_size:
-                            print("INALTERADA")
-                            unchanged_count += 1
-                        else:
-                            print(f"{original_size[0]}x{original_size[1]} → {new_width}x{new_height}")
-                            success_count += 1
-                except Exception:
-                    print("PROCESSADA")
-                    success_count += 1
+            if original_size and bar_height * 2 >= original_size[1]:
+                print("INALTERADA (faixas muito grandes)")
+                unchanged_count += 1
             else:
-                print("PROCESSADA")
+                print(f"PROCESSADA (faixas de {bar_height}px)")
                 success_count += 1
         else:
             print("ERRO")
@@ -191,13 +169,13 @@ def process_images(directory: Path, target_aspect_ratio: float, backup: bool = F
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Adiciona faixas pretas horizontais nas imagens para ajustar aspect ratio",
+        description="Adiciona faixas pretas horizontais sobrepostas nas extremidades das imagens",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
-  python3 image_letterbox.py test                    # Processa assets/test com aspect ratio 4:3
-  python3 image_letterbox.py flipper --ratio 16:9    # Aspect ratio 16:9
-  python3 image_letterbox.py test --ratio 1.33       # Aspect ratio 1.33 (4:3)
+  python3 image_letterbox.py test                    # Adiciona faixas de 60px (padrão)
+  python3 image_letterbox.py flipper --height 80     # Faixas de 80px
+  python3 image_letterbox.py test --height 40        # Faixas de 40px
   python3 image_letterbox.py test --dry-run          # Simula processamento
   python3 image_letterbox.py test --backup           # Cria backup antes de processar
         """
@@ -206,8 +184,8 @@ Exemplos:
     parser.add_argument('directory', 
                        help='Nome do diretório dentro de assets/ para processar')
     
-    parser.add_argument('--ratio', '-r', default='4:3',
-                       help='Aspect ratio alvo (formato: "16:9", "4:3" ou decimal "1.777"). Padrão: 4:3')
+    parser.add_argument('--height', type=int, default=60,
+                       help='Altura das faixas pretas em pixels. Padrão: 60')
     
     parser.add_argument('--dry-run', '-n', action='store_true',
                        help='Simular operação sem modificar arquivos')
@@ -220,15 +198,9 @@ Exemplos:
     
     args = parser.parse_args()
     
-    # Parse aspect ratio
-    try:
-        if ':' in args.ratio:
-            width_str, height_str = args.ratio.split(':')
-            target_aspect_ratio = float(width_str) / float(height_str)
-        else:
-            target_aspect_ratio = float(args.ratio)
-    except ValueError:
-        print(f"Erro: Aspect ratio inválido '{args.ratio}'. Use formato como '16:9', '4:3' ou '1.777'")
+    # Validar altura das faixas
+    if args.height <= 0:
+        print("Erro: A altura das faixas deve ser maior que 0")
         return 1
     
     # Construct full path
@@ -243,9 +215,9 @@ Exemplos:
         print(f"Erro: {target_dir} não é um diretório.")
         return 1
     
-    print(f"🎬 Image Letterbox")
+    print(f"⬛ Image Letterbox - Faixas Pretas")
     print(f"📁 Diretório: {target_dir}")
-    print(f"📐 Aspect ratio alvo: {target_aspect_ratio:.3f} ({args.ratio})")
+    print(f"📏 Altura das faixas: {args.height} pixels (topo e base)")
     print(f"💾 Backup: {'Sim' if args.backup else 'Não'}")
     print(f"🔍 Modo: {'DRY RUN (simulação)' if args.dry_run else 'PROCESSAMENTO REAL'}")
     print("-" * 60)
@@ -253,7 +225,7 @@ Exemplos:
     # Process images
     start_time = time.time()
     success_count, error_count, unchanged_count = process_images(
-        target_dir, target_aspect_ratio, args.backup, args.dry_run
+        target_dir, args.height, args.backup, args.dry_run
     )
     processing_time = time.time() - start_time
     
@@ -264,7 +236,7 @@ Exemplos:
     print("=" * 60)
     print(f"📊 Total de arquivos: {total_files}")
     print(f"✅ Processadas com sucesso: {success_count}")
-    print(f"📐 Já no aspect ratio correto: {unchanged_count}")
+    print(f"⬛ Inalteradas (faixas muito grandes): {unchanged_count}")
     print(f"❌ Erros: {error_count}")
     print(f"⏱️  Tempo de processamento: {processing_time:.2f}s")
     
