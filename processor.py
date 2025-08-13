@@ -199,7 +199,7 @@ def _print_progress(current: int, total: int, prefix: str = "") -> None:
     
     # Simple text-only progress without fancy characters
     percent = int((current / total) * 100)
-    progress_text = f"{prefix} {percent}% ({current}/{total})"
+    progress_text = f"{prefix}... {percent}% ({current}/{total})"
     
     # Use only carriage return - no special characters or complex formatting
     sys.stderr.write(f"\r{progress_text}")
