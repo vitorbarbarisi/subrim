@@ -174,6 +174,42 @@ def find_next_index(output_dir: Path) -> int:
     return max_index + 1
 
 
+def find_max_duration_from_base(output_dir: Path) -> int | None:
+    """Extract the maximum duration from the corresponding base.txt file."""
+    # Look for a base.txt file in the same directory
+    base_files = list(output_dir.glob("*_base.txt"))
+    if not base_files:
+        return None
+    
+    # Use the first base file found
+    base_file = base_files[0]
+    
+    try:
+        content = base_file.read_text(encoding="utf-8").strip()
+        if not content:
+            return None
+        
+        lines = content.split('\n')
+        last_line = lines[-1].strip()
+        
+        if not last_line:
+            return None
+        
+        # Parse the timestamp from the second column (format: "334.125s")
+        parts = last_line.split('\t')
+        if len(parts) >= 2:
+            timestamp_str = parts[1].strip()
+            if timestamp_str.endswith('s'):
+                timestamp_seconds = float(timestamp_str[:-1])
+                # Add a small buffer (30 seconds) to ensure we capture everything
+                return int(timestamp_seconds) + 30
+    
+    except Exception as e:
+        print(f"Aviso: Erro ao ler arquivo base {base_file}: {e}")
+    
+    return None
+
+
 def main() -> int:
     args = parse_args()
     
@@ -191,14 +227,23 @@ def main() -> int:
     
     # Configuration
     target_size = (args.target_width, args.target_height)
-    max_screenshots = args.max_duration  # 1 screenshot per second
+    
+    # Try to get duration from base file, fallback to command line argument
+    auto_duration = find_max_duration_from_base(output_dir)
+    if auto_duration is not None:
+        max_screenshots = auto_duration
+        duration_source = f"arquivo base ({auto_duration}s)"
+    else:
+        max_screenshots = args.max_duration
+        duration_source = f"padrão ({args.max_duration}s)"
+    
     end_index = start_index + max_screenshots - 1
     
     print("🎬 Screenshot Simples")
     print(f"📁 Diretório: {output_dir}")
     print(f"📐 Tamanho alvo: {target_size[0]}x{target_size[1]}")
     print(f"⏱️  Intervalo: 1 segundo")
-    print(f"⏰ Duração máxima: {args.max_duration}s ({args.max_duration//60}min)")
+    print(f"⏰ Duração máxima: {max_screenshots}s ({max_screenshots//60}min) - fonte: {duration_source}")
     
     if existing_pngs:
         print(f"📋 Imagens existentes: {len(existing_pngs)} (último índice: {last_index})")
