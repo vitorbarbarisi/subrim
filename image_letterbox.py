@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-Image Shift Up - Desloca imagens para cima e preenche com preto
+Image Shift + Letterbox - Desloca imagens para cima e adiciona faixas pretas
 
-Usage: python3 image_letterbox.py <directory_name> [--shift PIXELS]
-Example: python3 image_letterbox.py test --shift 50
+Usage: python3 image_letterbox.py <directory_name> [--shift PIXELS] [--bars PIXELS]
+Example: python3 image_letterbox.py test --shift 50 --bars 30
 
 Este script processa todas as imagens PNG em assets/<directory_name>,
-deslocando-as para cima pela quantidade especificada de pixels e
-preenchendo a área inferior vazia com cor preta.
+realizando duas operações:
+1. Desloca a imagem para cima (--shift)
+2. Adiciona faixas pretas no topo e base (--bars)
 """
 
 import sys
@@ -34,13 +35,14 @@ def find_png_files(directory: Path) -> List[Path]:
     
     return sorted(png_files, key=sort_key)
 
-def add_letterbox(image_path: Path, shift_up: int, output_path: Path = None) -> bool:
+def add_letterbox(image_path: Path, shift_up: int, bar_height: int, output_path: Path = None) -> bool:
     """
-    Desloca a imagem para cima e preenche a área inferior com preto.
+    Desloca a imagem para cima, preenche a área inferior com preto e adiciona faixas pretas no topo e base.
     
     Args:
         image_path: Caminho da imagem original
         shift_up: Quantidade de pixels para deslocar a imagem para cima
+        bar_height: Altura das faixas pretas no topo e base em pixels
         output_path: Caminho de saída (se None, sobrescreve a original)
     
     Returns:
@@ -68,6 +70,18 @@ def add_letterbox(image_path: Path, shift_up: int, output_path: Path = None) -> 
             paste_y = -shift_up  # Posição negativa para deslocar para cima
             new_img.paste(img, (0, paste_y))
             
+            # Adiciona faixas pretas no topo e base usando PIL ImageDraw
+            from PIL import ImageDraw
+            draw = ImageDraw.Draw(new_img)
+            
+            # Faixa preta superior
+            if bar_height > 0:
+                draw.rectangle([0, 0, original_width, bar_height], fill=(0, 0, 0))
+            
+            # Faixa preta inferior
+            if bar_height > 0:
+                draw.rectangle([0, original_height - bar_height, original_width, original_height], fill=(0, 0, 0))
+            
             # Salva a imagem processada
             save_path = output_path if output_path else image_path
             new_img.save(save_path, "PNG")
@@ -78,7 +92,7 @@ def add_letterbox(image_path: Path, shift_up: int, output_path: Path = None) -> 
         print(f"Erro ao processar {image_path}: {e}")
         return False
 
-def process_images(directory: Path, shift_up: int, backup: bool = False, dry_run: bool = False) -> Tuple[int, int, int]:
+def process_images(directory: Path, shift_up: int, bar_height: int, backup: bool = False, dry_run: bool = False) -> Tuple[int, int, int]:
     """
     Processa todas as imagens PNG no diretório.
     
@@ -87,6 +101,7 @@ def process_images(directory: Path, shift_up: int, backup: bool = False, dry_run
     """
     print(f"Processando imagens em: {directory}")
     print(f"Deslocamento para cima: {shift_up} pixels")
+    print(f"Faixas pretas: {bar_height} pixels (topo e base)")
     
     png_files = find_png_files(directory)
     if not png_files:
@@ -119,11 +134,16 @@ def process_images(directory: Path, shift_up: int, backup: bool = False, dry_run
                     if shift_up >= original_height:
                         print("INALTERADA (deslocamento muito grande)")
                         unchanged_count += 1
-                    elif shift_up == 0:
-                        print("INALTERADA (sem deslocamento)")
+                    elif shift_up == 0 and bar_height == 0:
+                        print("INALTERADA (sem alterações)")
                         unchanged_count += 1
                     else:
-                        print(f"[DRY RUN] Deslocará {shift_up}px para cima, preencherá base com preto")
+                        operations = []
+                        if shift_up > 0:
+                            operations.append(f"shift {shift_up}px")
+                        if bar_height > 0:
+                            operations.append(f"faixas {bar_height}px")
+                        print(f"[DRY RUN] {', '.join(operations)}")
                         success_count += 1
             except Exception as e:
                 print(f"ERRO: {e}")
@@ -150,17 +170,22 @@ def process_images(directory: Path, shift_up: int, backup: bool = False, dry_run
         except Exception:
             pass
         
-        success = add_letterbox(file_path, shift_up)
+        success = add_letterbox(file_path, shift_up, bar_height)
         
         if success:
             if original_size and shift_up >= original_size[1]:
                 print("INALTERADA (deslocamento muito grande)")
                 unchanged_count += 1
-            elif shift_up == 0:
-                print("INALTERADA (sem deslocamento)")
+            elif shift_up == 0 and bar_height == 0:
+                print("INALTERADA (sem alterações)")
                 unchanged_count += 1
             else:
-                print(f"PROCESSADA (deslocada {shift_up}px para cima)")
+                operations = []
+                if shift_up > 0:
+                    operations.append(f"shift {shift_up}px")
+                if bar_height > 0:
+                    operations.append(f"faixas {bar_height}px")
+                print(f"PROCESSADA ({', '.join(operations)})")
                 success_count += 1
         else:
             print("ERRO")
@@ -170,15 +195,16 @@ def process_images(directory: Path, shift_up: int, backup: bool = False, dry_run
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Desloca imagens para cima e preenche a área inferior com preto",
+        description="Desloca imagens para cima e adiciona faixas pretas no topo e base",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
-  python3 image_letterbox.py test                    # Desloca 50px para cima (padrão)
-  python3 image_letterbox.py flipper --shift 80      # Desloca 80px para cima
-  python3 image_letterbox.py test --shift 30         # Desloca 30px para cima
-  python3 image_letterbox.py test --dry-run          # Simula processamento
-  python3 image_letterbox.py test --backup           # Cria backup antes de processar
+  python3 image_letterbox.py test                              # Shift 50px + faixas 30px (padrão)
+  python3 image_letterbox.py flipper --shift 80 --bars 40      # Shift 80px + faixas 40px
+  python3 image_letterbox.py test --shift 30 --bars 0          # Apenas shift 30px
+  python3 image_letterbox.py test --shift 0 --bars 50          # Apenas faixas 50px
+  python3 image_letterbox.py test --dry-run                    # Simula processamento
+  python3 image_letterbox.py test --backup                     # Cria backup antes de processar
         """
     )
     
@@ -187,6 +213,9 @@ Exemplos:
     
     parser.add_argument('--shift', type=int, default=50,
                        help='Quantidade de pixels para deslocar a imagem para cima. Padrão: 50')
+    
+    parser.add_argument('--bars', type=int, default=30,
+                       help='Altura das faixas pretas no topo e base em pixels. Padrão: 30')
     
     parser.add_argument('--dry-run', '-n', action='store_true',
                        help='Simular operação sem modificar arquivos')
@@ -199,9 +228,13 @@ Exemplos:
     
     args = parser.parse_args()
     
-    # Validar deslocamento
+    # Validar parâmetros
     if args.shift < 0:
         print("Erro: O deslocamento deve ser maior ou igual a 0")
+        return 1
+    
+    if args.bars < 0:
+        print("Erro: A altura das faixas deve ser maior ou igual a 0")
         return 1
     
     # Construct full path
@@ -216,10 +249,10 @@ Exemplos:
         print(f"Erro: {target_dir} não é um diretório.")
         return 1
     
-    print(f"⬆️ Image Shift Up - Deslocamento com Preenchimento")
+    print(f"⬆️⬛ Image Shift + Letterbox - Duplo Processamento")
     print(f"📁 Diretório: {target_dir}")
     print(f"📏 Deslocamento para cima: {args.shift} pixels")
-    print(f"⬛ Preenchimento inferior: preto")
+    print(f"⬛ Faixas pretas: {args.bars} pixels (topo e base)")
     print(f"💾 Backup: {'Sim' if args.backup else 'Não'}")
     print(f"🔍 Modo: {'DRY RUN (simulação)' if args.dry_run else 'PROCESSAMENTO REAL'}")
     print("-" * 60)
@@ -227,7 +260,7 @@ Exemplos:
     # Process images
     start_time = time.time()
     success_count, error_count, unchanged_count = process_images(
-        target_dir, args.shift, args.backup, args.dry_run
+        target_dir, args.shift, args.bars, args.backup, args.dry_run
     )
     processing_time = time.time() - start_time
     
@@ -238,7 +271,7 @@ Exemplos:
     print("=" * 60)
     print(f"📊 Total de arquivos: {total_files}")
     print(f"✅ Processadas com sucesso: {success_count}")
-    print(f"⬆️ Inalteradas (deslocamento inválido): {unchanged_count}")
+    print(f"⬆️⬛ Inalteradas (sem alterações): {unchanged_count}")
     print(f"❌ Erros: {error_count}")
     print(f"⏱️  Tempo de processamento: {processing_time:.2f}s")
     
