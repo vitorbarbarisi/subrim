@@ -671,7 +671,9 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Convert TTML tick timings to seconds (offset time)")
     parser.add_argument(
         "directory",
-        help="Directory to search for 'zht' and 'pt' XML files and produce *_secs.xml outputs",
+        nargs="?",
+        default=None,
+        help="Directory to search for language XML files and produce *_secs outputs. If omitted, process all subdirectories under assets/ sequentially.",
     )
     parser.add_argument(
         "--resume-from-seconds",
@@ -755,45 +757,66 @@ def main(argv: list[str]) -> int:
                     os.environ[key] = value
     except Exception:
         pass
+    # Helper to process a single directory inside assets
+    def process_one_directory(dir_path: Path) -> int:
+        if not dir_path.exists() or not dir_path.is_dir():
+            print(f"Erro: diretório dentro de 'assets' não encontrado: {dir_path}", file=sys.stderr)
+            return 1
+        try:
+            zht_file, other_file, other_lang = find_language_files(dir_path)
+        except Exception as exc:
+            print(f"Erro: {exc}", file=sys.stderr)
+            return 1
+
+        try:
+            # Always convert the non-zht file first (pt/es/eng)
+            other_out = determine_output_path_secs(other_file)
+            process_file(other_file, other_out)
+            merge_same_begin_in_file(other_out)
+            print(f"Arquivo convertido: {other_out}")
+
+            # If no zht found, create zht from the converted other language file
+            if zht_file is None:
+                print(f"Nenhum XML 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
+                zht_out = create_zht_secs_from_source(other_out, other_lang)
+                print(f"Arquivo gerado (zht_secs): {zht_out}")
+            else:
+                zht_out = determine_output_path_secs(zht_file)
+                process_file(zht_file, zht_out)
+                merge_same_begin_in_file(zht_out)
+                print(f"Arquivo convertido: {zht_out}")
+
+            base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds)
+            print(f"Arquivo base gerado: {base_txt}")
+        except Exception as exc:
+            print(f"Erro ao processar '{dir_path.name}': {exc}", file=sys.stderr)
+            return 2
+        return 0
+
     # Interpret positional argument as a folder name inside local 'assets'
     assets_root = Path(__file__).resolve().parent / "assets"
+
+    # If no directory provided, process all subdirectories sequentially
+    if args.directory is None:
+        if not assets_root.exists() or not assets_root.is_dir():
+            print(f"Erro: diretório 'assets' não encontrado: {assets_root}", file=sys.stderr)
+            return 1
+        subdirs = sorted([p for p in assets_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+        if not subdirs:
+            print("Nenhum subdiretório encontrado em 'assets'", file=sys.stderr)
+            return 1
+        overall_rc = 0
+        for sub in subdirs:
+            print("-" * 60)
+            print(f"Processando diretório: {sub.name}")
+            rc = process_one_directory(sub)
+            if rc != 0:
+                overall_rc = rc  # keep last non-zero
+        return overall_rc
+
+    # Single directory path provided
     dir_path = (assets_root / args.directory).resolve()
-    if not dir_path.exists() or not dir_path.is_dir():
-        print(f"Erro: diretório dentro de 'assets' não encontrado: {dir_path}", file=sys.stderr)
-        return 1
-    try:
-        zht_file, other_file, other_lang = find_language_files(dir_path)
-    except Exception as exc:  # noqa: BLE001 - broad to surface CLI errors
-        print(f"Erro: {exc}", file=sys.stderr)
-        return 1
-
-    try:
-        # Always convert the non-zht file first (pt or es)
-        other_out = determine_output_path_secs(other_file)
-        process_file(other_file, other_out)
-        # Merge same-begin lines in the converted other language file
-        merge_same_begin_in_file(other_out)
-        print(f"Arquivo convertido: {other_out}")
-
-        # If no zht found, create zht from the converted other language file
-        if zht_file is None:
-            print(f"Nenhum XML 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
-            zht_out = create_zht_secs_from_source(other_out, other_lang)
-            print(f"Arquivo gerado (zht_secs): {zht_out}")
-        else:
-            zht_out = determine_output_path_secs(zht_file)
-            process_file(zht_file, zht_out)
-            # Ensure same-begin merges in zht as well (original zht files may have this too)
-            merge_same_begin_in_file(zht_out)
-            print(f"Arquivo convertido: {zht_out}")
-
-        base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds)
-        print(f"Arquivo base gerado: {base_txt}")
-    except Exception as exc:  # noqa: BLE001
-        print(f"Erro ao processar: {exc}", file=sys.stderr)
-        return 2
-
-    return 0
+    return process_one_directory(dir_path)
 
 
 if __name__ == "__main__":
