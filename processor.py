@@ -15,15 +15,15 @@ processed timestamp. Manual resume is also available:
   python3 processor.py <folder_name_inside_assets> --resume-from-seconds 220.5
 
 Searches the folder under the local "assets" directory (recursively) for one XML file containing "zht"
-in its name and one containing either "pt" or "es" (ignoring files that already contain
+in its name and one containing either "pt", "es" or "eng" (ignoring files that already contain
 "_secs" or "_real"). If a "zht" XML is not found, it is created by translating the
-non-zht file (pt-BR or es) into Traditional Chinese using the DeepSeek API. Writes new
+non-zht file (pt-BR, es ou eng) into Traditional Chinese using the DeepSeek API. Writes new
 files alongside each input with the "_secs" suffix before the extension.
 
 Additionally, a base TXT file is generated from the zht_secs XML with one line
 per subtitle: an incremental index (starting at 1), the begin time, the zht
 text, a list of strings generated via LLM no formato ["palavra: tradução", ...],
-and the matched translation from the other language (pt or es). The file is named
+and the matched translation from the other language (pt, es ou eng). The file is named
 "<zht_secs_stem>_base.txt" and saved alongside the zht_secs file.
 
 If a ".env" file is present next to this script, variables defined there (e.g.,
@@ -296,10 +296,13 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
     url = f"{api_base.rstrip('/')}/chat/completions"
 
-    if source_lang.lower().startswith("pt"):
+    sl = source_lang.lower()
+    if sl.startswith("pt"):
         src_label = "português do Brasil"
-    else:
+    elif sl.startswith("es"):
         src_label = "espanhol"
+    else:
+        src_label = "inglês"
 
     prompt = (
         f"Traduza do {src_label} para chinês tradicional (zht).\n"
@@ -690,7 +693,7 @@ def _select_unique(files: list[Path], label: str) -> Path:
 
 
 def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
-    """Find up to one 'zht' and exactly one 'pt' or 'es' XML under directory (recursive).
+    """Find up to one 'zht' and exactly one 'pt' or 'es' or 'eng' XML under directory (recursive).
 
     Ignores files that already appear to be processed (contain '_secs' or '_real').
     Returns: (zht_file_or_none, other_file, other_lang) where other_lang is 'pt' or 'es'.
@@ -711,6 +714,7 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     zht_candidates = [p for p in candidates if re.search(r"zht", p.name, re.IGNORECASE)]
     pt_candidates = [p for p in candidates if re.search(r"pt", p.name, re.IGNORECASE)]
     es_candidates = [p for p in candidates if re.search(r"es", p.name, re.IGNORECASE)]
+    eng_candidates = [p for p in candidates if re.search(r"eng", p.name, re.IGNORECASE)]
 
     zht_file: Path | None
     if not zht_candidates:
@@ -718,15 +722,18 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     else:
         zht_file = _select_unique(zht_candidates, "com 'zht'")
 
-    # Prefer PT if available; otherwise ES
+    # Prefer PT, then ES, then ENG
     other_file: Path
     other_lang: str
     if pt_candidates:
         other_file = _select_unique(pt_candidates, "com 'pt'")
         other_lang = "pt"
-    else:
+    elif es_candidates:
         other_file = _select_unique(es_candidates, "com 'es'")
         other_lang = "es"
+    else:
+        other_file = _select_unique(eng_candidates, "com 'eng'")
+        other_lang = "eng"
 
     return zht_file, other_file, other_lang
 
