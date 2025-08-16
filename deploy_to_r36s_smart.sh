@@ -20,6 +20,7 @@ echo "✓ Found package: $PACKAGE_FILE ($(ls -lh $PACKAGE_FILE | awk '{print $5}
 
 # Quick check for D: drive first, then F: (user specified priority)
 echo "Checking priority drives D: and F:..."
+R36S_CANDIDATES=()
 for priority_drive in "D" "F"; do
     mount_point="/mnt/${priority_drive,,}"
     sudo mkdir -p "$mount_point" 2>/dev/null || true
@@ -30,6 +31,30 @@ for priority_drive in "D" "F"; do
         echo "✓ ${priority_drive}: mounted successfully at $mount_point"
     else
         echo "ℹ ${priority_drive}: not available"
+        continue
+    fi
+    
+    # Quick check if this looks like R36S and identify type
+    if [ -d "$mount_point" ]; then
+        contents=$(ls "$mount_point" 2>/dev/null | head -5 | tr '\n' ' ' || echo "")
+        partition_type=""
+        
+        if [[ "$contents" =~ RetroArch ]] || [[ "$contents" =~ apps ]]; then
+            partition_type="(R36S-OS - System)"
+            R36S_CANDIDATES+=("$mount_point:OS")
+        elif [[ "$contents" =~ (EASYROMS|roms) ]]; then
+            partition_type="(EASYROMS - Assets)"  
+            R36S_CANDIDATES+=("$mount_point:ROMS")
+        elif [[ "$contents" =~ (retroarch) ]]; then
+            partition_type="(R36S partition)"
+            R36S_CANDIDATES+=("$mount_point:UNKNOWN")
+        fi
+        
+        if [ -n "$partition_type" ]; then
+            echo "  → Detected R36S ${priority_drive}: $partition_type - $contents"
+        else
+            echo "  → Contents: $contents"
+        fi
     fi
 done
 echo
@@ -68,11 +93,76 @@ echo
 # List of possible Windows drives for R36S SD card (D: first, then F: - user specified)
 POSSIBLE_DRIVES=("D" "F" "E" "G" "H")
 
-# Try to mount Windows drives
-echo "Attempting to mount Windows drives..."
-for drive in "${POSSIBLE_DRIVES[@]}"; do
-    mount_windows_drive "$drive"
+# Handle R36S partitions intelligently
+R36S_OS_MOUNT=""
+R36S_ROMS_MOUNT=""
+
+for candidate in "${R36S_CANDIDATES[@]}"; do
+    mount_path="${candidate%:*}"
+    partition_type="${candidate#*:}"
+    
+    case "$partition_type" in
+        "OS")
+            R36S_OS_MOUNT="$mount_path"
+            ;;
+        "ROMS")
+            R36S_ROMS_MOUNT="$mount_path"
+            ;;
+    esac
 done
+
+echo "🎯 R36S Partition Detection:"
+echo "   System (OS):  ${R36S_OS_MOUNT:-"Not found"}"
+echo "   Assets (ROM): ${R36S_ROMS_MOUNT:-"Not found"}"
+echo
+
+# Determine installation strategy
+if [ -n "$R36S_OS_MOUNT" ]; then
+    echo "✅ Perfect! Using optimized installation:"
+    echo "   📱 App → $R36S_OS_MOUNT (System partition)"
+    if [ -n "$R36S_ROMS_MOUNT" ]; then
+        echo "   📁 Assets → $R36S_ROMS_MOUNT (Assets partition)"
+        USE_DUAL_PARTITION=true
+    else
+        echo "   📁 Assets → $R36S_OS_MOUNT (Same partition)"
+        USE_DUAL_PARTITION=false
+    fi
+    R36S_MOUNT="$R36S_OS_MOUNT"
+elif [ -n "$R36S_ROMS_MOUNT" ]; then
+    echo "⚠ Only assets partition found, installing everything there:"
+    R36S_MOUNT="$R36S_ROMS_MOUNT"
+    USE_DUAL_PARTITION=false
+elif [ ${#R36S_CANDIDATES[@]} -gt 0 ]; then
+    echo "🔍 R36S partitions found but type unclear:"
+    for i in "${!R36S_CANDIDATES[@]}"; do
+        candidate="${R36S_CANDIDATES[$i]}"
+        mount_path="${candidate%:*}"
+        drive_letter=$(echo "$mount_path" | sed 's|/mnt/||')
+        contents=$(ls "$mount_path" 2>/dev/null | head -3 | tr '\n' ' ')
+        echo "  $((i+1)). $mount_path ($drive_letter): $contents"
+    done
+    echo
+    read -p "Choose primary R36S partition (1-${#R36S_CANDIDATES[@]}): " choice
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#R36S_CANDIDATES[@]} ]; then
+        R36S_MOUNT="${R36S_CANDIDATES[$((choice-1))]%:*}"
+        USE_DUAL_PARTITION=false
+        echo "✓ Selected: $R36S_MOUNT"
+    else
+        echo "ERROR: Invalid choice"
+        exit 1
+    fi
+else
+    echo "❌ No R36S partitions found, trying other drives..."
+    # Continue with original logic for other drives
+    for drive in "${POSSIBLE_DRIVES[@]}"; do
+        mount_point="/mnt/${drive,,}"
+        if [ ! -d "$mount_point" ] || ! mountpoint -q "$mount_point"; then
+            mount_windows_drive "$drive"
+        else
+            echo "✓ $drive: already mounted at $mount_point"
+        fi
+    done
+fi
 
 echo
 
