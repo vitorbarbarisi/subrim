@@ -36,16 +36,16 @@ for priority_drive in "D" "F"; do
     
     # Quick check if this looks like R36S and identify type
     if [ -d "$mount_point" ]; then
-        contents=$(ls "$mount_point" 2>/dev/null | head -5 | tr '\n' ' ' || echo "")
+        contents=$(ls "$mount_point" 2>/dev/null | head -10 | tr '\n' ' ' || echo "")
         partition_type=""
         
-        if [[ "$contents" =~ RetroArch ]] || [[ "$contents" =~ apps ]]; then
+        if [[ "$contents" =~ (RetroArch|apps|WHERE_ARE_MY_ROMS) ]]; then
             partition_type="(R36S-OS - System)"
             R36S_CANDIDATES+=("$mount_point:OS")
-        elif [[ "$contents" =~ (EASYROMS|roms) ]]; then
+        elif [[ "$contents" =~ (EASYROMS|roms|3do|advision|alg|amiga|arcade|atari|gb|gba|gbc|genesis|mame|n64|nes|psx|snes) ]]; then
             partition_type="(EASYROMS - Assets)"  
             R36S_CANDIDATES+=("$mount_point:ROMS")
-        elif [[ "$contents" =~ (retroarch) ]]; then
+        elif [[ "$contents" =~ (retroarch|Image.*R36S) ]]; then
             partition_type="(R36S partition)"
             R36S_CANDIDATES+=("$mount_point:UNKNOWN")
         fi
