@@ -263,21 +263,57 @@ fi
 rm -f "$R36S_MOUNT/.test_write"
 echo "✓ Mount point is writable"
 
-# Continue with deployment (same as original script)
-INSTALL_DIR="$R36S_MOUNT/r36s_viewer_install"
-echo
-echo "Creating installation directory: $INSTALL_DIR"
-mkdir -p "$INSTALL_DIR"
+# Dual partition installation logic
+if [ "$USE_DUAL_PARTITION" = true ] && [ -n "$R36S_ROMS_MOUNT" ]; then
+    echo
+    echo "🎯 Implementing dual partition installation:"
+    echo "   📱 App → $R36S_MOUNT (System)"
+    echo "   📁 Assets → $R36S_ROMS_MOUNT (Assets)"
+    
+    # Install app on system partition
+    APP_INSTALL_DIR="$R36S_MOUNT/r36s_viewer_install"
+    mkdir -p "$APP_INSTALL_DIR"
+    
+    # Install assets on assets partition  
+    ASSETS_INSTALL_DIR="$R36S_ROMS_MOUNT/r36s_viewer_assets"
+    mkdir -p "$ASSETS_INSTALL_DIR"
+    
+    echo "Copying app package to system partition..."
+    cp "$PACKAGE_FILE" "$APP_INSTALL_DIR/"
+    
+    echo "Extracting app package..."
+    cd "$APP_INSTALL_DIR"
+    tar xzf "$PACKAGE_FILE"
+    rm "$PACKAGE_FILE"
+    
+    # Move assets to assets partition
+    if [ -d "r36s_viewer_final_package/assets" ]; then
+        echo "Moving assets to assets partition..."
+        mv "r36s_viewer_final_package/assets"/* "$ASSETS_INSTALL_DIR/" 2>/dev/null || true
+        rmdir "r36s_viewer_final_package/assets" 2>/dev/null || true
+        echo "✓ Assets moved to $ASSETS_INSTALL_DIR"
+    fi
+    
+    INSTALL_DIR="$APP_INSTALL_DIR"
+    echo "✓ Dual partition setup complete"
+    
+else
+    # Single partition installation (original logic)
+    echo
+    echo "📁 Single partition installation: $R36S_MOUNT"
+    INSTALL_DIR="$R36S_MOUNT/r36s_viewer_install"
+    mkdir -p "$INSTALL_DIR"
 
-echo "Copying package to SD card..."
-cp "$PACKAGE_FILE" "$INSTALL_DIR/"
-echo "✓ Package copied to SD card"
+    echo "Copying package to SD card..."
+    cp "$PACKAGE_FILE" "$INSTALL_DIR/"
+    echo "✓ Package copied to SD card"
 
-echo "Extracting package on SD card..."
-cd "$INSTALL_DIR"
-tar xzf "$PACKAGE_FILE"
-rm "$PACKAGE_FILE"
-echo "✓ Package extracted and cleaned up"
+    echo "Extracting package on SD card..."
+    cd "$INSTALL_DIR"
+    tar xzf "$PACKAGE_FILE"
+    rm "$PACKAGE_FILE"
+    echo "✓ Package extracted and cleaned up"
+fi
 
 # Create quick installer on SD card root
 cd "$R36S_MOUNT"
