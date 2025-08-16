@@ -263,6 +263,14 @@ fi
 rm -f "$R36S_MOUNT/.test_write"
 echo "✓ Mount point is writable"
 
+# Copy local assets to F: partition if available
+if [ -n "$R36S_ROMS_MOUNT" ] && [ -d "assets" ]; then
+    echo "Copying local assets to F: partition..."
+    cp -r assets/* "$R36S_ROMS_MOUNT/r36s_viewer_assets/" 2>/dev/null || true
+    episodes=$(ls -1 "$R36S_ROMS_MOUNT/r36s_viewer_assets/" 2>/dev/null | wc -l)
+    echo "✓ Copied $episodes episodes to F: drive"
+fi
+
 # Dual partition installation logic
 if [ "$USE_DUAL_PARTITION" = true ] && [ -n "$R36S_ROMS_MOUNT" ]; then
     echo
