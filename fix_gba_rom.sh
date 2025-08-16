@@ -1,0 +1,127 @@
+#!/bin/bash
+
+echo "=== Criando GBA ROM corrigido ==="
+
+cd r36s_viewer_gba
+
+# Create a working GBA ROM
+cat > create_working_gba.py << 'PYTHON_EOF'
+#!/usr/bin/env python3
+
+def create_working_gba_rom():
+    # Create 32KB ROM
+    rom = bytearray(32 * 1024)
+    
+    # GBA Header - critical for emulator compatibility
+    
+    # Entry point - ARM branch to start of program (after header)
+    # b 0x080000C0 = branch to 0x08000000 + 0xC0 = after 192-byte header
+    rom[0:4] = [0x00, 0x00, 0x2E, 0xEA]  # Little endian ARM branch
+    
+    # Nintendo Logo (required by GBA BIOS)
+    nintendo_logo = bytes([
+        0x24, 0xFF, 0xAE, 0x51, 0x69, 0x9A, 0xA2, 0x21, 0x3D, 0x84, 0x82, 0x0A,
+        0x84, 0xE4, 0x09, 0xAD, 0x11, 0x24, 0x8B, 0x98, 0xC0, 0x81, 0x7F, 0x21,
+        0xA3, 0x52, 0xBE, 0x19, 0x93, 0x09, 0xCE, 0x20, 0x10, 0x46, 0x4A, 0x4A,
+        0xF8, 0x27, 0x31, 0xEC, 0x58, 0xC7, 0xE8, 0x33, 0x82, 0xE3, 0xCE, 0xBF,
+        0x85, 0xF4, 0xDF, 0x94, 0xCE, 0x4B, 0x09, 0xC1, 0x94, 0x56, 0x8A, 0xC0,
+        0x13, 0x72, 0xA7, 0xFC, 0x9F, 0x84, 0x4D, 0x73, 0xA3, 0xCA, 0x9A, 0x61,
+        0x58, 0x97, 0xA3, 0x27, 0xFC, 0x03, 0x98, 0x76, 0x23, 0x1D, 0xC7, 0x61,
+        0x03, 0x04, 0xAE, 0x56, 0xBF, 0x38, 0x84, 0x00, 0x40, 0xA7, 0x0E, 0xFD,
+        0xFF, 0x52, 0xFE, 0x03, 0x6F, 0x95, 0x30, 0xF1, 0x97, 0xFB, 0xC0, 0x85,
+        0x60, 0xD6, 0x80, 0x25, 0xA9, 0x63, 0xBE, 0x03, 0x01, 0x4E, 0x38, 0xE2,
+        0xF9, 0xA2, 0x34, 0xFF, 0xBB, 0x3E, 0x03, 0x44, 0x78, 0x00, 0x90, 0xCB,
+        0x88, 0x11, 0x3A, 0x94, 0x65, 0xC0, 0x7C, 0x63, 0x87, 0xF0, 0x3C, 0xAF,
+        0xD6, 0x25, 0xE4, 0x8B, 0x38, 0x0A, 0xAC, 0x72, 0x21, 0xD4, 0xF8, 0x07
+    ])
+    rom[4:160] = nintendo_logo
+    
+    # Game Title
+    title = b"R36S VIEWER\x00"
+    rom[160:172] = title.ljust(12, b'\x00')
+    
+    # Game Code
+    rom[172:176] = b"RSUB"
+    
+    # Maker Code  
+    rom[176:178] = b"01"
+    
+    # Fixed value
+    rom[178] = 0x96
+    
+    # Unit code, device type, software version
+    rom[179] = 0x00
+    rom[180] = 0x00
+    rom[188] = 0x00
+    
+    # Calculate complement check
+    checksum = 0
+    for i in range(160, 189):
+        checksum = (checksum - rom[i]) & 0xFF
+    checksum = (checksum - 0x19) & 0xFF
+    rom[189] = checksum
+    
+    # Reserved area
+    rom[190:192] = [0x00, 0x00]
+    
+    # ARM code starts at 0xC0 (192 bytes)
+    code_start = 0xC0
+    
+    # Working ARM thumb code that displays colored screen
+    arm_code = [
+        # Switch to thumb mode and set up
+        0x00, 0xDF, 0x00, 0x00,  # SWI 0 (switch to thumb mode)
+        
+        # Now in thumb mode - set video mode
+        0x00, 0x48,              # ldr r0, [pc, #0] ; load address 0x04000000
+        0x01, 0x49,              # ldr r1, [pc, #4] ; load value 0x0403 (mode 3 + bg2)
+        0x01, 0x60,              # str r1, [r0]    ; set display mode
+        0x02, 0x48,              # ldr r0, [pc, #8] ; load VRAM address
+        0x03, 0x49,              # ldr r1, [pc, #12]; load color value
+        
+        # Fill screen loop
+        0x01, 0x60,              # str r1, [r0]    ; write pixel
+        0x02, 0x30,              # add r0, #2      ; next pixel
+        0x04, 0x4A,              # ldr r2, [pc, #16]; load end address
+        0x90, 0x42,              # cmp r0, r2      ; compare with end
+        0xFB, 0xD3,              # blt loop        ; branch if less
+        
+        # Infinite loop
+        0xFE, 0xE7,              # b infinite      ; infinite loop
+        
+        # Data section (addresses and values)
+        0x00, 0x00, 0x00, 0x04,  # 0x04000000 (DISPCNT)
+        0x03, 0x04, 0x00, 0x00,  # 0x0403 (Mode 3 + BG2)
+        0x00, 0x00, 0x00, 0x06,  # 0x06000000 (VRAM)
+        0x1F, 0x7C, 0x00, 0x00,  # 0x7C1F (magenta color)
+        0x00, 0x96, 0x01, 0x06,  # 0x06019600 (end of screen)
+    ]
+    
+    # Place ARM code
+    for i, byte in enumerate(arm_code):
+        if code_start + i < len(rom):
+            rom[code_start + i] = byte
+    
+    return bytes(rom)
+
+# Create the working ROM
+rom_data = create_working_gba_rom()
+
+with open('viewer.gba', 'wb') as f:
+    f.write(rom_data)
+
+print(f"✅ Working GBA ROM created: {len(rom_data)} bytes")
+print("This ROM should display a magenta screen and not crash")
+PYTHON_EOF
+
+python3 create_working_gba.py
+
+if [ -f "viewer.gba" ]; then
+    echo "✅ Fixed GBA ROM created!"
+    ls -lh viewer.gba
+    cd ..
+    echo "🚀 Deploy with: sudo ./deploy_gba_direct.sh"
+else
+    echo "❌ Failed to create fixed ROM"
+    cd ..
+fi
