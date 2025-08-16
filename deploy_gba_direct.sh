@@ -324,8 +324,12 @@ for location in "${GBA_LOCATIONS[@]}"; do
     mkdir -p "$location" 2>/dev/null || true
     
     if [ -d "$location" ]; then
-        # Try multiple filename variations
+        # Try multiple filename variations (0 prefix for top of list)
         FILENAMES=(
+            "0_R36S_Viewer.gba"
+            "0_R36SViewer.gba"  
+            "0_r36s_viewer.gba"
+            "0_viewer.gba"
             "R36S_Viewer.gba"
             "R36SViewer.gba"  
             "r36s_viewer.gba"
