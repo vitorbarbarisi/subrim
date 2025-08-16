@@ -1,0 +1,61 @@
+cmake_minimum_required(VERSION 3.16)
+project(r36s_viewer C)
+
+set(CMAKE_C_STANDARD 11)
+
+# Manual SDL2 configuration for cross-compilation
+# These paths work with the arm-linux-gnueabihf cross-compiler
+
+# SDL2 include directories (from cross-compiler sysroot)
+set(SDL2_INCLUDE_DIRS
+    "/usr/arm-linux-gnueabihf/include/SDL2"
+    "/usr/arm-linux-gnueabihf/include"
+)
+
+# SDL2 libraries
+set(SDL2_LIBRARIES
+    "-lSDL2"
+    "-lSDL2_image" 
+    "-lSDL2_ttf"
+    "-lm"
+    "-ldl"
+    "-lpthread"
+)
+
+# Add source files
+add_executable(r36s_viewer
+    r36s_viewer.c
+    base.c
+    text.c
+    ui.c
+)
+
+# Include directories
+target_include_directories(r36s_viewer PRIVATE
+    ${SDL2_INCLUDE_DIRS}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+
+# Link libraries
+target_link_libraries(r36s_viewer PRIVATE
+    ${SDL2_LIBRARIES}
+)
+
+# Additional linker flags for ARM
+target_link_options(r36s_viewer PRIVATE
+    -Wl,--as-needed
+)
+
+# Compiler-specific options
+target_compile_options(r36s_viewer PRIVATE
+    -Wall
+    -Wextra
+    -O2
+)
+
+# Print configuration info
+message(STATUS "Building for ARM cross-compilation")
+message(STATUS "C Compiler: ${CMAKE_C_COMPILER}")
+message(STATUS "C Flags: ${CMAKE_C_FLAGS}")
+message(STATUS "SDL2 Include Dirs: ${SDL2_INCLUDE_DIRS}")
+message(STATUS "SDL2 Libraries: ${SDL2_LIBRARIES}")

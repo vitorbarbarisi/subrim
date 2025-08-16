@@ -19,16 +19,16 @@ set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
 set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
 
 # R36S specific flags (ARM Cortex-A7 with NEON)
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard")
-set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard")
+set(CMAKE_C_FLAGS "-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard")
+set(CMAKE_CXX_FLAGS "-march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard")
 
-# pkg-config setup for cross-compilation
-set(ENV{PKG_CONFIG_PATH} "")
-set(ENV{PKG_CONFIG_LIBDIR} "/usr/lib/arm-linux-gnueabihf/pkgconfig:/usr/share/pkgconfig")
-set(ENV{PKG_CONFIG_SYSROOT_DIR} "/usr/arm-linux-gnueabihf")
+# Force sysroot to avoid host system headers
+set(CMAKE_SYSROOT /usr/arm-linux-gnueabihf)
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} --sysroot=/usr/arm-linux-gnueabihf")
+set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} --sysroot=/usr/arm-linux-gnueabihf")
 
-# Set pkg-config executable
-set(PKG_CONFIG_EXECUTABLE /usr/bin/arm-linux-gnueabihf-pkg-config)
+# Disable pkg-config to avoid conflicts - we'll set paths manually
+set(PKG_CONFIG_FOUND FALSE)
 
 # Cache variables
 set(CMAKE_C_COMPILER_WORKS TRUE)

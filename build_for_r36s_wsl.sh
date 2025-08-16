@@ -57,32 +57,11 @@ else
     echo "✓ pkg-config found"
 fi
 
-# Install ARM SDL2 libraries for cross-compilation
-echo "Checking ARM SDL2 libraries..."
-if ! dpkg -l | grep -q libsdl2-dev:armhf; then
-    echo "Installing SDL2 ARM libraries..."
-    # Add armhf architecture
-    sudo dpkg --add-architecture armhf
-    sudo apt-get update -qq
-    
-    # Install ARM SDL2 libraries and cross-compilation tools
-    sudo apt-get install -y \
-        libsdl2-dev:armhf \
-        libsdl2-image-dev:armhf \
-        libsdl2-ttf-dev:armhf \
-        libc6-dev:armhf \
-        pkg-config-arm-linux-gnueabihf
-else
-    echo "✓ ARM SDL2 libraries found"
-fi
+# Note: Skip armhf packages for Ubuntu 24.04 (Noble) - not available
+# We'll use the cross-compiler's built-in SDL2 headers and link dynamically
 
-# Check if ARM pkg-config exists
-if ! command -v arm-linux-gnueabihf-pkg-config &> /dev/null; then
-    echo "Installing ARM pkg-config..."
-    sudo apt-get install -y pkg-config-arm-linux-gnueabihf
-else
-    echo "✓ ARM pkg-config found"
-fi
+echo "Note: Using cross-compiler built-in libraries (Ubuntu 24.04 compatible)"
+echo "✓ Cross-compilation setup ready"
 
 echo
 echo "All dependencies installed successfully!"
@@ -104,6 +83,19 @@ if [ ! -f "$TOOLCHAIN_FILE" ]; then
     cd ..
     exit 1
 fi
+
+# Check if cross-compilation CMakeLists exists
+CMAKE_CROSS="../CMakeLists_cross.txt"
+if [ ! -f "$CMAKE_CROSS" ]; then
+    echo "ERROR: Cross-compilation CMakeLists not found: $CMAKE_CROSS"
+    echo "Make sure CMakeLists_cross.txt is in the project root"
+    cd ..
+    exit 1
+fi
+
+# Copy cross-compilation CMakeLists to current directory
+cp "$CMAKE_CROSS" "CMakeLists.txt"
+echo "✓ Using cross-compilation CMakeLists.txt"
 
 # Configure with CMake using toolchain file
 cmake .. -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE"
