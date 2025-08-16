@@ -35,25 +35,74 @@ R36S_OS_MOUNT=""
 R36S_ROMS_MOUNT=""
 
 echo "Detecting R36S SD card partitions..."
-for drive in "D" "F" "E" "G"; do
-    mount_point="/mnt/${drive,,}"
+
+# Quick check for D: drive first, then F: (smart mount detection)
+R36S_CANDIDATES=()
+for priority_drive in "D" "F"; do
+    mount_point="/mnt/${priority_drive,,}"
+    sudo mkdir -p "$mount_point" 2>/dev/null || true
     
+    if [ -d "$mount_point" ] && mountpoint -q "$mount_point"; then
+        echo "✓ ${priority_drive}: already mounted at $mount_point"
+    elif sudo mount -t drvfs "${priority_drive}:" "$mount_point" 2>/dev/null; then
+        echo "✓ ${priority_drive}: mounted successfully at $mount_point"
+    else
+        echo "ℹ ${priority_drive}: not available"
+        continue
+    fi
+    
+    # Check if this looks like R36S and identify type
     if [ -d "$mount_point" ]; then
-        contents=$(ls "$mount_point" 2>/dev/null | head -5 | tr '\n' ' ' || echo "")
+        contents=$(ls "$mount_point" 2>/dev/null | head -10 | tr '\n' ' ' || echo "")
+        partition_type=""
         
-        if [[ "$contents" =~ (WHERE_ARE_MY_ROMS|RetroArch|apps) ]]; then
+        if [[ "$contents" =~ (RetroArch|apps|WHERE_ARE_MY_ROMS) ]]; then
+            partition_type="(R36S-OS - System)"
             R36S_OS_MOUNT="$mount_point"
-            echo "✓ System partition: $mount_point"
-        elif [[ "$contents" =~ (3do|advision|alg|amiga|EASYROMS|roms) ]]; then
+            echo "  → Detected R36S ${priority_drive}: $partition_type"
+        elif [[ "$contents" =~ (EASYROMS|roms|3do|advision|alg|amiga|arcade|atari|gb|gba|gbc|genesis|mame|n64|nes|psx|snes) ]]; then
+            partition_type="(EASYROMS - Assets)"  
             R36S_ROMS_MOUNT="$mount_point"
-            echo "✓ Assets partition: $mount_point"
+            echo "  → Detected R36S ${priority_drive}: $partition_type"
+        elif [[ "$priority_drive" == "F" && "$contents" =~ (3do|advision|alg|amiga) ]]; then
+            # Special case: F: drive with emulator folders is likely EASYROMS
+            partition_type="(EASYROMS - Assets)"  
+            R36S_ROMS_MOUNT="$mount_point"
+            echo "  → Detected R36S ${priority_drive}: $partition_type"
+        else
+            echo "  → ${priority_drive}: Contents: $contents"
         fi
     fi
 done
 
-if [ -z "$R36S_OS_MOUNT" ]; then
-    echo "ERROR: R36S system partition not found!"
-    echo "Make sure SD card is inserted and mounted"
+echo
+echo "🎯 R36S Partition Detection:"
+echo "   System (OS):  ${R36S_OS_MOUNT:-"Not found"}"
+echo "   Assets (ROM): ${R36S_ROMS_MOUNT:-"Not found"}"
+echo
+
+# Determine installation strategy
+if [ -n "$R36S_OS_MOUNT" ]; then
+    echo "✅ Perfect! Using optimized installation:"
+    echo "   📱 App → $R36S_OS_MOUNT (System partition)"
+    if [ -n "$R36S_ROMS_MOUNT" ]; then
+        echo "   📁 Assets → $R36S_ROMS_MOUNT (Assets partition)"
+        USE_DUAL_PARTITION=true
+    else
+        echo "   📁 Assets → $R36S_OS_MOUNT (Same partition)"
+        USE_DUAL_PARTITION=false
+    fi
+elif [ -n "$R36S_ROMS_MOUNT" ]; then
+    echo "⚠ Only assets partition found, installing everything there:"
+    R36S_OS_MOUNT="$R36S_ROMS_MOUNT"  # Use ROMS partition for everything
+    USE_DUAL_PARTITION=false
+else
+    echo "ERROR: R36S partitions not found!"
+    echo "Make sure SD card is inserted and has proper drive letters (D:, F:)"
+    echo
+    echo "Manual mount commands:"
+    echo "   sudo mount -t drvfs D: /mnt/d"
+    echo "   sudo mount -t drvfs F: /mnt/f"
     exit 1
 fi
 
