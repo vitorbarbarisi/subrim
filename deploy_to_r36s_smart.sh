@@ -17,6 +17,21 @@ if [ ! -f "$PACKAGE_FILE" ]; then
 fi
 
 echo "✓ Found package: $PACKAGE_FILE ($(ls -lh $PACKAGE_FILE | awk '{print $5}'))"
+
+# Quick check for D: drive first, then F: (user specified priority)
+echo "Checking priority drives D: and F:..."
+for priority_drive in "D" "F"; do
+    mount_point="/mnt/${priority_drive,,}"
+    sudo mkdir -p "$mount_point" 2>/dev/null || true
+    
+    if [ -d "$mount_point" ] && mountpoint -q "$mount_point"; then
+        echo "✓ ${priority_drive}: already mounted at $mount_point"
+    elif sudo mount -t drvfs "${priority_drive}:" "$mount_point" 2>/dev/null; then
+        echo "✓ ${priority_drive}: mounted successfully at $mount_point"
+    else
+        echo "ℹ ${priority_drive}: not available"
+    fi
+done
 echo
 
 # Function to try mounting a Windows drive
@@ -50,8 +65,8 @@ echo "Available /mnt/ directories:"
 ls -la /mnt/ 2>/dev/null || echo "  (none found)"
 echo
 
-# List of possible Windows drives for R36S SD card
-POSSIBLE_DRIVES=("D" "E" "F" "G" "H")
+# List of possible Windows drives for R36S SD card (D: first, then F: - user specified)
+POSSIBLE_DRIVES=("D" "F" "E" "G" "H")
 
 # Try to mount Windows drives
 echo "Attempting to mount Windows drives..."
