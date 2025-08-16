@@ -11,49 +11,14 @@ echo
 # Check if we have ARM binary ready
 if [ ! -f "build_r36s/r36s_viewer" ]; then
     echo "No ARM binary found, building now..."
-    if [ -f "build_minimal_r36s.sh" ]; then
-        echo "ERROR: build_minimal_r36s.sh creates minimal version only"
-        echo "We need full cross-compilation. Let me create that..."
-    fi
     
-    # Try to build with static linking
-    echo "Attempting static cross-compilation..."
-    if [ -f "build_with_static_sdl2.sh" ]; then
-        echo "Using static SDL2 build..."
-        ./build_with_static_sdl2.sh
-    else
-        echo "Creating simple ARM build without SDL2..."
-        mkdir -p build_r36s
-        cd build_r36s
-        
-        # Create a working stub that can be completed on R36S
-        cat > r36s_viewer_stub.c << 'EOF'
-#include <stdio.h>
-#include <stdlib.h>
-
-int main(int argc, char **argv) {
-    printf("R36S Viewer - ARM Binary Ready!\n");
-    printf("To complete installation:\n");
-    printf("1. Install SDL2: apt-get install libsdl2-dev libsdl2-image-dev libsdl2-ttf-dev\n");
-    printf("2. Compile full version: gcc *.c -lSDL2 -lSDL2_image -lSDL2_ttf -o r36s_viewer\n");
-    printf("3. Run: ./r36s_viewer\n");
-    return 0;
-}
-EOF
-        
-        echo "Creating ARM stub binary..."
-        arm-linux-gnueabihf-gcc -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard \
-            r36s_viewer_stub.c -o r36s_viewer
-        
-        # Copy all source files for compilation on R36S
-        cp ../r36s_viewer.c .
-        cp ../base.c .
-        cp ../text.c .
-        cp ../ui.c .
-        cp ../*.h .
-        
-        cd ..
-        echo "✓ ARM stub + source files ready"
+    # Use simple ARM build
+    echo "Using simple ARM build (avoids SDL2 linking issues)..."
+    ./build_simple_arm.sh
+    
+    if [ $? -ne 0 ]; then
+        echo "ERROR: Simple ARM build failed"
+        exit 1
     fi
 fi
 
