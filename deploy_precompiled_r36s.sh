@@ -292,7 +292,33 @@ cd "\$(dirname "\$0")/$RUNNER_PATH"
 EOF
 
 chmod +x "$RUNNER_LOCATION/run_r36s_viewer.sh"
+
+# Create desktop icon for R36S file manager
+cat > "$RUNNER_LOCATION/R36S_Viewer.desktop" << EOF
+[Desktop Entry]
+Name=R36S Viewer
+Comment=Episode viewer for R36S
+Exec=$RUNNER_LOCATION/run_r36s_viewer.sh
+Icon=multimedia-video-player
+Terminal=false
+Type=Application
+Categories=Game;AudioVideo;
+EOF
+
+chmod +x "$RUNNER_LOCATION/R36S_Viewer.desktop"
 echo "✓ Created direct runner at $RUNNER_LOCATION"
+echo "✓ Created desktop icon: R36S_Viewer.desktop"
+
+# Create a simple executable that might be more visible
+cat > "$RUNNER_LOCATION/START_R36S_VIEWER" << 'EOF'
+#!/bin/bash
+# R36S Viewer Starter (no extension for better visibility)
+cd "$(dirname "$0")"
+./run_r36s_viewer.sh "$@"
+EOF
+
+chmod +x "$RUNNER_LOCATION/START_R36S_VIEWER"
+echo "✓ Created alternative launcher: START_R36S_VIEWER"
 
 # Create instructions file
 cat > "$R36S_OS_MOUNT/R36S_VIEWER_INSTRUCTIONS.txt" << 'EOF'
@@ -349,11 +375,17 @@ fi
 echo
 echo "🎮 On R36S (NO TERMINAL NEEDED):"
 if [ -n "$R36S_ROMS_MOUNT" ]; then
-    echo "   Option 1: File Manager → F:/run_r36s_viewer.sh (direct run)"
+    echo "   📱 Main options on F: drive:"
+    echo "      - R36S_Viewer.desktop (desktop icon)"
+    echo "      - START_R36S_VIEWER (simple launcher)"
+    echo "      - run_r36s_viewer.sh (script file)"
 else
-    echo "   Option 1: File Manager → D:/run_r36s_viewer.sh (direct run)"
+    echo "   📱 Main options on D: drive:"
+    echo "      - R36S_Viewer.desktop (desktop icon)"
+    echo "      - START_R36S_VIEWER (simple launcher)" 
+    echo "      - run_r36s_viewer.sh (script file)"
 fi
-echo "   Option 2: File Manager → r36s_viewer_precompiled/install_precompiled.sh (install)"
+echo "   💻 System install: r36s_viewer_precompiled/install_precompiled.sh"
 echo
 if [ "$COPY_ASSETS" = true ]; then
     echo "📋 Episodes status:"
