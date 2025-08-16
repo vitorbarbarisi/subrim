@@ -5,7 +5,54 @@
 
 set -e
 
+# Parse command line arguments
+COPY_ASSETS=true
+HELP=false
+
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --no-assets)
+            COPY_ASSETS=false
+            shift
+            ;;
+        --assets)
+            COPY_ASSETS=true
+            shift
+            ;;
+        --help|-h)
+            HELP=true
+            shift
+            ;;
+        *)
+            echo "Unknown option: $1"
+            HELP=true
+            shift
+            ;;
+    esac
+done
+
+if [ "$HELP" = true ]; then
+    echo "Usage: $0 [OPTIONS]"
+    echo
+    echo "Options:"
+    echo "  --assets      Copy assets to SD card (default)"
+    echo "  --no-assets   Skip copying assets (binary only)"
+    echo "  --help, -h    Show this help message"
+    echo
+    echo "Examples:"
+    echo "  $0                    # Deploy with assets"
+    echo "  $0 --no-assets       # Deploy binary only"
+    echo "  $0 --assets          # Deploy with assets (explicit)"
+    exit 0
+fi
+
 echo "=== Precompiled R36S Deploy (No Terminal Needed) ==="
+echo
+if [ "$COPY_ASSETS" = true ]; then
+    echo "📁 Assets: Will be copied to SD card"
+else
+    echo "📁 Assets: Skipped (binary only deployment)"
+fi
 echo
 
 # Check if we have ARM binary ready
@@ -126,24 +173,29 @@ if [ -d "build_r36s" ]; then
     cp build_r36s/*.h "$INSTALL_DIR/" 2>/dev/null || true
 fi
 
-# Copy assets to appropriate partition
-if [ -n "$R36S_ROMS_MOUNT" ] && [ -d "assets" ]; then
-    echo "Copying assets to assets partition..."
-    ASSETS_DIR="$R36S_ROMS_MOUNT/r36s_viewer_assets"
-    rm -rf "$ASSETS_DIR"
-    cp -r assets "$ASSETS_DIR"
-    echo "✓ Assets copied to $ASSETS_DIR"
-    
-    # Create symlink setup for launcher
-    LAUNCHER_ASSETS_PATH="/storage/roms/r36s_viewer_assets"
-elif [ -d "assets" ]; then
-    echo "Copying assets to same partition..."
-    cp -r assets "$INSTALL_DIR/"
-    echo "✓ Assets copied to $INSTALL_DIR/assets"
-    
-    LAUNCHER_ASSETS_PATH="./assets"
+# Copy assets to appropriate partition (if requested)
+if [ "$COPY_ASSETS" = true ]; then
+    if [ -n "$R36S_ROMS_MOUNT" ] && [ -d "assets" ]; then
+        echo "Copying assets to assets partition..."
+        ASSETS_DIR="$R36S_ROMS_MOUNT/r36s_viewer_assets"
+        rm -rf "$ASSETS_DIR"
+        cp -r assets "$ASSETS_DIR"
+        echo "✓ Assets copied to $ASSETS_DIR"
+        
+        # Create symlink setup for launcher
+        LAUNCHER_ASSETS_PATH="/storage/roms/r36s_viewer_assets"
+    elif [ -d "assets" ]; then
+        echo "Copying assets to same partition..."
+        cp -r assets "$INSTALL_DIR/"
+        echo "✓ Assets copied to $INSTALL_DIR/assets"
+        
+        LAUNCHER_ASSETS_PATH="./assets"
+    else
+        echo "⚠ No assets folder found"
+        LAUNCHER_ASSETS_PATH="./assets"
+    fi
 else
-    echo "⚠ No assets folder found"
+    echo "📁 Assets: Skipped (--no-assets flag used)"
     LAUNCHER_ASSETS_PATH="./assets"
 fi
 
@@ -220,17 +272,27 @@ EOF
 chmod +x "$INSTALL_DIR/install_precompiled.sh"
 echo "✓ Created precompiled installer"
 
-# Create simple runner for SD card root
-cat > "$R36S_OS_MOUNT/run_r36s_viewer.sh" << EOF
+# Create simple runner - prefer F: drive if available
+if [ -n "$R36S_ROMS_MOUNT" ]; then
+    RUNNER_LOCATION="$R36S_ROMS_MOUNT"
+    RUNNER_PATH="r36s_viewer_precompiled"
+    echo "📱 Creating main runner on F: drive (EASYROMS)..."
+else
+    RUNNER_LOCATION="$R36S_OS_MOUNT"
+    RUNNER_PATH="r36s_viewer_precompiled"
+    echo "📱 Creating main runner on D: drive (system)..."
+fi
+
+cat > "$RUNNER_LOCATION/run_r36s_viewer.sh" << EOF
 #!/bin/bash
 # Direct runner for R36S Viewer (no installation needed)
 
-cd "\$(dirname "\$0")/r36s_viewer_precompiled"
+cd "\$(dirname "\$0")/$RUNNER_PATH"
 ./run_viewer.sh "\$@"
 EOF
 
-chmod +x "$R36S_OS_MOUNT/run_r36s_viewer.sh"
-echo "✓ Created direct runner"
+chmod +x "$RUNNER_LOCATION/run_r36s_viewer.sh"
+echo "✓ Created direct runner at $RUNNER_LOCATION"
 
 # Create instructions file
 cat > "$R36S_OS_MOUNT/R36S_VIEWER_INSTRUCTIONS.txt" << 'EOF'
@@ -271,17 +333,45 @@ echo
 echo "=== Precompiled Deploy Complete! ==="
 echo
 echo "📁 Files ready on R36S SD card:"
-echo "   $R36S_OS_MOUNT/run_r36s_viewer.sh (direct runner)"
-echo "   $R36S_OS_MOUNT/r36s_viewer_precompiled/ (main installation)"
 if [ -n "$R36S_ROMS_MOUNT" ]; then
-    echo "   $R36S_ROMS_MOUNT/r36s_viewer_assets/ (episodes)"
+    echo "   $R36S_ROMS_MOUNT/run_r36s_viewer.sh (main launcher - F: drive)"
+    if [ "$COPY_ASSETS" = true ]; then
+        echo "   $R36S_ROMS_MOUNT/r36s_viewer_assets/ (episodes)"
+    fi
+else
+    echo "   $R36S_OS_MOUNT/run_r36s_viewer.sh (main launcher - D: drive)"
+fi
+echo "   $R36S_OS_MOUNT/r36s_viewer_precompiled/ (main installation)"
+if [ "$COPY_ASSETS" = false ]; then
+    echo "   ⚠ Assets not copied (use --assets to include episodes)"
 fi
 
 echo
 echo "🎮 On R36S (NO TERMINAL NEEDED):"
-echo "   Option 1: File Manager → run_r36s_viewer.sh (direct run)"
+if [ -n "$R36S_ROMS_MOUNT" ]; then
+    echo "   Option 1: File Manager → F:/run_r36s_viewer.sh (direct run)"
+else
+    echo "   Option 1: File Manager → D:/run_r36s_viewer.sh (direct run)"
+fi
 echo "   Option 2: File Manager → r36s_viewer_precompiled/install_precompiled.sh (install)"
 echo
+if [ "$COPY_ASSETS" = true ]; then
+    echo "📋 Episodes status:"
+    if [ -n "$R36S_ROMS_MOUNT" ] && [ -d "$R36S_ROMS_MOUNT/r36s_viewer_assets" ]; then
+        total=$(ls "$R36S_ROMS_MOUNT/r36s_viewer_assets" 2>/dev/null | wc -l)
+        echo "   ✅ $total episodes copied to F: partition"
+    elif [ -d "$INSTALL_DIR/assets" ]; then
+        total=$(ls "$INSTALL_DIR/assets" 2>/dev/null | wc -l)
+        echo "   ✅ $total episodes copied to D: partition"
+    else
+        echo "   ⚠ No episodes found (copy assets/ folder manually)"
+    fi
+else
+    echo "📋 Episodes status:"
+    echo "   ⚠ Episodes not copied (use --assets flag to include them)"
+fi
+echo
+
 echo "✅ Precompiled ARM binary ready to run!"
 echo "   No compilation, no terminal, no SSH required!"
 echo
