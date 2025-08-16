@@ -57,6 +57,33 @@ else
     echo "✓ pkg-config found"
 fi
 
+# Install ARM SDL2 libraries for cross-compilation
+echo "Checking ARM SDL2 libraries..."
+if ! dpkg -l | grep -q libsdl2-dev:armhf; then
+    echo "Installing SDL2 ARM libraries..."
+    # Add armhf architecture
+    sudo dpkg --add-architecture armhf
+    sudo apt-get update -qq
+    
+    # Install ARM SDL2 libraries and cross-compilation tools
+    sudo apt-get install -y \
+        libsdl2-dev:armhf \
+        libsdl2-image-dev:armhf \
+        libsdl2-ttf-dev:armhf \
+        libc6-dev:armhf \
+        pkg-config-arm-linux-gnueabihf
+else
+    echo "✓ ARM SDL2 libraries found"
+fi
+
+# Check if ARM pkg-config exists
+if ! command -v arm-linux-gnueabihf-pkg-config &> /dev/null; then
+    echo "Installing ARM pkg-config..."
+    sudo apt-get install -y pkg-config-arm-linux-gnueabihf
+else
+    echo "✓ ARM pkg-config found"
+fi
+
 echo
 echo "All dependencies installed successfully!"
 echo
@@ -69,15 +96,17 @@ cd build_r36s
 
 echo "Configuring CMake for ARM cross-compilation..."
 
-# Configure with CMake for ARM cross-compilation
-cmake .. \
-    -DCMAKE_SYSTEM_NAME=Linux \
-    -DCMAKE_SYSTEM_PROCESSOR=arm \
-    -DCMAKE_C_COMPILER=arm-linux-gnueabihf-gcc \
-    -DCMAKE_CXX_COMPILER=arm-linux-gnueabihf-g++ \
-    -DCMAKE_FIND_ROOT_PATH_MODE_PROGRAM=NEVER \
-    -DCMAKE_FIND_ROOT_PATH_MODE_LIBRARY=ONLY \
-    -DCMAKE_FIND_ROOT_PATH_MODE_INCLUDE=ONLY
+# Check if toolchain file exists
+TOOLCHAIN_FILE="../arm-linux-gnueabihf.cmake"
+if [ ! -f "$TOOLCHAIN_FILE" ]; then
+    echo "ERROR: Toolchain file not found: $TOOLCHAIN_FILE"
+    echo "Make sure arm-linux-gnueabihf.cmake is in the project root"
+    cd ..
+    exit 1
+fi
+
+# Configure with CMake using toolchain file
+cmake .. -DCMAKE_TOOLCHAIN_FILE="$TOOLCHAIN_FILE"
 
 if [ $? -ne 0 ]; then
     echo "ERROR: CMake configuration failed!"
