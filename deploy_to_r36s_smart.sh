@@ -45,6 +45,10 @@ for priority_drive in "D" "F"; do
         elif [[ "$contents" =~ (EASYROMS|roms|3do|advision|alg|amiga|arcade|atari|gb|gba|gbc|genesis|mame|n64|nes|psx|snes) ]]; then
             partition_type="(EASYROMS - Assets)"  
             R36S_CANDIDATES+=("$mount_point:ROMS")
+        elif [[ "$priority_drive" == "F" && "$contents" =~ (3do|advision|alg|amiga) ]]; then
+            # Special case: F: drive with emulator folders is likely EASYROMS
+            partition_type="(EASYROMS - Assets)"  
+            R36S_CANDIDATES+=("$mount_point:ROMS")
         elif [[ "$contents" =~ (retroarch|Image.*R36S) ]]; then
             partition_type="(R36S partition)"
             R36S_CANDIDATES+=("$mount_point:UNKNOWN")
