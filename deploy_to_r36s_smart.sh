@@ -286,12 +286,34 @@ if [ "$USE_DUAL_PARTITION" = true ] && [ -n "$R36S_ROMS_MOUNT" ]; then
     tar xzf "$PACKAGE_FILE"
     rm "$PACKAGE_FILE"
     
-    # Move assets to assets partition
+    # Copy assets to assets partition (from package and local)
+    assets_copied=false
+    
+    # First try from package
     if [ -d "r36s_viewer_final_package/assets" ]; then
-        echo "Moving assets to assets partition..."
+        echo "Moving assets from package to assets partition..."
         mv "r36s_viewer_final_package/assets"/* "$ASSETS_INSTALL_DIR/" 2>/dev/null || true
         rmdir "r36s_viewer_final_package/assets" 2>/dev/null || true
-        echo "✓ Assets moved to $ASSETS_INSTALL_DIR"
+        assets_copied=true
+        echo "✓ Package assets moved to $ASSETS_INSTALL_DIR"
+    fi
+    
+    # Then copy from local assets folder (main source)
+    if [ -d "$(dirname "$0")/assets" ]; then
+        echo "Copying local assets to assets partition..."
+        cp -r "$(dirname "$0")/assets"/* "$ASSETS_INSTALL_DIR/" 2>/dev/null || true
+        assets_copied=true
+        
+        # Count episodes copied
+        episodes_count=$(ls -1 "$ASSETS_INSTALL_DIR" 2>/dev/null | wc -l)
+        images_count=$(find "$ASSETS_INSTALL_DIR" -name "*.png" 2>/dev/null | wc -l)
+        echo "✓ Local assets copied: $episodes_count episodes, $images_count images"
+    fi
+    
+    if [ "$assets_copied" = false ]; then
+        echo "⚠ No assets found to copy"
+        echo "  Package assets: $([ -d "r36s_viewer_final_package/assets" ] && echo "found" || echo "not found")"
+        echo "  Local assets: $([ -d "$(dirname "$0")/assets" ] && echo "found" || echo "not found")"
     fi
     
     INSTALL_DIR="$APP_INSTALL_DIR"
@@ -313,6 +335,23 @@ else
     tar xzf "$PACKAGE_FILE"
     rm "$PACKAGE_FILE"
     echo "✓ Package extracted and cleaned up"
+    
+    # Copy local assets if available (single partition mode)
+    if [ -d "$(dirname "$0")/assets" ]; then
+        echo "Copying local assets to package..."
+        if [ -d "r36s_viewer_final_package/assets" ]; then
+            # Merge with existing assets
+            cp -r "$(dirname "$0")/assets"/* "r36s_viewer_final_package/assets/" 2>/dev/null || true
+        else
+            # Create assets folder and copy
+            mkdir -p "r36s_viewer_final_package/assets"
+            cp -r "$(dirname "$0")/assets"/* "r36s_viewer_final_package/assets/" 2>/dev/null || true
+        fi
+        
+        episodes_count=$(ls -1 "r36s_viewer_final_package/assets" 2>/dev/null | wc -l)
+        images_count=$(find "r36s_viewer_final_package/assets" -name "*.png" 2>/dev/null | wc -l)
+        echo "✓ Local assets added: $episodes_count episodes, $images_count images"
+    fi
 fi
 
 # Create quick installer on SD card root
