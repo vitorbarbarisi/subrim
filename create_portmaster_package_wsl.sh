@@ -12,6 +12,8 @@ set -euo pipefail
 
 COPY_ASSETS=true
 PORT_NAME="r36s_viewer"
+ROMS_DRIVE_OVERRIDE=""
+ROMS_MOUNT_OVERRIDE=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,8 +29,16 @@ while [[ $# -gt 0 ]]; do
       PORT_NAME="$2"
       shift 2
       ;;
+    --roms-drive)
+      ROMS_DRIVE_OVERRIDE="$2"
+      shift 2
+      ;;
+    --roms-mount)
+      ROMS_MOUNT_OVERRIDE="$2"
+      shift 2
+      ;;
     --help|-h)
-      echo "Usage: $0 [--no-assets] [--assets] [--name NAME]"
+      echo "Usage: $0 [--no-assets] [--assets] [--name NAME] [--roms-drive F] [--roms-mount /mnt/f]"
       exit 0
       ;;
     *)
@@ -114,8 +124,18 @@ fi
 
 echo "Detecting ROMS partition (prefer F:, else largest free space)..."
 R36S_ROMS_MOUNT=""
+
+# If user forced drive or mount, honor it
+if [ -n "$ROMS_MOUNT_OVERRIDE" ]; then
+  R36S_ROMS_MOUNT="$ROMS_MOUNT_OVERRIDE"
+elif [ -n "$ROMS_DRIVE_OVERRIDE" ]; then
+  TRY_DRIVES=("$ROMS_DRIVE_OVERRIDE" F D E G H)
+else
+  TRY_DRIVES=(F D E G H)
+fi
+
 declare -a CANDIDATES=()
-for DRIVE in F D E G H; do
+for DRIVE in "${TRY_DRIVES[@]}"; do
   M="/mnt/${DRIVE,,}"
   sudo mkdir -p "$M" 2>/dev/null || true
   if [ -d "$M" ] && mountpoint -q "$M"; then

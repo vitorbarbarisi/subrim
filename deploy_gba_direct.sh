@@ -238,6 +238,13 @@ echo "🔍 Detecting R36S SD card (prefer F:, else largest free space)..."
 R36S_ROMS_MOUNT=""
 declare -a CANDIDATES=()
 
+# Allow override via env var (useful for CI/debug): export ROMS_MOUNT=/mnt/f
+if [ -n "${ROMS_MOUNT:-}" ]; then
+    if [ -d "${ROMS_MOUNT}" ]; then
+        R36S_ROMS_MOUNT="${ROMS_MOUNT}"
+    fi
+fi
+
 for priority_drive in "F" "D" "E" "G"; do
     mount_point="/mnt/${priority_drive,,}"
     sudo mkdir -p "$mount_point" 2>/dev/null || true
