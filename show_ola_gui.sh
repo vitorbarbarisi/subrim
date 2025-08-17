@@ -8,19 +8,19 @@ export DISPLAY
 
 # Tenta zenity (GTK)
 if command -v zenity >/dev/null 2>&1; then
-  zenity --question --title="R36S Viewer" --text="Olá" --ok-label="OK" --cancel-label="Sair" --width=260 --height=140 2>/dev/null && exit 0
+  zenity --info --title="R36S Viewer" --text="Olá" --ok-label="OK" --width=260 --height=140 2>/dev/null
   exit 0
 fi
 
 # Tenta yad (GTK)
 if command -v yad >/dev/null 2>&1; then
-  yad --center --title="R36S Viewer" --text="Olá" --button=OK:0 --button=Sair:1 --width=260 --height=140 2>/dev/null
+  yad --center --title="R36S Viewer" --text="Olá" --button=OK:0 --width=260 --height=140 2>/dev/null
   exit 0
 fi
 
 # Tenta kdialog (Qt)
 if command -v kdialog >/dev/null 2>&1; then
-  kdialog --yesno "Olá" --yes-label OK --no-label Sair 2>/dev/null
+  kdialog --msgbox "Olá" 2>/dev/null
   exit 0
 fi
 
@@ -31,11 +31,11 @@ fi
 
 # Tenta whiptail/dialog (TUI)
 if command -v whiptail >/dev/null 2>&1; then
-  whiptail --title "R36S Viewer" --yesno "Olá" 8 24 2>/dev/null
+  whiptail --title "R36S Viewer" --msgbox "Olá" 8 24 2>/dev/null
   exit 0
 fi
 if command -v dialog >/dev/null 2>&1; then
-  dialog --title "R36S Viewer" --yesno "Olá" 8 24 2>/dev/null
+  dialog --title "R36S Viewer" --msgbox "Olá" 8 24 2>/dev/null
   exit 0
 fi
 
