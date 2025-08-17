@@ -5,6 +5,17 @@
 
 set -euo pipefail
 
+# WSL helper: if running under WSL without WSLg and DISPLAY not set, try to set it for X server on Windows
+if grep -qi microsoft /proc/version 2>/dev/null; then
+  if [ -z "${DISPLAY:-}" ] && [ -z "${WAYLAND_DISPLAY:-}" ]; then
+    ns=$(grep -m1 nameserver /etc/resolv.conf 2>/dev/null | awk '{print $2}')
+    if [ -n "$ns" ]; then
+      export DISPLAY="$ns:0"
+      export LIBGL_ALWAYS_INDIRECT=1
+    fi
+  fi
+fi
+
 ASSETS_ROOT="assets"
 
 die() { echo "ERROR: $*" >&2; exit 1; }
@@ -12,6 +23,7 @@ die() { echo "ERROR: $*" >&2; exit 1; }
 # Detectar viewer disponível
 choose_viewer() {
   if command -v feh >/dev/null 2>&1; then echo feh; return; fi
+  if command -v nsxiv >/dev/null 2>&1; then echo nsxiv; return; fi
   if command -v sxiv >/dev/null 2>&1; then echo sxiv; return; fi
   if command -v fbi >/dev/null 2>&1; then echo fbi; return; fi
   echo none
@@ -68,6 +80,10 @@ run_viewer() {
     feh)
       # Tela cheia, zoom automático, setas para navegar
       exec feh -F -Z -Y --auto-rotate --start-at "${imgs[0]}" "${imgs[@]}"
+      ;;
+    nsxiv)
+      # nsxiv (fork do sxiv) – tela cheia (-f), pré-carrega (-a)
+      exec nsxiv -f -a "${imgs[@]}"
       ;;
     sxiv)
       # Tela cheia (-f), pré-carrega (-a)
