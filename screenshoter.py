@@ -3,7 +3,7 @@
 Simple periodic screenshoter for macOS
 
 Takes a screenshot every second for up to 1 hour (3600 screenshots max).
-Resizes images for R36S compatibility with letterboxing.
+Saves images in their original resolution without any resizing.
 
 Usage:
   python3 screenshoter.py <directory_name>
@@ -18,13 +18,9 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Tuple
 
-try:
-    from PIL import Image
-except ImportError:
-    print("Erro: PIL (Pillow) não encontrado. Instale com: pip install Pillow")
-    sys.exit(1)
+
+
 
 
 def parse_args() -> argparse.Namespace:
@@ -45,19 +41,7 @@ Exemplos:
     
 
     
-    parser.add_argument(
-        "--target-width", 
-        type=int, 
-        default=640,
-        help="Largura alvo das imagens. Padrão: 640"
-    )
-    
-    parser.add_argument(
-        "--target-height", 
-        type=int, 
-        default=480,
-        help="Altura alvo das imagens. Padrão: 480"
-    )
+
     
     parser.add_argument(
         "--max-duration", 
@@ -122,39 +106,7 @@ def take_screenshot() -> bytes | None:
         return None
 
 
-def scale_image(image_data: bytes, target_size: Tuple[int, int]) -> Image.Image | None:
-    """
-    Scale image to target size with letterboxing to preserve aspect ratio.
-    
-    Args:
-        image_data: Raw PNG image data
-        target_size: (width, height) tuple for final size
-        
-    Returns:
-        Processed PIL Image or None if error
-    """
-    try:
-        # Load image from bytes
-        from io import BytesIO
-        img = Image.open(BytesIO(image_data))
-        
-        # Scale with letterboxing to preserve aspect ratio
-        target_w, target_h = target_size
-        img.thumbnail((target_w, target_h), Image.Resampling.LANCZOS)
-        
-        # Create final image with black letterboxing
-        final_img = Image.new('RGB', (target_w, target_h), (0, 0, 0))
-        
-        # Center the thumbnail
-        paste_x = (target_w - img.width) // 2
-        paste_y = (target_h - img.height) // 2
-        final_img.paste(img, (paste_x, paste_y))
-        
-        return final_img
-        
-    except Exception as e:
-        print(f"Erro ao processar imagem: {e}")
-        return None
+
 
 
 def find_next_index(output_dir: Path) -> int:
@@ -225,8 +177,7 @@ def main() -> int:
     existing_pngs = list(output_dir.glob("*.png"))
     last_index = start_index - 1 if start_index > 1 else 0
     
-    # Configuration
-    target_size = (args.target_width, args.target_height)
+    # Configuration - screenshots will use original resolution
     
     # Try to get duration from base file, fallback to command line argument
     auto_duration = find_max_duration_from_base(output_dir)
@@ -241,7 +192,7 @@ def main() -> int:
     
     print("🎬 Screenshot Simples")
     print(f"📁 Diretório: {output_dir}")
-    print(f"📐 Tamanho alvo: {target_size[0]}x{target_size[1]}")
+    print(f"📐 Resolução: Original (sem redimensionamento)")
     print(f"⏱️  Intervalo: 1 segundo")
     print(f"⏰ Duração máxima: {max_screenshots}s ({max_screenshots//60}min) - fonte: {duration_source}")
     
@@ -275,19 +226,12 @@ def main() -> int:
                 time.sleep(max(0, 1.0 - (time.time() - loop_start)))
                 continue
             
-            # Process image
-            processed_img = scale_image(image_data, target_size)
-            if not processed_img:
-                errors += 1
-                print(f"❌ Erro no processamento {current_index}")
-                current_index += 1
-                time.sleep(max(0, 1.0 - (time.time() - loop_start)))
-                continue
-            
-            # Save image with zero-padded 4-digit filename
+            # Save image with zero-padded 4-digit filename (original resolution)
             output_path = output_dir / f"{current_index:04d}.png"
             try:
-                processed_img.save(output_path, "PNG")
+                # Save original image data directly without resizing
+                with open(output_path, 'wb') as f:
+                    f.write(image_data)
                 successful_captures += 1
                 
                 # Progress indicator
