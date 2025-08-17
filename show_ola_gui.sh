@@ -8,20 +8,17 @@ export DISPLAY
 
 # Tenta zenity (GTK)
 if command -v zenity >/dev/null 2>&1; then
-  zenity --info --title="R36S Viewer" --text="Olá" --ok-label="OK" --width=260 --height=140 2>/dev/null
-  exit 0
+  zenity --info --title="R36S Viewer" --text="Olá" --width=220 --height=120 2>/dev/null && exit 0
 fi
 
 # Tenta yad (GTK)
 if command -v yad >/dev/null 2>&1; then
-  yad --center --title="R36S Viewer" --text="Olá" --button=OK:0 --width=260 --height=140 2>/dev/null
-  exit 0
+  yad --center --title="R36S Viewer" --text="Olá" --button=OK --width=220 --height=120 2>/dev/null && exit 0
 fi
 
 # Tenta kdialog (Qt)
 if command -v kdialog >/dev/null 2>&1; then
-  kdialog --msgbox "Olá" 2>/dev/null
-  exit 0
+  kdialog --msgbox "Olá" 2>/dev/null && exit 0
 fi
 
 # Tenta notificação (libnotify)
@@ -31,12 +28,10 @@ fi
 
 # Tenta whiptail/dialog (TUI)
 if command -v whiptail >/dev/null 2>&1; then
-  whiptail --title "R36S Viewer" --msgbox "Olá" 8 24 2>/dev/null
-  exit 0
+  whiptail --title "R36S Viewer" --msgbox "Olá" 8 24 2>/dev/null && exit 0
 fi
 if command -v dialog >/dev/null 2>&1; then
-  dialog --title "R36S Viewer" --msgbox "Olá" 8 24 2>/dev/null
-  exit 0
+  dialog --title "R36S Viewer" --msgbox "Olá" 8 24 2>/dev/null && exit 0
 fi
 
 # Fallback simples
