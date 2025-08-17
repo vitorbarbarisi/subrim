@@ -284,8 +284,8 @@ def main() -> int:
                 time.sleep(max(0, 1.0 - (time.time() - loop_start)))
                 continue
             
-            # Save image
-            output_path = output_dir / f"{current_index}.png"
+            # Save image with zero-padded 4-digit filename
+            output_path = output_dir / f"{current_index:04d}.png"
             try:
                 processed_img.save(output_path, "PNG")
                 successful_captures += 1
