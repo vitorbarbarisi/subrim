@@ -112,9 +112,10 @@ fi
 
 # 4) Detect ROMS partition and install to /roms/ports
 
-echo "Detecting ROMS partition..."
+echo "Detecting ROMS partition (prefer F:, else largest free space)..."
 R36S_ROMS_MOUNT=""
-for DRIVE in D F E G H; do
+declare -a CANDIDATES=()
+for DRIVE in F D E G H; do
   M="/mnt/${DRIVE,,}"
   sudo mkdir -p "$M" 2>/dev/null || true
   if [ -d "$M" ] && mountpoint -q "$M"; then
@@ -125,12 +126,30 @@ for DRIVE in D F E G H; do
   if [ -d "$M" ]; then
     contents=$(ls "$M" 2>/dev/null | tr '\n' ' ' | head -c 200)
     if echo "$contents" | grep -qiE "(EASYROMS|roms|ports|gba|snes|nes|psx)"; then
-      R36S_ROMS_MOUNT="$M"
-      echo "→ Using ROMS partition: $M"
-      break
+      free_kb=$(df -k "$M" 2>/dev/null | awk 'NR==2{print $4}')
+      [ -n "$free_kb" ] || free_kb=0
+      CANDIDATES+=("$M:$free_kb")
     fi
   fi
 done
+
+# Choose best mount: prefer /mnt/f if present, else largest free space
+if [ -z "$R36S_ROMS_MOUNT" ]; then
+  for ent in "${CANDIDATES[@]}"; do
+    m=${ent%%:*}
+    if [ "$m" = "/mnt/f" ]; then R36S_ROMS_MOUNT="$m"; break; fi
+  done
+  if [ -z "$R36S_ROMS_MOUNT" ]; then
+    best=""; bestv=0
+    for ent in "${CANDIDATES[@]}"; do
+      m=${ent%%:*}; v=${ent##*:}
+      # numeric compare; default 0
+      [ -n "$v" ] || v=0
+      if [ "$v" -gt "$bestv" ]; then best="$m"; bestv="$v"; fi
+    done
+    R36S_ROMS_MOUNT="$best"
+  fi
+fi
 
 if [ -z "$R36S_ROMS_MOUNT" ]; then
   echo "ERROR: Could not detect ROMS partition (D:/ F:/ etc)." >&2
@@ -138,6 +157,7 @@ if [ -z "$R36S_ROMS_MOUNT" ]; then
   exit 1
 fi
 
+echo "→ Using ROMS partition: $R36S_ROMS_MOUNT"
 DEST_DIR="$R36S_ROMS_MOUNT/roms/ports/0_${PORT_NAME}"
 echo "Installing to: $DEST_DIR"
 sudo mkdir -p "$R36S_ROMS_MOUNT/roms/ports"

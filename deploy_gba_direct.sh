@@ -233,11 +233,12 @@ fi
 
 # Deploy to SD card (same logic as before)
 echo
-echo "🔍 Detecting R36S SD card..."
+echo "🔍 Detecting R36S SD card (prefer F:, else largest free space)..."
 
 R36S_ROMS_MOUNT=""
+declare -a CANDIDATES=()
 
-for priority_drive in "D" "F"; do
+for priority_drive in "F" "D" "E" "G"; do
     mount_point="/mnt/${priority_drive,,}"
     sudo mkdir -p "$mount_point" 2>/dev/null || true
     
@@ -252,12 +253,29 @@ for priority_drive in "D" "F"; do
     if [ -d "$mount_point" ]; then
         contents=$(ls "$mount_point" 2>/dev/null | head -10 | tr '\n' ' ' || echo "")
         if [[ "$contents" =~ (EASYROMS|roms|gba|3do|advision|alg|amiga|arcade) ]]; then
-            R36S_ROMS_MOUNT="$mount_point"
-            echo "  → Found ROMs partition: $mount_point"
-            break
+            free_kb=$(df -k "$mount_point" 2>/dev/null | awk 'NR==2{print $4}')
+            [ -n "$free_kb" ] || free_kb=0
+            CANDIDATES+=("$mount_point:$free_kb")
         fi
     fi
 done
+
+if [ -z "$R36S_ROMS_MOUNT" ]; then
+    # Prefer /mnt/f
+    for ent in "${CANDIDATES[@]}"; do
+        m=${ent%%:*}
+        if [ "$m" = "/mnt/f" ]; then R36S_ROMS_MOUNT="$m"; break; fi
+    done
+    if [ -z "$R36S_ROMS_MOUNT" ]; then
+        best=""; bestv=0
+        for ent in "${CANDIDATES[@]}"; do
+            m=${ent%%:*}; v=${ent##*:}
+            [ -n "$v" ] || v=0
+            if [ "$v" -gt "$bestv" ]; then best="$m"; bestv="$v"; fi
+        done
+        R36S_ROMS_MOUNT="$best"
+    fi
+fi
 
 if [ -z "$R36S_ROMS_MOUNT" ]; then
     echo "❌ No ROMs partition found!"
@@ -303,7 +321,7 @@ print('✓ Enhanced ROM created')
 fi
 
 echo
-echo "🎮 Installing GBA ROM to multiple locations..."
+echo "🎮 Installing GBA ROM to multiple locations on: $R36S_ROMS_MOUNT ..."
 
 # Try multiple GBA directory locations
 GBA_LOCATIONS=(
