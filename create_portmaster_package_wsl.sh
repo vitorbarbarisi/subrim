@@ -198,6 +198,36 @@ sudo rm -rf "$DEST_DIR"
 sudo mkdir -p "$DEST_DIR"
 sudo cp -r "$PKG_ROOT"/* "$DEST_DIR"/
 
+# 4.1) Update EmulationStation gamelist.xml for Ports
+PORTS_GAMELIST="$R36S_ROMS_MOUNT/roms/ports/gamelist.xml"
+GAME_PATH="./0_${PORT_NAME}/${PORT_NAME}.sh"
+
+echo "Updating Ports gamelist: $PORTS_GAMELIST"
+if [ ! -f "$PORTS_GAMELIST" ]; then
+  # Create minimal gamelist with our entry
+  sudo tee "$PORTS_GAMELIST" > /dev/null <<EOF
+<?xml version="1.0"?>
+<gameList>
+  <game>
+    <path>$GAME_PATH</path>
+    <name>R36S Viewer</name>
+    <desc>Subtitle/image viewer for R36S</desc>
+  </game>
+</gameList>
+EOF
+else
+  # Append entry if not already present, before </gameList>
+  if ! grep -q "<path>$GAME_PATH</path>" "$PORTS_GAMELIST" 2>/dev/null; then
+    tmpfile=$(mktemp)
+    awk -v node="  <game>\n    <path>$GAME_PATH</path>\n    <name>R36S Viewer</name>\n    <desc>Subtitle/image viewer for R36S</desc>\n  </game>\n" '
+      /<\/gameList>/ { print node; print; next }
+      { print }
+    ' "$PORTS_GAMELIST" > "$tmpfile" && sudo mv "$tmpfile" "$PORTS_GAMELIST"
+  else
+    echo "Entry already present in gamelist.xml"
+  fi
+fi
+
 # 5) Summary
 echo
 echo "=== PortMaster package installed ==="
