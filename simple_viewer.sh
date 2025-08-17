@@ -38,7 +38,7 @@ choose_directory() {
   if command -v dialog >/dev/null 2>&1; then
     local opts=()
     local i=1
-    for d in "${choices[@]}"; do opts+=("$i" "${d#${ASSETS_ROOT}/}"); ((i++)); endone
+    for d in "${choices[@]}"; do opts+=("$i" "${d#${ASSETS_ROOT}/}"); ((i++)); done
     local sel
     sel=$(dialog --title "Escolha um diretório" --menu "assets/" 20 60 12 "${opts[@]}" 3>&1 1>&2 2>&3) || exit 1
     echo "${choices[$((sel-1))]}"
