@@ -122,6 +122,19 @@ fi
 
 # 4) Detect ROMS partition and install to /roms/ports
 
+echo "Attempting to mount Windows drives via PowerShell..."
+# Mount all Windows drives that exist (D:, E:, F:, etc.)
+DRIVE_LETTERS=$(powershell.exe -NoProfile -Command "$d=Get-Volume ^| ? DriveLetter ^| % DriveLetter; $d -join ' '" 2>/dev/null | tr -d '\r') || true
+if [ -n "$DRIVE_LETTERS" ]; then
+  for L in $DRIVE_LETTERS; do
+    l=$(echo "$L" | tr '[:upper:]' '[:lower:]')
+    sudo mkdir -p "/mnt/$l" 2>/dev/null || true
+    if ! mountpoint -q "/mnt/$l" 2>/dev/null; then
+      sudo mount -t drvfs "${L}:" "/mnt/$l" 2>/dev/null || true
+    fi
+  done
+fi
+
 echo "Detecting ROMS partition (prefer F:, else largest free space)..."
 R36S_ROMS_MOUNT=""
 
