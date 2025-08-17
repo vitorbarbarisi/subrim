@@ -18,6 +18,7 @@ O arquivo original é removido após criar as versões A, B e C.
 
 import sys
 import argparse
+import shutil
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import re
@@ -158,6 +159,35 @@ def get_portuguese_font_path() -> Optional[Path]:
 def get_font_path() -> Optional[Path]:
     """Legacy function - try Chinese font first as fallback."""
     return get_chinese_font_path()
+
+
+def copy_images_to_destination(source_dir: Path, dest_dir: Path) -> int:
+    """
+    Copy only PNG images from source to destination directory.
+    
+    Args:
+        source_dir: Source directory path
+        dest_dir: Destination directory path
+    
+    Returns:
+        Number of images copied
+    """
+    # Create destination directory if it doesn't exist
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Find all PNG files in source directory
+    png_files = list(source_dir.glob("*.png"))
+    
+    copied_count = 0
+    for png_file in png_files:
+        dest_file = dest_dir / png_file.name
+        try:
+            shutil.copy2(png_file, dest_file)
+            copied_count += 1
+        except Exception as e:
+            print(f"⚠️  Erro ao copiar {png_file.name}: {e}")
+    
+    return copied_count
 
 
 def add_top_translations(image_path: Path, translations_text: str, output_path: Path = None) -> bool:
@@ -547,17 +577,23 @@ def find_png_files(directory: Path) -> List[Path]:
     return sorted(png_files, key=sort_key)
 
 
-def process_directory(directory: Path, dry_run: bool = False) -> Tuple[int, int, int]:
+def process_directory(directory: Path, dry_run: bool = False, source_directory: Path = None) -> Tuple[int, int, int]:
     """
     Process all PNG images in the directory and add subtitles where applicable.
+    
+    Args:
+        directory: Directory containing images to process
+        dry_run: If True, simulate operations without modifying files
+        source_directory: Directory to search for base.txt file (if None, uses directory)
     
     Returns:
         (processed_count, skipped_count, error_count)
     """
-    # Find base file
-    base_file = find_base_file(directory)
+    # Find base file in source directory (or processing directory if not specified)
+    search_dir = source_directory if source_directory else directory
+    base_file = find_base_file(search_dir)
     if not base_file:
-        print(f"Erro: Nenhum arquivo *_base.txt encontrado em {directory}")
+        print(f"Erro: Nenhum arquivo *_base.txt encontrado em {search_dir}")
         return 0, 0, 1
     
     print(f"📖 Usando arquivo base: {base_file.name}")
@@ -627,7 +663,6 @@ def process_directory(directory: Path, dry_run: bool = False) -> Tuple[int, int,
                         success_b = add_top_translations(a_path, translations_text, b_path)
                     else:
                         # If no translations, just copy A to B
-                        import shutil
                         try:
                             shutil.copy2(a_path, b_path)
                             success_b = True
@@ -664,13 +699,19 @@ def main():
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
-  python3 subtitle_printer.py chaves001                    # Cria versões A, B e C em assets/chaves001/
+  python3 subtitle_printer.py chaves001                    # Copia para assets/chaves001_sub/ e processa
   python3 subtitle_printer.py test --dry-run               # Simula o processamento
   python3 subtitle_printer.py flipper --assets-root data   # Usa data/ ao invés de assets/
 
+Funcionamento:
+  1. Cria pasta destino com sufixo "_sub" (ex: test -> test_sub)
+  2. Copia apenas imagens PNG da pasta origem para a pasta destino
+  3. Busca o arquivo *_base.txt na pasta origem
+  4. Processa as imagens na pasta destino
+
 Saída:
   Para 5.png -> 5a.png (中文) + 5b.png (中文 + 翻译) + 5c.png (中文 + PT)
-  Original 5.png é removido após processamento
+  Original 5.png é removido após processamento (na pasta destino)
         """
     )
     
@@ -685,20 +726,22 @@ Saída:
     
     args = parser.parse_args()
     
-    # Construct full path
+    # Construct full paths
     assets_dir = Path(args.assets_root)
-    target_dir = assets_dir / args.directory
+    source_dir = assets_dir / args.directory
+    dest_dir = assets_dir / f"{args.directory}_sub"
     
-    if not target_dir.exists():
-        print(f"Erro: Diretório {target_dir} não encontrado.")
+    if not source_dir.exists():
+        print(f"Erro: Diretório origem {source_dir} não encontrado.")
         return 1
     
-    if not target_dir.is_dir():
-        print(f"Erro: {target_dir} não é um diretório.")
+    if not source_dir.is_dir():
+        print(f"Erro: {source_dir} não é um diretório.")
         return 1
     
     print(f"🎬 Subtitle Printer - Legendas Chinesas + Traduções")
-    print(f"📁 Diretório: {target_dir}")
+    print(f"📁 Origem: {source_dir}")
+    print(f"📁 Destino: {dest_dir}")
     print(f"🔍 Modo: {'DRY RUN (simulação)' if args.dry_run else 'PROCESSAMENTO REAL'}")
     print(f"📋 Saída:")
     print(f"    A: Legenda chinesa (base)")
@@ -706,8 +749,25 @@ Saída:
     print(f"    C: Legenda chinesa + tradução PT (acima)")
     print("-" * 60)
     
-    # Process directory
-    processed, skipped, errors = process_directory(target_dir, args.dry_run)
+    # Copy images to destination directory
+    if not args.dry_run:
+        print(f"📋 Copiando imagens PNG de {source_dir.name} para {dest_dir.name}...")
+        copied_count = copy_images_to_destination(source_dir, dest_dir)
+        print(f"✅ {copied_count} imagens copiadas")
+        print("-" * 60)
+    else:
+        print(f"📋 [DRY RUN] Simulando cópia de imagens de {source_dir.name} para {dest_dir.name}")
+        png_files = list(source_dir.glob("*.png"))
+        print(f"✅ [DRY RUN] {len(png_files)} imagens seriam copiadas")
+        print("-" * 60)
+    
+    # Process directory (work on destination, but read base.txt from source)
+    if args.dry_run:
+        # For dry run, simulate processing with source directory since dest might not exist yet
+        processed, skipped, errors = process_directory(source_dir, args.dry_run, source_directory=source_dir)
+    else:
+        # For real processing, work on destination directory
+        processed, skipped, errors = process_directory(dest_dir, args.dry_run, source_directory=source_dir)
     
     # Print results
     total_files = processed + skipped + errors
