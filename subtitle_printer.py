@@ -1261,32 +1261,109 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
     return processed_count, skipped_count, error_count
 
 
+def find_directories_to_process(assets_dir: Path) -> list[str]:
+    """
+    Find all directories in assets that don't have a corresponding _sub directory.
+    
+    Args:
+        assets_dir: Path to the assets directory
+        
+    Returns:
+        List of directory names to process
+    """
+    if not assets_dir.exists() or not assets_dir.is_dir():
+        return []
+    
+    dirs_to_process = []
+    
+    for item in assets_dir.iterdir():
+        if item.is_dir() and not item.name.endswith('_sub'):
+            # Check if corresponding _sub directory exists
+            sub_dir = assets_dir / f"{item.name}_sub"
+            if not sub_dir.exists():
+                # Also check if it has PNG files or base.txt file
+                has_pngs = bool(list(item.glob("*.png")))
+                has_base_txt = bool(list(item.glob("*_base.txt")))
+                
+                if has_pngs or has_base_txt:
+                    dirs_to_process.append(item.name)
+    
+    return sorted(dirs_to_process)
+
+
+def process_single_directory(directory_name: str, assets_dir: Path, dry_run: bool) -> tuple[int, int, int]:
+    """
+    Process a single directory.
+    
+    Args:
+        directory_name: Name of the directory to process
+        assets_dir: Path to the assets directory
+        dry_run: Whether to perform a dry run
+        
+    Returns:
+        Tuple of (processed, skipped, errors)
+    """
+    source_dir = assets_dir / directory_name
+    dest_dir = assets_dir / f"{directory_name}_sub"
+    
+    if not source_dir.exists() or not source_dir.is_dir():
+        print(f"⚠️  Ignorando {directory_name}: não é um diretório válido")
+        return 0, 0, 1
+    
+    print(f"\n🎬 Processando: {directory_name}")
+    print(f"📁 Origem: {source_dir}")
+    print(f"📁 Destino: {dest_dir}")
+    print("-" * 60)
+    
+    # Copy images to destination directory
+    if not dry_run:
+        print(f"📋 Copiando imagens PNG de {source_dir.name} para {dest_dir.name}...")
+        copied_count = copy_images_to_destination(source_dir, dest_dir)
+        print(f"✅ {copied_count} imagens copiadas")
+    else:
+        print(f"📋 [DRY RUN] Simulando cópia de imagens de {source_dir.name} para {dest_dir.name}")
+        png_files = list(source_dir.glob("*.png"))
+        print(f"✅ [DRY RUN] {len(png_files)} imagens seriam copiadas")
+    
+    # Process directory (work on destination, but read base.txt from source)
+    if dry_run:
+        # For dry run, simulate processing with source directory since dest might not exist yet
+        processed, skipped, errors = process_directory(source_dir, dry_run, source_directory=source_dir)
+    else:
+        # For real processing, work on destination directory
+        processed, skipped, errors = process_directory(dest_dir, dry_run, source_directory=source_dir)
+    
+    return processed, skipped, errors
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Adiciona legendas chinesas e traduções às imagens baseado no arquivo base.txt",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
+  python3 subtitle_printer.py                              # Processa TODAS as pastas sem _sub
   python3 subtitle_printer.py chaves001                    # Copia para assets/chaves001_sub/ e processa
   python3 subtitle_printer.py test --dry-run               # Simula o processamento
   python3 subtitle_printer.py flipper --assets-root data   # Usa data/ ao invés de assets/
 
 Funcionamento:
-  1. Cria pasta destino com sufixo "_sub" (ex: test -> test_sub)
-  2. Copia apenas imagens PNG da pasta origem para a pasta destino
-  3. Busca o arquivo *_base.txt na pasta origem
-  4. Processa as imagens na pasta destino:
+  1. Se nenhum diretório for especificado, processa todas as pastas em assets/ que não tenham _sub
+  2. Cria pasta destino com sufixo "_sub" (ex: test -> test_sub)
+  3. Copia apenas imagens PNG da pasta origem para a pasta destino
+  4. Busca o arquivo *_base.txt na pasta origem
+  5. Processa as imagens na pasta destino:
      - Redimensiona para R36S (640x480) mantendo aspect ratio
-     - Adiciona legendas nas três versões
+     - Adiciona legendas nas versões A, Ba/Bb/Bc, C
 
 Saída:
-  Para 5.png -> 5a.png (中文) + 5b.png (中文 + 翻译) + 5c.png (中文 + PT)
+  Para 5.png -> 5a.png (中文) + 5ba.png/5bb.png/5bc.png (destaque individual) + 5c.png (中文 + PT)
   Original 5.png é removido após processamento (na pasta destino)
         """
     )
     
-    parser.add_argument('directory', 
-                       help='Nome do diretório dentro de assets/ para processar')
+    parser.add_argument('directory', nargs='?',
+                       help='Nome do diretório dentro de assets/ para processar (opcional)')
     
     parser.add_argument('--dry-run', '-n', action='store_true',
                        help='Simular operação sem modificar arquivos')
@@ -1296,65 +1373,66 @@ Saída:
     
     args = parser.parse_args()
     
-    # Construct full paths
+    # Construct assets directory path
     assets_dir = Path(args.assets_root)
-    source_dir = assets_dir / args.directory
-    dest_dir = assets_dir / f"{args.directory}_sub"
     
-    if not source_dir.exists():
-        print(f"Erro: Diretório origem {source_dir} não encontrado.")
-        return 1
-    
-    if not source_dir.is_dir():
-        print(f"Erro: {source_dir} não é um diretório.")
+    if not assets_dir.exists():
+        print(f"Erro: Diretório assets {assets_dir} não encontrado.")
         return 1
     
     print(f"🎬 Subtitle Printer - Legendas Chinesas + Traduções")
-    print(f"📁 Origem: {source_dir}")
-    print(f"📁 Destino: {dest_dir}")
     print(f"🔍 Modo: {'DRY RUN (simulação)' if args.dry_run else 'PROCESSAMENTO REAL'}")
     print(f"📋 Saída:")
     print(f"    A: Legenda chinesa (base)")
-    print(f"    B: A + traduções detalhadas (topo)")
+    print(f"    B: Ba/Bb/Bc... (destaque individual + tradução)")
     print(f"    C: Legenda chinesa + tradução PT (acima)")
-    print("-" * 60)
+    print("=" * 60)
     
-    # Copy images to destination directory
-    if not args.dry_run:
-        print(f"📋 Copiando imagens PNG de {source_dir.name} para {dest_dir.name}...")
-        copied_count = copy_images_to_destination(source_dir, dest_dir)
-        print(f"✅ {copied_count} imagens copiadas")
-        print("-" * 60)
+    # Determine directories to process
+    if args.directory:
+        # Process single directory specified by user
+        directories_to_process = [args.directory]
+        print(f"📁 Processamento específico: {args.directory}")
     else:
-        print(f"📋 [DRY RUN] Simulando cópia de imagens de {source_dir.name} para {dest_dir.name}")
-        png_files = list(source_dir.glob("*.png"))
-        print(f"✅ [DRY RUN] {len(png_files)} imagens seriam copiadas")
-        print("-" * 60)
+        # Find all directories that need processing
+        directories_to_process = find_directories_to_process(assets_dir)
+        if not directories_to_process:
+            print(f"📂 Nenhuma pasta nova encontrada em {assets_dir}")
+            print(f"   (procurando pastas sem _sub que tenham PNG ou *_base.txt)")
+            return 0
+        else:
+            print(f"📂 Encontradas {len(directories_to_process)} pastas para processar:")
+            for dir_name in directories_to_process:
+                print(f"   📁 {dir_name}")
     
-    # Process directory (work on destination, but read base.txt from source)
-    if args.dry_run:
-        # For dry run, simulate processing with source directory since dest might not exist yet
-        processed, skipped, errors = process_directory(source_dir, args.dry_run, source_directory=source_dir)
-    else:
-        # For real processing, work on destination directory
-        processed, skipped, errors = process_directory(dest_dir, args.dry_run, source_directory=source_dir)
+    # Process each directory
+    total_processed = 0
+    total_skipped = 0
+    total_errors = 0
     
-    # Print results
-    total_files = processed + skipped + errors
+    for directory_name in directories_to_process:
+        processed, skipped, errors = process_single_directory(directory_name, assets_dir, args.dry_run)
+        total_processed += processed
+        total_skipped += skipped
+        total_errors += errors
+    
+    # Print final results
+    total_files = total_processed + total_skipped + total_errors
     print("\n" + "=" * 60)
     print("PROCESSAMENTO CONCLUÍDO" if not args.dry_run else "SIMULAÇÃO CONCLUÍDA")
     print("=" * 60)
+    print(f"📂 Diretórios processados: {len(directories_to_process)}")
     print(f"📊 Total de imagens: {total_files}")
-    print(f"✅ Processadas: {processed}")
+    print(f"✅ Processadas: {total_processed}")
     print(f"   ├── Com legendas (A+B+C): legendas aplicadas + R36S")
     print(f"   └── Sem legendas: apenas redimensionamento R36S")
-    print(f"⏭️  Ignoradas (nomes inválidos): {skipped}")
-    print(f"❌ Erros: {errors}")
+    print(f"⏭️  Ignoradas (nomes inválidos): {total_skipped}")
+    print(f"❌ Erros: {total_errors}")
     
-    if args.dry_run and processed > 0:
+    if args.dry_run and total_processed > 0:
         print(f"\n💡 Execute novamente sem --dry-run para criar as versões A, B e C")
     
-    return 0 if errors == 0 else 1
+    return 0 if total_errors == 0 else 1
 
 
 if __name__ == "__main__":
