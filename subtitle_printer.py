@@ -7,7 +7,9 @@ Example: python3 subtitle_printer.py chaves001
 
 O script lê as imagens em assets/<directory_name> e o arquivo *_base.txt correspondente.
 Para cada imagem, verifica se o nome da imagem (em segundos) corresponde ao timestamp
-no arquivo base.txt. Se corresponder, cria três versões:
+no arquivo base.txt. Se corresponder:
+1. Redimensiona a imagem para resolução R36S (640x480) mantendo aspect ratio
+2. Cria três versões com legendas:
 
 - Versão A (sufixo 'a'): Legenda chinesa na parte inferior
 - Versão B (sufixo 'b'): Versão A + traduções detalhadas na parte superior
@@ -161,6 +163,238 @@ def get_font_path() -> Optional[Path]:
     return get_chinese_font_path()
 
 
+def resize_image_only(image_path: Path, output_path: Path = None) -> bool:
+    """
+    Resize image to R36S compatible resolution (640x480) without adding subtitles.
+    
+    Args:
+        image_path: Path to the original image
+        output_path: Output path (if None, overwrites original)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        with Image.open(image_path) as img:
+            # Convert to RGB if necessary
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize image to R36S compatible resolution (640x480)
+            resized_img = resize_image_for_r36s(img)
+            
+            # Save the resized image
+            save_path = output_path if output_path else image_path
+            resized_img.save(save_path, "PNG")
+            
+            return True
+            
+    except Exception as e:
+        print(f"Erro ao redimensionar {image_path}: {e}")
+        return False
+
+
+def break_text_for_subtitle(text: str, font, max_width: int, draw, is_chinese: bool = True) -> list[str]:
+    """
+    Break text into multiple lines for subtitle display.
+    
+    Args:
+        text: Text to break (Chinese or Portuguese)
+        font: Font object for measuring text width
+        max_width: Maximum width for each line
+        draw: ImageDraw object for text measurement
+        is_chinese: True for Chinese text (break by characters), False for Portuguese (break by words)
+        
+    Returns:
+        List of text lines
+    """
+    # First check if text contains dialogue marker "-"
+    if "-" in text:
+        # Split on dialogue marker and treat as separate lines
+        parts = text.split("-", 1)  # Split only on first "-"
+        if len(parts) == 2:
+            # Format as dialogue: first part + "-" + second part
+            lines = []
+            first_part = parts[0].strip()
+            second_part = parts[1].strip()
+            
+            if first_part:
+                lines.append(first_part)
+            if second_part:
+                lines.append("-" + second_part)
+                
+            # Check if any line is still too long and needs further breaking
+            final_lines = []
+            for line in lines:
+                if draw.textbbox((0, 0), line, font=font)[2] <= max_width:
+                    final_lines.append(line)
+                else:
+                    # Break long line appropriately for language
+                    if is_chinese:
+                        final_lines.extend(_break_line_by_characters(line, font, max_width, draw))
+                    else:
+                        final_lines.extend(_break_line_by_words(line, font, max_width, draw))
+            
+            return final_lines
+    
+    # Check if single line fits
+    text_width = draw.textbbox((0, 0), text, font=font)[2]
+    if text_width <= max_width:
+        return [text]
+    
+    # Break long text appropriately for language
+    if is_chinese:
+        return _break_line_by_characters(text, font, max_width, draw)
+    else:
+        return _break_line_by_words(text, font, max_width, draw)
+
+
+def _break_line_by_characters(text: str, font, max_width: int, draw) -> list[str]:
+    """
+    Break text into lines by characters when it's too long (for Chinese text).
+    
+    Args:
+        text: Text to break
+        font: Font object
+        max_width: Maximum width per line
+        draw: ImageDraw object
+        
+    Returns:
+        List of text lines
+    """
+    if not text:
+        return []
+    
+    lines = []
+    current_line = ""
+    
+    for char in text:
+        test_line = current_line + char
+        test_width = draw.textbbox((0, 0), test_line, font=font)[2]
+        
+        if test_width <= max_width:
+            current_line = test_line
+        else:
+            # Current line is full, start new line
+            if current_line:
+                lines.append(current_line)
+            current_line = char
+    
+    # Add remaining text
+    if current_line:
+        lines.append(current_line)
+    
+    return lines
+
+
+def _break_line_by_words(text: str, font, max_width: int, draw) -> list[str]:
+    """
+    Break text into lines by words when it's too long (for Portuguese text).
+    
+    Args:
+        text: Text to break
+        font: Font object
+        max_width: Maximum width per line
+        draw: ImageDraw object
+        
+    Returns:
+        List of text lines
+    """
+    if not text:
+        return []
+    
+    words = text.split()
+    if not words:
+        return []
+    
+    lines = []
+    current_line = ""
+    
+    for word in words:
+        # Test adding this word to current line
+        test_line = current_line + (" " if current_line else "") + word
+        test_width = draw.textbbox((0, 0), test_line, font=font)[2]
+        
+        if test_width <= max_width:
+            current_line = test_line
+        else:
+            # Current line is full, start new line
+            if current_line:
+                lines.append(current_line)
+                current_line = word
+            else:
+                # Single word is too long, break by characters as fallback
+                lines.extend(_break_line_by_characters(word, font, max_width, draw))
+    
+    # Add remaining text
+    if current_line:
+        lines.append(current_line)
+    
+    return lines
+
+
+def break_chinese_text_for_subtitle(text: str, font, max_width: int, draw) -> list[str]:
+    """
+    Legacy function - wrapper for break_text_for_subtitle with Chinese settings.
+    
+    Args:
+        text: Chinese text to break
+        font: Font object for measuring text width
+        max_width: Maximum width for each line
+        draw: ImageDraw object for text measurement
+        
+    Returns:
+        List of text lines
+    """
+    return break_text_for_subtitle(text, font, max_width, draw, is_chinese=True)
+
+
+def resize_image_for_r36s(img: Image.Image) -> Image.Image:
+    """
+    Resize image to R36S compatible resolution (640x480) while maintaining aspect ratio.
+    Uses letterboxing (black bars) when needed to preserve original proportions.
+    
+    Args:
+        img: PIL Image object
+        
+    Returns:
+        Resized PIL Image object (always 640x480)
+    """
+    # R36S target resolution
+    target_width = 640
+    target_height = 480
+    
+    # Get original dimensions
+    original_width, original_height = img.size
+    
+    # Calculate aspect ratios
+    original_aspect = original_width / original_height
+    target_aspect = target_width / target_height
+    
+    # Calculate new dimensions to fit within target while maintaining aspect ratio
+    if original_aspect > target_aspect:
+        # Image is wider - fit to width, add horizontal letterboxing
+        new_width = target_width
+        new_height = int(target_width / original_aspect)
+    else:
+        # Image is taller - fit to height, add vertical letterboxing
+        new_height = target_height
+        new_width = int(target_height * original_aspect)
+    
+    # Resize the image with high quality
+    resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+    
+    # Create final image with black letterboxing
+    final_img = Image.new('RGB', (target_width, target_height), (0, 0, 0))
+    
+    # Center the resized image
+    paste_x = (target_width - new_width) // 2
+    paste_y = (target_height - new_height) // 2
+    final_img.paste(resized_img, (paste_x, paste_y))
+    
+    return final_img
+
+
 def copy_images_to_destination(source_dir: Path, dest_dir: Path) -> int:
     """
     Copy only PNG images from source to destination directory.
@@ -208,10 +442,9 @@ def add_top_translations(image_path: Path, translations_text: str, output_path: 
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            width, height = img.size
-            
-            # Keep original image size - no resizing
-            new_img = img.copy()
+            # Resize image to R36S compatible resolution (640x480)
+            new_img = resize_image_for_r36s(img)
+            width, height = new_img.size
             
             # Draw translations
             draw = ImageDraw.Draw(new_img)
@@ -337,10 +570,9 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            width, height = img.size
-            
-            # Keep original image size - no resizing
-            new_img = img.copy()
+            # Resize image to R36S compatible resolution (640x480)
+            new_img = resize_image_for_r36s(img)
+            width, height = new_img.size
             
             # Draw subtitles
             draw = ImageDraw.Draw(new_img)
@@ -354,17 +586,18 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
             available_height = int(height * 0.25)
             available_width = width - 40  # 20px padding on each side
             
-            # Start with font sizes
-            chinese_font_size = min(48, int(available_height * 0.4))
-            portuguese_font_size = min(32, int(available_height * 0.3))
+            # Start with larger font sizes for better readability
+            chinese_font_size = min(64, int(available_height * 0.5))  # Increased from 48
+            portuguese_font_size = min(40, int(available_height * 0.35))  # Increased from 32
             
-            # Load fonts and adjust sizes
+            # Load fonts and adjust sizes with line breaking for Chinese
             chinese_font = None
             portuguese_font = None
-            chinese_text_height = 0
+            chinese_text_lines = []
+            chinese_total_height = 0
             portuguese_text_height = 0
             
-            # Adjust Chinese font size
+            # Adjust Chinese font size with line breaking
             for attempt in range(10):
                 try:
                     if chinese_font_path:
@@ -372,25 +605,32 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
                     else:
                         chinese_font = ImageFont.load_default()
                     
-                    bbox = draw.textbbox((0, 0), chinese_text, font=chinese_font)
-                    text_width = bbox[2] - bbox[0]
-                    chinese_text_height = bbox[3] - bbox[1]
+                    # Break Chinese text into lines
+                    chinese_text_lines = break_text_for_subtitle(chinese_text, chinese_font, available_width, draw, is_chinese=True)
                     
-                    if text_width <= available_width:
+                    # Calculate total height for Chinese text lines
+                    line_height = draw.textbbox((0, 0), "測試", font=chinese_font)[3] - draw.textbbox((0, 0), "測試", font=chinese_font)[1]
+                    chinese_total_height = len(chinese_text_lines) * line_height + (len(chinese_text_lines) - 1) * 5  # 5px line spacing
+                    
+                    # Check if Chinese text fits in available space (reserve space for Portuguese)
+                    reserved_height_for_portuguese = available_height * 0.4
+                    if chinese_total_height <= (available_height - reserved_height_for_portuguese):
                         break
                     
                     chinese_font_size = int(chinese_font_size * 0.9)
-                    if chinese_font_size < 12:
+                    if chinese_font_size < 16:  # Increased minimum size
                         break
                         
                 except:
                     chinese_font = ImageFont.load_default()
-                    bbox = draw.textbbox((0, 0), chinese_text, font=chinese_font)
-                    chinese_text_height = bbox[3] - bbox[1]
+                    chinese_text_lines = [chinese_text]
+                    chinese_total_height = draw.textbbox((0, 0), chinese_text, font=chinese_font)[3] - draw.textbbox((0, 0), chinese_text, font=chinese_font)[1]
                     break
             
-            # Adjust Portuguese font size (always calculate, use N/A if text is empty)
+            # Adjust Portuguese font size with line breaking (always calculate, use N/A if text is empty)
             display_portuguese = portuguese_text if portuguese_text else "N/A"
+            portuguese_text_lines = []
+            portuguese_total_height = 0
             
             for attempt in range(10):
                 try:
@@ -399,11 +639,15 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
                     else:
                         portuguese_font = ImageFont.load_default()
                     
-                    bbox = draw.textbbox((0, 0), display_portuguese, font=portuguese_font)
-                    text_width = bbox[2] - bbox[0]
-                    portuguese_text_height = bbox[3] - bbox[1]
+                    # Break Portuguese text into lines
+                    portuguese_text_lines = break_text_for_subtitle(display_portuguese, portuguese_font, available_width, draw, is_chinese=False)
                     
-                    if text_width <= available_width:
+                    # Calculate total height for Portuguese text lines
+                    line_height = draw.textbbox((0, 0), "Test", font=portuguese_font)[3] - draw.textbbox((0, 0), "Test", font=portuguese_font)[1]
+                    portuguese_total_height = len(portuguese_text_lines) * line_height + (len(portuguese_text_lines) - 1) * 5  # 5px line spacing
+                    
+                    # Check if Portuguese text fits in available space
+                    if portuguese_total_height <= (available_height * 0.4):  # Portuguese should use max 40% of available height
                         break
                     
                     portuguese_font_size = int(portuguese_font_size * 0.9)
@@ -412,29 +656,48 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
                         
                 except Exception as e:
                     portuguese_font = ImageFont.load_default()
-                    bbox = draw.textbbox((0, 0), display_portuguese, font=portuguese_font)
-                    portuguese_text_height = bbox[3] - bbox[1]
+                    portuguese_text_lines = [display_portuguese]
+                    portuguese_total_height = draw.textbbox((0, 0), display_portuguese, font=portuguese_font)[3] - draw.textbbox((0, 0), display_portuguese, font=portuguese_font)[1]
                     break
             
-            # Position Chinese text at bottom
-            chinese_bbox = draw.textbbox((0, 0), chinese_text, font=chinese_font)
-            chinese_width = chinese_bbox[2] - chinese_bbox[0]
-            chinese_x = (width - chinese_width) // 2
-            chinese_y = height - margin_from_bottom - chinese_text_height
+            # Calculate position for Chinese text (bottom area)
+            chinese_start_y = height - margin_from_bottom - chinese_total_height
             
-            # Position Portuguese text above Chinese (always show, use N/A if empty)
-            if portuguese_font:
-                # Recalculate for display text
-                portuguese_bbox = draw.textbbox((0, 0), display_portuguese, font=portuguese_font)
-                portuguese_width = portuguese_bbox[2] - portuguese_bbox[0]
-                portuguese_x = (width - portuguese_width) // 2
-                portuguese_y = chinese_y - portuguese_text_height - 10  # 10px gap
+            # Position and draw Portuguese text lines above Chinese (always show, use N/A if empty)
+            if portuguese_font and portuguese_text_lines:
+                # Calculate starting position for Portuguese text (above Chinese with 10px gap)
+                portuguese_start_y = chinese_start_y - portuguese_total_height - 10
                 
-                # Draw Portuguese text in yellow (or N/A)
-                draw.text((portuguese_x, portuguese_y), display_portuguese, fill=(255, 255, 0), font=portuguese_font)
+                # Draw each Portuguese line
+                line_height = draw.textbbox((0, 0), "Test", font=portuguese_font)[3] - draw.textbbox((0, 0), "Test", font=portuguese_font)[1]
+                
+                for i, line in enumerate(portuguese_text_lines):
+                    # Calculate width of this line for centering
+                    line_bbox = draw.textbbox((0, 0), line, font=portuguese_font)
+                    line_width = line_bbox[2] - line_bbox[0]
+                    line_x = (width - line_width) // 2
+                    
+                    # Calculate Y position for this line
+                    line_y = portuguese_start_y + i * (line_height + 5)  # 5px line spacing
+                    
+                    # Draw line with yellow color
+                    draw.text((line_x, line_y), line, fill=(255, 255, 0), font=portuguese_font)
             
-            # Draw Chinese text in white
-            draw.text((chinese_x, chinese_y), chinese_text, fill=(255, 255, 255), font=chinese_font)
+            # Draw Chinese text lines in white
+            if chinese_text_lines and chinese_font:
+                line_height = draw.textbbox((0, 0), "測試", font=chinese_font)[3] - draw.textbbox((0, 0), "測試", font=chinese_font)[1]
+                
+                for i, line in enumerate(chinese_text_lines):
+                    # Calculate width of this line for centering
+                    line_bbox = draw.textbbox((0, 0), line, font=chinese_font)
+                    line_width = line_bbox[2] - line_bbox[0]
+                    line_x = (width - line_width) // 2
+                    
+                    # Calculate Y position for this line
+                    line_y = chinese_start_y + i * (line_height + 5)  # 5px line spacing
+                    
+                    # Draw line with white color
+                    draw.text((line_x, line_y), line, fill=(255, 255, 255), font=chinese_font)
             
             # Save the result
             if output_path:
@@ -474,10 +737,9 @@ def add_subtitle_to_image(image_path: Path, subtitle_text: str, output_path: Pat
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            width, height = img.size
-            
-            # Keep original image size - no resizing
-            new_img = img.copy()
+            # Resize image to R36S compatible resolution (640x480)
+            new_img = resize_image_for_r36s(img)
+            width, height = new_img.size
             
             # Draw subtitle
             draw = ImageDraw.Draw(new_img)
@@ -489,17 +751,17 @@ def add_subtitle_to_image(image_path: Path, subtitle_text: str, output_path: Pat
             margin_from_bottom = 50
             available_height = margin_from_bottom
             
-            # Start with a reasonable font size that should fit in available space
-            max_font_size = min(48, int(available_height * 0.8))
+            # Start with a larger font size for better readability
+            max_font_size = min(72, int(available_height * 1.2))  # Increased from 48
             font_size = max_font_size
-            
-            # Load font and adjust size to fit width
-            font = None
-            text_width = 0
-            text_height = 0
             
             # Calculate available width (with 20px padding on each side)
             available_width = width - 40
+            
+            # Load font and adjust size to fit with line breaking
+            font = None
+            text_lines = []
+            total_text_height = 0
             
             for attempt in range(10):  # Try up to 10 different sizes
                 try:
@@ -508,36 +770,48 @@ def add_subtitle_to_image(image_path: Path, subtitle_text: str, output_path: Pat
                     else:
                         font = ImageFont.load_default()
                     
-                    # Get text dimensions
-                    bbox = draw.textbbox((0, 0), subtitle_text, font=font)
-                    text_width = bbox[2] - bbox[0]
-                    text_height = bbox[3] - bbox[1]
+                    # Break text into lines that fit the width
+                    text_lines = break_text_for_subtitle(subtitle_text, font, available_width, draw, is_chinese=True)
                     
-                    # If text fits within available width, we're good
-                    if text_width <= available_width:
+                    # Calculate total height needed for all lines
+                    line_height = draw.textbbox((0, 0), "測試", font=font)[3] - draw.textbbox((0, 0), "測試", font=font)[1]
+                    total_text_height = len(text_lines) * line_height + (len(text_lines) - 1) * 5  # 5px line spacing
+                    
+                    # Check if all lines fit within available height
+                    if total_text_height <= available_height:
                         break
                     
-                    # Otherwise, reduce font size by 10% and try again
+                    # Otherwise, reduce font size and try again
                     font_size = int(font_size * 0.9)
-                    if font_size < 12:  # Minimum readable size
+                    if font_size < 16:  # Increased minimum size from 12
                         break
                         
                 except:
                     font = ImageFont.load_default()
-                    bbox = draw.textbbox((0, 0), subtitle_text, font=font)
-                    text_width = bbox[2] - bbox[0]
-                    text_height = bbox[3] - bbox[1]
+                    text_lines = [subtitle_text]  # Fallback to single line
+                    total_text_height = draw.textbbox((0, 0), subtitle_text, font=font)[3] - draw.textbbox((0, 0), subtitle_text, font=font)[1]
                     break
             
-            # Center text horizontally, position 50px above bottom of image
-            text_x = (width - text_width) // 2
-            
-            # Position text 50px above the bottom of the image
-            margin_from_bottom = 50
-            text_y = height - margin_from_bottom - text_height
-            
-            # Draw text with white color
-            draw.text((text_x, text_y), subtitle_text, fill=(255, 255, 255), font=font)
+            # Render multiple lines of text
+            if text_lines and font:
+                # Calculate starting position for multi-line text
+                line_height = draw.textbbox((0, 0), "測試", font=font)[3] - draw.textbbox((0, 0), "測試", font=font)[1]
+                
+                # Start from bottom and work upward
+                start_y = height - margin_from_bottom - total_text_height
+                
+                # Draw each line
+                for i, line in enumerate(text_lines):
+                    # Calculate width of this line for centering
+                    line_bbox = draw.textbbox((0, 0), line, font=font)
+                    line_width = line_bbox[2] - line_bbox[0]
+                    line_x = (width - line_width) // 2
+                    
+                    # Calculate Y position for this line
+                    line_y = start_y + i * (line_height + 5)  # 5px line spacing
+                    
+                    # Draw line with white color
+                    draw.text((line_x, line_y), line, fill=(255, 255, 255), font=font)
             
             # Save the result with "a" suffix if no output path specified
             if output_path:
@@ -687,8 +961,22 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                     print("   ❌ Erro nas versões A ou C")
                     error_count += 1
         else:
-            # No subtitle for this image
-            skipped_count += 1
+            # No subtitle for this image, but still resize it for R36S compatibility
+            print(f"🖼️  {png_file.name} -> redimensionamento R36S (sem legenda)")
+            
+            if dry_run:
+                print("   [DRY RUN] Redimensionamento apenas")
+                processed_count += 1
+            else:
+                # Just resize the image to R36S resolution
+                success = resize_image_only(png_file)
+                
+                if success:
+                    print("   ✅ Redimensionada para R36S (640x480)")
+                    processed_count += 1
+                else:
+                    print("   ❌ Erro no redimensionamento")
+                    error_count += 1
     
     return processed_count, skipped_count, error_count
 
@@ -707,7 +995,9 @@ Funcionamento:
   1. Cria pasta destino com sufixo "_sub" (ex: test -> test_sub)
   2. Copia apenas imagens PNG da pasta origem para a pasta destino
   3. Busca o arquivo *_base.txt na pasta origem
-  4. Processa as imagens na pasta destino
+  4. Processa as imagens na pasta destino:
+     - Redimensiona para R36S (640x480) mantendo aspect ratio
+     - Adiciona legendas nas três versões
 
 Saída:
   Para 5.png -> 5a.png (中文) + 5b.png (中文 + 翻译) + 5c.png (中文 + PT)
@@ -775,8 +1065,10 @@ Saída:
     print("PROCESSAMENTO CONCLUÍDO" if not args.dry_run else "SIMULAÇÃO CONCLUÍDA")
     print("=" * 60)
     print(f"📊 Total de imagens: {total_files}")
-    print(f"✅ Processadas (versões A+B+C criadas): {processed}")
-    print(f"⏭️  Ignoradas (sem legenda): {skipped}")
+    print(f"✅ Processadas: {processed}")
+    print(f"   ├── Com legendas (A+B+C): legendas aplicadas + R36S")
+    print(f"   └── Sem legendas: apenas redimensionamento R36S")
+    print(f"⏭️  Ignoradas (nomes inválidos): {skipped}")
     print(f"❌ Erros: {errors}")
     
     if args.dry_run and processed > 0:
