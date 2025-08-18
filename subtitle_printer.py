@@ -32,12 +32,53 @@ except ImportError:
     sys.exit(1)
 
 
-def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str]]:
+def parse_individual_translations(translation_list_str: str) -> list[tuple[str, str]]:
     """
-    Parse the base.txt file and return a mapping of seconds -> (chinese subtitle, translations, portuguese).
+    Parse the translation list string to extract individual word translations.
+    
+    Args:
+        translation_list_str: String like '["三 (sān): três", "號 (hào): número", "碼頭 (mǎ tóu): cais"]'
+        
+    Returns:
+        List of tuples (chinese_chars, full_translation)
+        Example: [("三", "三 (sān): três"), ("號", "號 (hào): número"), ("碼頭", "碼頭 (mǎ tóu): cais")]
+    """
+    try:
+        # Clean and parse the list
+        translation_list_str = translation_list_str.strip()
+        if not translation_list_str.startswith('[') or not translation_list_str.endswith(']'):
+            return []
+        
+        # Remove brackets and split by quotes
+        content = translation_list_str[1:-1]  # Remove [ and ]
+        
+        # Split by ", " but keep the quotes
+        import re
+        items = re.findall(r'"([^"]*)"', content)
+        
+        result = []
+        for item in items:
+            # Extract Chinese characters before the first space or parenthesis
+            # Format: "三 (sān): três" -> chinese_chars = "三"
+            match = re.match(r'^([^\s\(]+)', item)
+            if match:
+                chinese_chars = match.group(1)
+                full_translation = item
+                result.append((chinese_chars, full_translation))
+        
+        return result
+        
+    except Exception as e:
+        print(f"Erro ao fazer parsing da lista de traduções: {e}")
+        return []
+
+
+def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]]:
+    """
+    Parse the base.txt file and return a mapping of seconds -> (chinese subtitle, translations, translations_json, portuguese).
     
     Returns:
-        Dict mapping second (as int) to tuple of (chinese_text, translations_text, portuguese_text)
+        Dict mapping second (as int) to tuple of (chinese_text, translations_text, translations_json, portuguese_text)
     """
     subtitles = {}
     
@@ -72,6 +113,7 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str]]:
                 
                 # Extract translations (fourth column)
                 translations_text = parts[3].strip()
+                translations_json = translations_text  # Keep original JSON string
                 
                 # Parse translations list if it exists
                 if translations_text and translations_text != 'N/A':
@@ -89,6 +131,7 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str]]:
                         formatted_translations = translations_text
                 else:
                     formatted_translations = ""
+                    translations_json = ""
                 
                 # Extract Portuguese translation (fifth column)
                 portuguese_text = ""
@@ -98,7 +141,7 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str]]:
                         portuguese_text = ""
                 
                 if chinese_text and chinese_text != 'N/A':
-                    subtitles[seconds_int] = (chinese_text, formatted_translations, portuguese_text)
+                    subtitles[seconds_int] = (chinese_text, formatted_translations, translations_json, portuguese_text)
                     
     except Exception as e:
         print(f"Erro ao ler arquivo base {base_file_path}: {e}")
@@ -719,6 +762,214 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
         return False
 
 
+def add_highlighted_word_subtitle(image_path: Path, full_subtitle: str, highlight_chars: str, word_translation: str, output_path: Path = None) -> bool:
+    """
+    Create an image with Chinese subtitle where specific characters are highlighted in blue/violet,
+    and the word translation is shown at the top.
+    
+    Args:
+        image_path: Path to the original image
+        full_subtitle: Full Chinese subtitle text
+        highlight_chars: Characters to highlight (e.g., "三", "碼頭")
+        word_translation: Translation to show at top (e.g., "三 (sān): três")
+        output_path: Output path (if None, overwrites original)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        with Image.open(image_path) as img:
+            # Convert to RGB if necessary
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize image to R36S compatible resolution (640x480)
+            new_img = resize_image_for_r36s(img)
+            width, height = new_img.size
+            
+            # Draw elements
+            draw = ImageDraw.Draw(new_img)
+            
+            # Get Chinese font
+            chinese_font_path = get_chinese_font_path()
+            
+            # Calculate areas for both texts
+            margin_from_bottom = 50
+            available_width = width - 40  # 20px padding on each side
+            
+            # === BOTTOM SUBTITLE (Chinese with highlighted characters) ===
+            # Start with larger font size for Chinese subtitle
+            max_chinese_font_size = min(72, int(50 * 1.2))
+            chinese_font_size = max_chinese_font_size
+            chinese_font = None
+            chinese_text_lines = []
+            chinese_total_height = 0
+            
+            # Adjust Chinese font size
+            for attempt in range(10):
+                try:
+                    if chinese_font_path:
+                        chinese_font = ImageFont.truetype(str(chinese_font_path), chinese_font_size)
+                    else:
+                        chinese_font = ImageFont.load_default()
+                    
+                    # Break text into lines
+                    chinese_text_lines = break_text_for_subtitle(full_subtitle, chinese_font, available_width, draw, is_chinese=True)
+                    
+                    # Calculate total height needed
+                    line_height = draw.textbbox((0, 0), "測試", font=chinese_font)[3] - draw.textbbox((0, 0), "測試", font=chinese_font)[1]
+                    chinese_total_height = len(chinese_text_lines) * line_height + (len(chinese_text_lines) - 1) * 5
+                    
+                    # Check if fits (reserve space for top translation)
+                    if chinese_total_height <= 80:  # Max 80px for Chinese subtitle
+                        break
+                    
+                    chinese_font_size = int(chinese_font_size * 0.9)
+                    if chinese_font_size < 16:
+                        break
+                        
+                except:
+                    chinese_font = ImageFont.load_default()
+                    chinese_text_lines = [full_subtitle]
+                    chinese_total_height = draw.textbbox((0, 0), full_subtitle, font=chinese_font)[3] - draw.textbbox((0, 0), full_subtitle, font=chinese_font)[1]
+                    break
+            
+            # === TOP TRANSLATION ===
+            # Adjust font size for word translation at top
+            max_translation_font_size = min(48, int(height * 0.1))
+            translation_font_size = max_translation_font_size
+            translation_font = None
+            translation_text_lines = []
+            translation_total_height = 0
+            
+            # Try to get Unicode font for mixed content
+            unicode_font_path = None
+            unicode_fonts = [
+                Path("/Library/Fonts/Arial Unicode.ttf"),
+                Path("/System/Library/Fonts/PingFang.ttc"),
+                get_chinese_font_path()
+            ]
+            for font_candidate in unicode_fonts:
+                if font_candidate and font_candidate.exists():
+                    unicode_font_path = font_candidate
+                    break
+            
+            for attempt in range(10):
+                try:
+                    if unicode_font_path:
+                        translation_font = ImageFont.truetype(str(unicode_font_path), translation_font_size)
+                    else:
+                        translation_font = ImageFont.load_default()
+                    
+                    # Break translation text
+                    translation_text_lines = break_text_for_subtitle(word_translation, translation_font, available_width, draw, is_chinese=False)
+                    
+                    # Calculate total height
+                    line_height = draw.textbbox((0, 0), "Test", font=translation_font)[3] - draw.textbbox((0, 0), "Test", font=translation_font)[1]
+                    translation_total_height = len(translation_text_lines) * line_height + (len(translation_text_lines) - 1) * 5
+                    
+                    # Check if fits in top area
+                    if translation_total_height <= height * 0.2:  # Max 20% of height
+                        break
+                    
+                    translation_font_size = int(translation_font_size * 0.9)
+                    if translation_font_size < 12:
+                        break
+                        
+                except:
+                    translation_font = ImageFont.load_default()
+                    translation_text_lines = [word_translation]
+                    translation_total_height = draw.textbbox((0, 0), word_translation, font=translation_font)[3] - draw.textbbox((0, 0), word_translation, font=translation_font)[1]
+                    break
+            
+            # === DRAW TOP TRANSLATION ===
+            if translation_font and translation_text_lines:
+                # Add semi-transparent background for better readability
+                padding = 10
+                bg_height = translation_total_height + 2 * padding
+                bg_rect = [0, 0, width, bg_height]
+                
+                # Create overlay for background
+                overlay = Image.new('RGBA', new_img.size, (0, 0, 0, 0))
+                overlay_draw = ImageDraw.Draw(overlay)
+                overlay_draw.rectangle(bg_rect, fill=(0, 0, 0, 128))  # Semi-transparent black
+                new_img = Image.alpha_composite(new_img.convert('RGBA'), overlay).convert('RGB')
+                draw = ImageDraw.Draw(new_img)
+                
+                # Draw translation lines
+                line_height = draw.textbbox((0, 0), "Test", font=translation_font)[3] - draw.textbbox((0, 0), "Test", font=translation_font)[1]
+                start_y = padding
+                
+                for i, line in enumerate(translation_text_lines):
+                    line_bbox = draw.textbbox((0, 0), line, font=translation_font)
+                    line_width = line_bbox[2] - line_bbox[0]
+                    line_x = (width - line_width) // 2
+                    line_y = start_y + i * (line_height + 5)
+                    
+                    # Draw in blue-violet (same color as highlighted characters)
+                    draw.text((line_x, line_y), line, fill=(138, 43, 226), font=translation_font)
+            
+            # === DRAW CHINESE SUBTITLE WITH HIGHLIGHTED CHARACTERS ===
+            if chinese_text_lines and chinese_font:
+                # Calculate starting position for Chinese text
+                chinese_start_y = height - margin_from_bottom - chinese_total_height
+                line_height = draw.textbbox((0, 0), "測試", font=chinese_font)[3] - draw.textbbox((0, 0), "測試", font=chinese_font)[1]
+                
+                for i, line in enumerate(chinese_text_lines):
+                    # Calculate position for this line
+                    line_bbox = draw.textbbox((0, 0), line, font=chinese_font)
+                    line_width = line_bbox[2] - line_bbox[0]
+                    line_x = (width - line_width) // 2
+                    line_y = chinese_start_y + i * (line_height + 5)
+                    
+                    # Draw line with character highlighting
+                    _draw_line_with_highlight(draw, line, line_x, line_y, chinese_font, highlight_chars)
+            
+            # Save the result
+            if output_path:
+                save_path = output_path
+            else:
+                stem = image_path.stem
+                suffix = image_path.suffix
+                save_path = image_path.parent / f"{stem}ba{suffix}"
+            
+            new_img.save(save_path, "PNG")
+            return True
+            
+    except Exception as e:
+        print(f"Erro ao criar imagem com palavra destacada {image_path}: {e}")
+        return False
+
+
+def _draw_line_with_highlight(draw, line: str, start_x: int, start_y: int, font, highlight_chars: str):
+    """
+    Draw a line of text with specific characters highlighted in blue/violet.
+    
+    Args:
+        draw: ImageDraw object
+        line: Text line to draw
+        start_x: Starting X position
+        start_y: Y position
+        font: Font to use
+        highlight_chars: Characters to highlight
+    """
+    current_x = start_x
+    
+    for char in line:
+        # Check if this character should be highlighted
+        if char in highlight_chars:
+            color = (138, 43, 226)  # Blue-violet color
+        else:
+            color = (255, 255, 255)  # White
+        
+        # Draw the character
+        draw.text((current_x, start_y), char, fill=color, font=font)
+        
+        # Move to next character position
+        char_width = draw.textbbox((0, 0), char, font=font)[2]
+        current_x += char_width
+
+
 def add_subtitle_to_image(image_path: Path, subtitle_text: str, output_path: Path = None) -> bool:
     """
     Add Chinese subtitle to the bottom of the image.
@@ -904,17 +1155,21 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
         
         # Check if we have a subtitle for this time (image name represents seconds)
         if image_index in subtitles:
-            chinese_text, translations_text, portuguese_text = subtitles[image_index]
+            chinese_text, translations_text, translations_json, portuguese_text = subtitles[image_index]
             
             # Generate output filenames with "a", "b", and "c" suffixes
             output_a = f"{png_file.stem}a{png_file.suffix}"
             output_b = f"{png_file.stem}b{png_file.suffix}"
             output_c = f"{png_file.stem}c{png_file.suffix}"
             
-            print(f"📸 {png_file.name} -> {output_a} + {output_b} + {output_c}")
+            # Count individual translations for B versions  
+            individual_translations = parse_individual_translations(translations_json) if translations_json else []
+            b_versions_text = f"{len(individual_translations)}×B" if individual_translations else "B"
+            
+            print(f"📸 {png_file.name} -> {output_a} + {b_versions_text} + {output_c}")
             print(f"   中文: \"{chinese_text}\"")
             if translations_text:
-                print(f"   翻译: {len(translations_text.split())} words")
+                print(f"   翻译: {len(individual_translations)} palavras individuais")
             if portuguese_text:
                 print(f"   PT: \"{portuguese_text}\"")
             
@@ -929,33 +1184,58 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                 success_c = add_subtitle_with_portuguese(png_file, chinese_text, portuguese_text)
                 
                 if success_a and success_c:
-                    # Create version B (copy A + add translations at top)
-                    a_path = png_file.parent / output_a
-                    b_path = png_file.parent / output_b
+                    # Create multiple B versions (ba, bb, bc, etc.) for individual word translations  
+                    individual_translations = parse_individual_translations(translations_json) if translations_json else []
+                    success_b_versions = []
                     
-                    if translations_text:
-                        success_b = add_top_translations(a_path, translations_text, b_path)
+                    # Get stem and suffix for building filenames
+                    stem = png_file.stem
+                    suffix = png_file.suffix
+                    
+                    if individual_translations:
+                        # Create one image for each word translation
+                        for idx, (chinese_chars, full_translation) in enumerate(individual_translations):
+                            # Generate suffix: ba, bb, bc, bd, etc.
+                            suffix_letter = chr(ord('a') + idx)  # a, b, c, d, ...
+                            output_b_variant = f"{stem}b{suffix_letter}{suffix}"
+                            b_variant_path = png_file.parent / output_b_variant
+                            
+                            # Create highlighted word image
+                            success_variant = add_highlighted_word_subtitle(
+                                png_file, 
+                                chinese_text, 
+                                chinese_chars, 
+                                full_translation, 
+                                b_variant_path
+                            )
+                            
+                            success_b_versions.append(success_variant)
+                            
+                            if success_variant:
+                                print(f"   ✅ Criada versão {output_b_variant} (destaque: {chinese_chars})")
+                            else:
+                                print(f"   ❌ Erro na versão {output_b_variant}")
                     else:
-                        # If no translations, just copy A to B
-                        try:
-                            shutil.copy2(a_path, b_path)
-                            success_b = True
-                        except Exception as e:
-                            print(f"   ❌ Erro ao copiar para versão B: {e}")
-                            success_b = False
+                        # No individual translations available
+                        print("   ⚠️  Nenhuma tradução individual disponível para versões B")
+                        success_b_versions = [True]  # Consider it successful to proceed
                     
-                    if success_b:
+                    # Check if all B versions were created successfully
+                    all_b_success = all(success_b_versions) if success_b_versions else True
+                    
+                    if all_b_success:
                         # Remove original file after all versions are created successfully
                         try:
                             import os
                             os.unlink(png_file)
-                            print("   ✅ Versões A, B e C criadas (original removido)")
+                            b_count = len(success_b_versions) if individual_translations else 0
+                            print(f"   ✅ Versões A, {b_count}×B e C criadas (original removido)")
                             processed_count += 1
                         except OSError as e:
-                            print(f"   ⚠️  Versões A, B e C criadas, mas erro ao remover original: {e}")
+                            print(f"   ⚠️  Versões criadas, mas erro ao remover original: {e}")
                             processed_count += 1
                     else:
-                        print("   ❌ Erro na versão B")
+                        print("   ❌ Erro em uma ou mais versões B")
                         error_count += 1
                 else:
                     print("   ❌ Erro nas versões A ou C")
