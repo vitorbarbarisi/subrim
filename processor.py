@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
 """
-TTML tick-to-seconds processor
+SRT subtitle processor
 
-Reads a TTML file (e.g., Netflix IMSC1 subtitles) that uses tick-based timing
-expressions (values ending with 't') and converts the 'begin' and 'end'
-attributes to seconds offset (e.g., 186.645s), using the document's
-ttp:tickRate parameter.
+Reads SRT subtitle files and converts them to XML format with seconds timing.
+Supports both Chinese Traditional (zht) and other languages (pt-BR, es, eng).
 
 Usage:
   python3 processor.py <folder_name_inside_assets>
@@ -14,14 +12,14 @@ The processor automatically detects existing base files and resumes from the las
 processed timestamp. Manual resume is also available:
   python3 processor.py <folder_name_inside_assets> --resume-from-seconds 220.5
 
-Searches the folder under the local "assets" directory (recursively) for one XML file containing "zht"
+Searches the folder under the local "assets" directory (recursively) for one SRT file containing "zht"
 in its name and one containing either "pt", "es" or "eng" (ignoring files that already contain
-"_secs" or "_real"). If a "zht" XML is not found, it is created by translating the
-non-zht file (pt-BR, es ou eng) into Traditional Chinese using the DeepSeek API. Writes new
-files alongside each input with the "_secs" suffix before the extension.
+"_secs" or "_real"). If a "zht" SRT is not found, it is created by translating the
+non-zht file (pt-BR, es ou eng) into Traditional Chinese using the DeepSeek API. Converts SRT
+files to XML format with "_secs.xml" suffix.
 
 Additionally, a base TXT file is generated from the zht_secs XML with one line
-per subtitle: an incremental index (starting at 1), the begin time, the zht
+per subtitle: an incremental index (starting at 1), the begin time, the end time, the zht
 text, a list of strings generated via LLM no formato ["palavra: tradução", ...],
 and the matched translation from the other language (pt, es ou eng). The file is named
 "<zht_secs_stem>_base.txt" and saved alongside the zht_secs file.
@@ -118,6 +116,11 @@ def determine_output_path_secs(input_path: Path) -> Path:
     return input_path.with_name(f"{input_path.name}_secs")
 
 
+def determine_srt_xml_output_path(input_path: Path) -> Path:
+    """Build output path for SRT to XML conversion with _secs suffix."""
+    return input_path.with_name(f"{input_path.stem}_secs.xml")
+
+
 def determine_base_output_path(zht_secs_path: Path) -> Path:
     """Build base TXT path: <zht_secs_stem>_base.txt alongside the zht_secs file."""
     return zht_secs_path.with_name(f"{zht_secs_path.stem}_base.txt")
@@ -150,6 +153,11 @@ def process_file(input_file: Path, output_file: Path) -> None:
     tree.write(output_file, encoding="utf-8", xml_declaration=True)
 
 
+def process_srt_file(input_file: Path, output_file: Path) -> None:
+    """Convert an SRT file to XML format with seconds timing."""
+    srt_to_xml_seconds(input_file, output_file)
+
+
 def _iter_p_elements(root: ET.Element):
     """Yield TTML <p> elements regardless of namespace prefix usage."""
     p_tag = f"{{{NS_TTML}}}p"
@@ -171,6 +179,88 @@ def _parse_seconds_value(seconds_text: str) -> Decimal:
     """Parse a TTML seconds string like '12.345s' into Decimal seconds."""
     value = seconds_text.strip().rstrip("s").strip()
     return Decimal(value)
+
+
+@dataclass
+class SRTEntry:
+    """Represents a single SRT subtitle entry."""
+    index: int
+    start_time: Decimal  # in seconds
+    end_time: Decimal    # in seconds
+    text: str
+
+
+def parse_srt_timestamp(timestamp: str) -> Decimal:
+    """Parse SRT timestamp like '00:02:17,440' to decimal seconds."""
+    # Format: HH:MM:SS,mmm
+    time_part, milliseconds = timestamp.split(',')
+    hours, minutes, seconds = map(int, time_part.split(':'))
+    total_seconds = hours * 3600 + minutes * 60 + seconds
+    total_seconds += int(milliseconds) / 1000.0
+    return Decimal(str(total_seconds))
+
+
+def parse_srt_file(srt_path: Path) -> list[SRTEntry]:
+    """Parse an SRT file and return a list of SRTEntry objects."""
+    entries = []
+    content = srt_path.read_text(encoding='utf-8').strip()
+    
+    # Split by double newlines to get individual entries
+    raw_entries = re.split(r'\n\n+', content)
+    
+    for raw_entry in raw_entries:
+        lines = raw_entry.strip().split('\n')
+        if len(lines) < 3:
+            continue
+            
+        try:
+            # First line: index
+            index = int(lines[0])
+            
+            # Second line: timestamps
+            time_line = lines[1]
+            if ' --> ' not in time_line:
+                continue
+            start_str, end_str = time_line.split(' --> ')
+            start_time = parse_srt_timestamp(start_str.strip())
+            end_time = parse_srt_timestamp(end_str.strip())
+            
+            # Remaining lines: text content
+            text = '\n'.join(lines[2:]).strip()
+            
+            entries.append(SRTEntry(index, start_time, end_time, text))
+            
+        except (ValueError, IndexError):
+            # Skip malformed entries
+            continue
+    
+    return entries
+
+
+def srt_to_xml_seconds(srt_path: Path, output_path: Path) -> None:
+    """Convert an SRT file to XML format with seconds timing."""
+    entries = parse_srt_file(srt_path)
+    
+    # Create XML structure similar to TTML
+    root = ET.Element("tt", xmlns=NS_TTML)
+    
+    # Add head element
+    head = ET.SubElement(root, "head")
+    
+    # Add body element
+    body = ET.SubElement(root, "body")
+    div = ET.SubElement(body, "div")
+    
+    for entry in entries:
+        p = ET.SubElement(div, "p")
+        # Convert timestamps to seconds format
+        p.set("begin", f"{entry.start_time:.3f}s")
+        p.set("end", f"{entry.end_time:.3f}s")
+        p.text = entry.text
+    
+    # Write to file
+    tree = ET.ElementTree(root)
+    tree.write(output_path, encoding="utf-8", xml_declaration=True)
 
 
 def _load_pt_entries(pt_secs_path: Path) -> list[tuple[Decimal, Decimal, str]]:
@@ -351,6 +441,16 @@ def _determine_zht_secs_output_from(source_secs: Path) -> Path:
         new_name = name_lower.replace("es", "zht")
         return src.with_name(new_name)
     return src.with_name(name_lower.replace("_secs", "_zht_secs"))
+
+
+def create_zht_secs_from_srt(source_srt: Path, source_lang: str) -> Path:
+    """Create a zht_secs XML by translating each SRT entry from source_lang."""
+    # First convert SRT to XML format
+    xml_output = determine_srt_xml_output_path(source_srt)
+    process_srt_file(source_srt, xml_output)
+    
+    # Now create zht version from the XML
+    return create_zht_secs_from_source(xml_output, source_lang)
 
 
 def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
@@ -535,7 +635,7 @@ def merge_same_begin_in_file(xml_path: Path) -> None:
 
 
 def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_seconds: float | None = None) -> Path:
-    """Create a TSV file with: index, begin, zht text, pairs, pt text.
+    """Create a TSV file with: index, begin, end, zht text, pairs, pt text.
 
     PT matched by time within ZHT window; pairs fetched via DeepSeek if configured.
     """
@@ -579,8 +679,8 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
                 for line in lines:
                     if line.strip():
                         parts = line.split('\t')
-                        if len(parts) >= 2:
-                            timestamp_str = parts[1]
+                        if len(parts) >= 2:  # Support both old format (5 cols) and new format (6 cols)
+                            timestamp_str = parts[1]  # begin time
                             if timestamp_str.endswith('s'):
                                 try:
                                     timestamp = float(timestamp_str[:-1])
@@ -595,9 +695,20 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
                 if resume_from_seconds is not None:
                     # Manual resume parameter provided
                     auto_resume_from_seconds = resume_from_seconds
-                    existing_lines = [line for line in existing_lines 
-                                    if line.split('\t')[1].endswith('s') and 
-                                    float(line.split('\t')[1][:-1]) < resume_from_seconds]
+                    # Handle both old format (5 columns) and new format (6 columns)
+                    filtered_lines = []
+                    for line in existing_lines:
+                        parts = line.split('\t')
+                        if len(parts) >= 2:
+                            begin_time_str = parts[1]
+                            if begin_time_str.endswith('s'):
+                                try:
+                                    begin_time = float(begin_time_str[:-1])
+                                    if begin_time < resume_from_seconds:
+                                        filtered_lines.append(line)
+                                except ValueError:
+                                    pass
+                    existing_lines = filtered_lines
                     print(f"Retomando manualmente a partir de {resume_from_seconds}s. {len(existing_lines)} entradas preservadas.")
                 elif last_timestamp is not None:
                     # Auto-resume from last processed timestamp
@@ -650,9 +761,9 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
                 pairs_str = _call_deepseek_pairs(zht_norm)
                 pairs_cache[zht_norm] = pairs_str
             
-            # Use tab-separated fields for safety; insert pairs between zht and pt
+            # Use tab-separated fields for safety; insert end time after begin time
             line = (
-                f"{index_counter}\t{_sanitize_tsv_field(begin_time)}\t"
+                f"{index_counter}\t{_sanitize_tsv_field(begin_time)}\t{_sanitize_tsv_field(end_time)}\t"
                 f"{_sanitize_tsv_field(text_content)}\t{_sanitize_tsv_field(pairs_str)}\t"
                 f"{_sanitize_tsv_field(pt_text)}"
             )
@@ -695,28 +806,28 @@ def _select_unique(files: list[Path], label: str) -> Path:
 
 
 def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
-    """Find up to one 'zht' and exactly one 'pt' or 'es' or 'eng' XML under directory (recursive).
+    """Find up to one 'zht' and exactly one 'pt' or 'es' or 'eng' SRT under directory (recursive).
 
     Ignores files that already appear to be processed (contain '_secs' or '_real').
-    Returns: (zht_file_or_none, other_file, other_lang) where other_lang is 'pt' or 'es'.
+    Returns: (zht_file_or_none, other_file, other_lang) where other_lang is 'pt' or 'es' or 'eng'.
     """
     if not directory.is_dir():
         raise ValueError(f"Diretório inválido: {directory}")
 
-    all_xml = list(directory.rglob("*.xml"))
-    if not all_xml:
-        raise ValueError("Nenhum arquivo .xml encontrado no diretório informado")
+    all_srt = list(directory.rglob("*.srt"))
+    if not all_srt:
+        raise ValueError("Nenhum arquivo .srt encontrado no diretório informado")
 
     def is_candidate(path: Path) -> bool:
         name_lower = path.name.lower()
         return ("_secs" not in name_lower) and ("_real" not in name_lower)
 
-    candidates = [p for p in all_xml if is_candidate(p)]
+    candidates = [p for p in all_srt if is_candidate(p)]
 
-    zht_candidates = [p for p in candidates if re.search(r"zht", p.name, re.IGNORECASE)]
-    pt_candidates = [p for p in candidates if re.search(r"pt", p.name, re.IGNORECASE)]
-    es_candidates = [p for p in candidates if re.search(r"es", p.name, re.IGNORECASE)]
-    eng_candidates = [p for p in candidates if re.search(r"eng", p.name, re.IGNORECASE)]
+    zht_candidates = [p for p in candidates if re.search(r"_zht", p.name, re.IGNORECASE)]
+    pt_candidates = [p for p in candidates if re.search(r"_pt", p.name, re.IGNORECASE)]
+    es_candidates = [p for p in candidates if re.search(r"_es", p.name, re.IGNORECASE)]
+    eng_candidates = [p for p in candidates if re.search(r"_eng", p.name, re.IGNORECASE)]
 
     zht_file: Path | None
     if not zht_candidates:
@@ -770,21 +881,21 @@ def main(argv: list[str]) -> int:
 
         try:
             # Always convert the non-zht file first (pt/es/eng)
-            other_out = determine_output_path_secs(other_file)
-            process_file(other_file, other_out)
+            other_out = determine_srt_xml_output_path(other_file)
+            process_srt_file(other_file, other_out)
             merge_same_begin_in_file(other_out)
-            print(f"Arquivo convertido: {other_out}")
+            print(f"Arquivo SRT convertido para XML: {other_out}")
 
             # If no zht found, create zht from the converted other language file
             if zht_file is None:
-                print(f"Nenhum XML 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
+                print(f"Nenhum SRT 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
                 zht_out = create_zht_secs_from_source(other_out, other_lang)
                 print(f"Arquivo gerado (zht_secs): {zht_out}")
             else:
-                zht_out = determine_output_path_secs(zht_file)
-                process_file(zht_file, zht_out)
+                zht_out = determine_srt_xml_output_path(zht_file)
+                process_srt_file(zht_file, zht_out)
                 merge_same_begin_in_file(zht_out)
-                print(f"Arquivo convertido: {zht_out}")
+                print(f"Arquivo SRT zht convertido para XML: {zht_out}")
 
             base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds)
             print(f"Arquivo base gerado: {base_txt}")

@@ -5,7 +5,7 @@ Subtitle Printer - Adiciona legendas chinesas e traduções às imagens
 Usage: python3 subtitle_printer.py <directory_name>
 Example: python3 subtitle_printer.py chaves001
 
-O script lê as imagens em assets/<directory_name> e o arquivo *_base.txt correspondente.
+O script lê as imagens em assets/<directory_name>/screenshots/ e o arquivo *_base.txt correspondente.
 Para cada imagem, verifica se o nome da imagem (em segundos) corresponde ao timestamp
 no arquivo base.txt. Se corresponder:
 1. Redimensiona a imagem para resolução R36S (640x480) mantendo aspect ratio
@@ -77,6 +77,10 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]
     """
     Parse the base.txt file and return a mapping of seconds -> (chinese subtitle, translations, translations_json, portuguese).
     
+    Supports both old format (5 columns) and new format (6 columns):
+    - Old: index, begin_time, chinese_text, translations, portuguese
+    - New: index, begin_time, end_time, chinese_text, translations, portuguese
+    
     Returns:
         Dict mapping second (as int) to tuple of (chinese_text, translations_text, translations_json, portuguese_text)
     """
@@ -94,7 +98,10 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]
                 if len(parts) < 4:
                     continue
                 
-                # Extract timestamp (second column)
+                # Detect format based on number of columns
+                is_new_format = len(parts) >= 6
+                
+                # Extract timestamp (second column - begin time)
                 timestamp_str = parts[1].strip()
                 
                 # Extract seconds from timestamp (e.g., "186.645s" -> 186.645)
@@ -105,15 +112,23 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]
                 seconds_float = float(match.group(1))
                 seconds_int = int(round(seconds_float))
                 
-                # Extract Chinese subtitle (third column)
-                chinese_text = parts[2].strip()
+                # Extract Chinese subtitle - column position depends on format
+                if is_new_format:
+                    # New format: index, begin, end, chinese, translations, portuguese
+                    chinese_text = parts[3].strip()
+                    translations_text = parts[4].strip()
+                    portuguese_text = parts[5].strip() if len(parts) >= 6 else ""
+                else:
+                    # Old format: index, begin, chinese, translations, portuguese
+                    chinese_text = parts[2].strip()
+                    translations_text = parts[3].strip()
+                    portuguese_text = parts[4].strip() if len(parts) >= 5 else ""
                 
                 # Remove parentheses if present
                 chinese_text = re.sub(r'^（(.*)）$', r'\1', chinese_text)
                 
-                # Extract translations (fourth column)
-                translations_text = parts[3].strip()
-                translations_json = translations_text  # Keep original JSON string
+                # Keep original JSON string for translations
+                translations_json = translations_text
                 
                 # Parse translations list if it exists
                 if translations_text and translations_text != 'N/A':
@@ -133,12 +148,9 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]
                     formatted_translations = ""
                     translations_json = ""
                 
-                # Extract Portuguese translation (fifth column)
-                portuguese_text = ""
-                if len(parts) >= 5:
-                    portuguese_text = parts[4].strip()
-                    if portuguese_text == 'N/A':
-                        portuguese_text = ""
+                # Clean Portuguese text
+                if portuguese_text == 'N/A':
+                    portuguese_text = ""
                 
                 if chinese_text and chinese_text != 'N/A':
                     subtitles[seconds_int] = (chinese_text, formatted_translations, translations_json, portuguese_text)
@@ -1281,11 +1293,13 @@ def find_directories_to_process(assets_dir: Path) -> list[str]:
             # Check if corresponding _sub directory exists
             sub_dir = assets_dir / f"{item.name}_sub"
             if not sub_dir.exists():
-                # Also check if it has PNG files or base.txt file
-                has_pngs = bool(list(item.glob("*.png")))
+                # Check if it has screenshots subfolder with PNG files or base.txt file
+                screenshots_dir = item / "screenshots"
+                has_screenshots = screenshots_dir.exists() and screenshots_dir.is_dir()
+                has_pngs_in_screenshots = has_screenshots and bool(list(screenshots_dir.glob("*.png")))
                 has_base_txt = bool(list(item.glob("*_base.txt")))
                 
-                if has_pngs or has_base_txt:
+                if has_pngs_in_screenshots or has_base_txt:
                     dirs_to_process.append(item.name)
     
     return sorted(dirs_to_process)
@@ -1304,31 +1318,36 @@ def process_single_directory(directory_name: str, assets_dir: Path, dry_run: boo
         Tuple of (processed, skipped, errors)
     """
     source_dir = assets_dir / directory_name
+    screenshots_dir = source_dir / "screenshots"  # Look for screenshots subfolder
     dest_dir = assets_dir / f"{directory_name}_sub"
     
     if not source_dir.exists() or not source_dir.is_dir():
         print(f"⚠️  Ignorando {directory_name}: não é um diretório válido")
         return 0, 0, 1
     
+    if not screenshots_dir.exists() or not screenshots_dir.is_dir():
+        print(f"⚠️  Ignorando {directory_name}: pasta 'screenshots' não encontrada")
+        return 0, 0, 1
+    
     print(f"\n🎬 Processando: {directory_name}")
-    print(f"📁 Origem: {source_dir}")
+    print(f"📁 Origem (screenshots): {screenshots_dir}")
     print(f"📁 Destino: {dest_dir}")
     print("-" * 60)
     
     # Copy images to destination directory
     if not dry_run:
-        print(f"📋 Copiando imagens PNG de {source_dir.name} para {dest_dir.name}...")
-        copied_count = copy_images_to_destination(source_dir, dest_dir)
+        print(f"📋 Copiando imagens PNG de {screenshots_dir.name} para {dest_dir.name}...")
+        copied_count = copy_images_to_destination(screenshots_dir, dest_dir)
         print(f"✅ {copied_count} imagens copiadas")
     else:
-        print(f"📋 [DRY RUN] Simulando cópia de imagens de {source_dir.name} para {dest_dir.name}")
-        png_files = list(source_dir.glob("*.png"))
+        print(f"📋 [DRY RUN] Simulando cópia de imagens de {screenshots_dir.name} para {dest_dir.name}")
+        png_files = list(screenshots_dir.glob("*.png"))
         print(f"✅ [DRY RUN] {len(png_files)} imagens seriam copiadas")
     
     # Process directory (work on destination, but read base.txt from source)
     if dry_run:
-        # For dry run, simulate processing with source directory since dest might not exist yet
-        processed, skipped, errors = process_directory(source_dir, dry_run, source_directory=source_dir)
+        # For dry run, simulate processing with screenshots directory since dest might not exist yet
+        processed, skipped, errors = process_directory(screenshots_dir, dry_run, source_directory=source_dir)
     else:
         # For real processing, work on destination directory
         processed, skipped, errors = process_directory(dest_dir, dry_run, source_directory=source_dir)
@@ -1350,8 +1369,8 @@ Exemplos:
 Funcionamento:
   1. Se nenhum diretório for especificado, processa todas as pastas em assets/ que não tenham _sub
   2. Cria pasta destino com sufixo "_sub" (ex: test -> test_sub)
-  3. Copia apenas imagens PNG da pasta origem para a pasta destino
-  4. Busca o arquivo *_base.txt na pasta origem
+  3. Copia apenas imagens PNG da subpasta "screenshots" para a pasta destino
+  4. Busca o arquivo *_base.txt na pasta origem (não na subpasta screenshots)
   5. Processa as imagens na pasta destino:
      - Redimensiona para R36S (640x480) mantendo aspect ratio
      - Adiciona legendas nas versões A, Ba/Bb/Bc, C
