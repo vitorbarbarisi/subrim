@@ -11,7 +11,7 @@ no arquivo base.txt. Se corresponder:
 1. Redimensiona a imagem para resolução R36S (640x480) mantendo aspect ratio
 2. Cria três versões com legendas:
 
-- Versão A (sufixo 'a'): Legenda chinesa na parte inferior
+- Versão A (sufixo 'a'): Legenda chinesa com pinyin acima e traduções em português abaixo de cada palavra
 - Versão B (sufixo 'b'): Versão A + traduções detalhadas na parte superior
 - Versão C (sufixo 'c'): Legenda chinesa + tradução portuguesa acima
 
@@ -70,6 +70,54 @@ def parse_individual_translations(translation_list_str: str) -> list[tuple[str, 
         
     except Exception as e:
         print(f"Erro ao fazer parsing da lista de traduções: {e}")
+        return []
+
+
+def parse_pinyin_translations(translation_list_str: str) -> list[tuple[str, str, str]]:
+    """
+    Parse the translation list string to extract Chinese characters, pinyin, and Portuguese translations.
+    
+    Args:
+        translation_list_str: String like '["三 (sān): três", "號 (hào): número", "碼頭 (mǎ tóu): cais"]'
+        
+    Returns:
+        List of tuples (chinese_chars, pinyin, portuguese_translation)
+        Example: [("三", "sān", "três"), ("號", "hào", "número"), ("碼頭", "mǎ tóu", "cais")]
+    """
+    try:
+        # Clean and parse the list
+        translation_list_str = translation_list_str.strip()
+        if not translation_list_str.startswith('[') or not translation_list_str.endswith(']'):
+            return []
+        
+        # Remove brackets and split by quotes
+        content = translation_list_str[1:-1]  # Remove [ and ]
+        
+        # Split by ", " but keep the quotes
+        import re
+        items = re.findall(r'"([^"]*)"', content)
+        
+        result = []
+        for item in items:
+            # Parse format: "三 (sān): três"
+            # Extract Chinese characters, pinyin, and Portuguese translation
+            match = re.match(r'^([^\s\(]+)\s*\(([^)]+)\)\s*:\s*(.+)$', item)
+            if match:
+                chinese_chars = match.group(1).strip()
+                pinyin = match.group(2).strip()
+                portuguese = match.group(3).strip()
+                result.append((chinese_chars, pinyin, portuguese))
+            else:
+                # Fallback: try to extract just Chinese chars if format doesn't match
+                chinese_match = re.match(r'^([^\s\(]+)', item)
+                if chinese_match:
+                    chinese_chars = chinese_match.group(1)
+                    result.append((chinese_chars, "", ""))  # Empty pinyin/portuguese
+        
+        return result
+        
+    except Exception as e:
+        print(f"Erro ao fazer parsing da lista de traduções com pinyin: {e}")
         return []
 
 
@@ -982,6 +1030,161 @@ def _draw_line_with_highlight(draw, line: str, start_x: int, start_y: int, font,
         current_x += char_width
 
 
+def add_pinyin_subtitle_to_image(image_path: Path, chinese_text: str, translations_json: str, output_path: Path = None) -> bool:
+    """
+    Add Chinese subtitle with pinyin above and Portuguese translations below each word.
+    
+    Args:
+        image_path: Path to the original image
+        chinese_text: Chinese subtitle text
+        translations_json: JSON string with word translations containing pinyin
+        output_path: Output path (if None, overwrites original)
+    
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        with Image.open(image_path) as img:
+            # Convert to RGB if necessary
+            if img.mode != 'RGB':
+                img = img.convert('RGB')
+            
+            # Resize image to R36S compatible resolution (640x480)
+            new_img = resize_image_for_r36s(img)
+            width, height = new_img.size
+            
+            # Draw subtitle
+            draw = ImageDraw.Draw(new_img)
+            
+            # Parse translations to get pinyin and Portuguese
+            word_data = parse_pinyin_translations(translations_json) if translations_json else []
+            
+            # Get font paths
+            chinese_font_path = get_chinese_font_path()
+            portuguese_font_path = get_portuguese_font_path()
+            
+            # Font sizes
+            chinese_font_size = 32
+            pinyin_font_size = 20
+            portuguese_font_size = 16
+            
+            # Load fonts
+            chinese_font = None
+            pinyin_font = None
+            portuguese_font = None
+            
+            try:
+                if chinese_font_path:
+                    chinese_font = ImageFont.truetype(str(chinese_font_path), chinese_font_size)
+                else:
+                    chinese_font = ImageFont.load_default()
+                    
+                if chinese_font_path:  # Use same font for pinyin
+                    pinyin_font = ImageFont.truetype(str(chinese_font_path), pinyin_font_size)
+                else:
+                    pinyin_font = ImageFont.load_default()
+                    
+                if portuguese_font_path:
+                    portuguese_font = ImageFont.truetype(str(portuguese_font_path), portuguese_font_size)
+                else:
+                    portuguese_font = ImageFont.load_default()
+            except:
+                chinese_font = ImageFont.load_default()
+                pinyin_font = ImageFont.load_default()
+                portuguese_font = ImageFont.load_default()
+            
+            # Calculate total width needed for all characters
+            total_width = 0
+            char_widths = []
+            
+            # Build display text by matching Chinese characters with translations
+            chinese_chars = list(chinese_text.replace(' ', '').replace('　', ''))  # Remove spaces
+            display_items = []
+            
+            for char in chinese_chars:
+                # Find matching translation data - prioritize exact matches, then partial matches
+                pinyin = ""
+                portuguese = ""
+                
+                # First try exact match
+                for chinese_word, word_pinyin, word_portuguese in word_data:
+                    if char == chinese_word:
+                        pinyin = word_pinyin
+                        portuguese = word_portuguese
+                        break
+                
+                # If no exact match, try partial match
+                if not pinyin:
+                    for chinese_word, word_pinyin, word_portuguese in word_data:
+                        if char in chinese_word:
+                            pinyin = word_pinyin
+                            portuguese = word_portuguese
+                            break
+                
+                display_items.append((char, pinyin, portuguese))
+                
+                # Calculate width needed for this character (max of chinese, pinyin, portuguese)
+                char_width = draw.textbbox((0, 0), char, font=chinese_font)[2]
+                pinyin_width = draw.textbbox((0, 0), pinyin, font=pinyin_font)[2] if pinyin else 0
+                portuguese_width = draw.textbbox((0, 0), portuguese, font=portuguese_font)[2] if portuguese else 0
+                
+                max_width = max(char_width, pinyin_width, portuguese_width) + 5  # 5px spacing
+                char_widths.append(max_width)
+                total_width += max_width
+            
+            # Calculate starting position (center horizontally)
+            start_x = (width - total_width) // 2
+            
+            # Calculate vertical positions
+            margin_from_bottom = 60
+            chinese_y = height - margin_from_bottom
+            pinyin_y = chinese_y - 35  # 35px above Chinese
+            portuguese_y = chinese_y + 25  # 25px below Chinese
+            
+            # Draw each character with its pinyin and translation
+            current_x = start_x
+            
+            for i, (char, pinyin, portuguese) in enumerate(display_items):
+                char_max_width = char_widths[i]
+                
+                # Calculate center position for this character block
+                char_width = draw.textbbox((0, 0), char, font=chinese_font)[2]
+                char_x = current_x + (char_max_width - char_width) // 2
+                
+                # Draw Chinese character (white)
+                draw.text((char_x, chinese_y), char, fill=(255, 255, 255), font=chinese_font)
+                
+                # Draw pinyin above (light blue)
+                if pinyin:
+                    pinyin_width = draw.textbbox((0, 0), pinyin, font=pinyin_font)[2]
+                    pinyin_x = current_x + (char_max_width - pinyin_width) // 2
+                    draw.text((pinyin_x, pinyin_y), pinyin, fill=(173, 216, 230), font=pinyin_font)
+                
+                # Draw Portuguese below (yellow)
+                if portuguese:
+                    portuguese_width = draw.textbbox((0, 0), portuguese, font=portuguese_font)[2]
+                    portuguese_x = current_x + (char_max_width - portuguese_width) // 2
+                    draw.text((portuguese_x, portuguese_y), portuguese, fill=(255, 255, 0), font=portuguese_font)
+                
+                current_x += char_max_width
+            
+            # Save the result
+            if output_path:
+                save_path = output_path
+            else:
+                # Add "a" suffix to the filename (e.g., 5.png -> 5a.png)
+                stem = image_path.stem  # filename without extension
+                suffix = image_path.suffix  # file extension
+                save_path = image_path.parent / f"{stem}a{suffix}"
+            
+            new_img.save(save_path, "PNG")
+            return True
+            
+    except Exception as e:
+        print(f"Erro ao processar {image_path}: {e}")
+        return False
+
+
 def add_subtitle_to_image(image_path: Path, subtitle_text: str, output_path: Path = None) -> bool:
     """
     Add Chinese subtitle to the bottom of the image.
@@ -1205,8 +1408,8 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                 print("   [DRY RUN]")
                 processed_count += 1
             else:
-                # Create version A (Chinese subtitle at bottom)
-                success_a = add_subtitle_to_image(png_file, chinese_text)
+                # Create version A (Chinese subtitle with pinyin above and Portuguese below)
+                success_a = add_pinyin_subtitle_to_image(png_file, chinese_text, translations_json)
                 
                 # Create version C (Chinese + Portuguese above it)
                 success_c = add_subtitle_with_portuguese(png_file, chinese_text, portuguese_text)
@@ -1418,7 +1621,7 @@ Saída:
     print(f"🎬 Subtitle Printer - Legendas Chinesas + Traduções")
     print(f"🔍 Modo: {'DRY RUN (simulação)' if args.dry_run else 'PROCESSAMENTO REAL'}")
     print(f"📋 Saída:")
-    print(f"    A: Legenda chinesa (base)")
+    print(f"    A: Legenda chinesa com pinyin acima e português abaixo de cada palavra")
     print(f"    B: Ba/Bb/Bc... (destaque individual + tradução)")
     print(f"    C: Legenda chinesa + tradução PT (acima)")
     print("=" * 60)
