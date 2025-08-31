@@ -8,14 +8,10 @@ Example: python3 subtitle_printer.py chaves001
 O script lê as imagens em assets/<directory_name>/screenshots/ e o arquivo *_base.txt correspondente.
 Para cada imagem, verifica se o nome da imagem (em segundos) corresponde ao timestamp
 no arquivo base.txt. Se corresponder:
-1. Redimensiona a imagem para resolução R36S (640x480) mantendo aspect ratio
-2. Cria três versões com legendas:
+1. Aplica legendas diretamente na imagem original (modo all-in-one):
 
-- Versão A (sufixo 'a'): Legenda chinesa com pinyin acima e traduções em português abaixo de cada palavra
-- Versão B (sufixo 'b'): Versão A + traduções detalhadas na parte superior
-- Versão C (sufixo 'c'): Legenda chinesa + tradução portuguesa acima
-
-O arquivo original é removido após criar as versões A, B e C.
+- Legenda chinesa com pinyin acima e traduções em português abaixo de cada palavra
+- A imagem original é modificada diretamente (não são criadas versões separadas)
 """
 
 import sys
@@ -31,46 +27,6 @@ except ImportError:
     print("Erro: PIL (Pillow) não encontrado. Instale com: pip install Pillow")
     sys.exit(1)
 
-
-def parse_individual_translations(translation_list_str: str) -> list[tuple[str, str]]:
-    """
-    Parse the translation list string to extract individual word translations.
-    
-    Args:
-        translation_list_str: String like '["三 (sān): três", "號 (hào): número", "碼頭 (mǎ tóu): cais"]'
-        
-    Returns:
-        List of tuples (chinese_chars, full_translation)
-        Example: [("三", "三 (sān): três"), ("號", "號 (hào): número"), ("碼頭", "碼頭 (mǎ tóu): cais")]
-    """
-    try:
-        # Clean and parse the list
-        translation_list_str = translation_list_str.strip()
-        if not translation_list_str.startswith('[') or not translation_list_str.endswith(']'):
-            return []
-        
-        # Remove brackets and split by quotes
-        content = translation_list_str[1:-1]  # Remove [ and ]
-        
-        # Split by ", " but keep the quotes
-        import re
-        items = re.findall(r'"([^"]*)"', content)
-        
-        result = []
-        for item in items:
-            # Extract Chinese characters before the first space or parenthesis
-            # Format: "三 (sān): três" -> chinese_chars = "三"
-            match = re.match(r'^([^\s\(]+)', item)
-            if match:
-                chinese_chars = match.group(1)
-                full_translation = item
-                result.append((chinese_chars, full_translation))
-        
-        return result
-        
-    except Exception as e:
-        print(f"Erro ao fazer parsing da lista de traduções: {e}")
-        return []
 
 
 def parse_pinyin_translations(translation_list_str: str) -> list[tuple[str, str, str]]:
@@ -129,6 +85,8 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]
     - Old: index, begin_time, chinese_text, translations, portuguese
     - New: index, begin_time, end_time, chinese_text, translations, portuguese
     
+    For new format, creates entries for ALL seconds within the begin-end interval.
+    
     Returns:
         Dict mapping second (as int) to tuple of (chinese_text, translations_text, translations_json, portuguese_text)
     """
@@ -149,16 +107,25 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]
                 # Detect format based on number of columns
                 is_new_format = len(parts) >= 6
                 
-                # Extract timestamp (second column - begin time)
-                timestamp_str = parts[1].strip()
+                # Extract begin timestamp (second column)
+                begin_timestamp_str = parts[1].strip()
                 
-                # Extract seconds from timestamp (e.g., "186.645s" -> 186.645)
-                match = re.match(r'([\d.]+)s?', timestamp_str)
-                if not match:
+                # Extract seconds from begin timestamp (e.g., "186.645s" -> 186.645)
+                begin_match = re.match(r'([\d.]+)s?', begin_timestamp_str)
+                if not begin_match:
                     continue
                 
-                seconds_float = float(match.group(1))
-                seconds_int = int(round(seconds_float))
+                begin_seconds_float = float(begin_match.group(1))
+                begin_seconds_int = int(round(begin_seconds_float))
+                
+                # Extract end timestamp if available (third column in new format)
+                end_seconds_int = begin_seconds_int  # Default to same as begin
+                if is_new_format:
+                    end_timestamp_str = parts[2].strip()
+                    end_match = re.match(r'([\d.]+)s?', end_timestamp_str)
+                    if end_match:
+                        end_seconds_float = float(end_match.group(1))
+                        end_seconds_int = int(round(end_seconds_float))
                 
                 # Extract Chinese subtitle - column position depends on format
                 if is_new_format:
@@ -201,7 +168,9 @@ def parse_base_file(base_file_path: Path) -> Dict[int, Tuple[str, str, str, str]
                     portuguese_text = ""
                 
                 if chinese_text and chinese_text != 'N/A':
-                    subtitles[seconds_int] = (chinese_text, formatted_translations, translations_json, portuguese_text)
+                    # Create entries for all seconds in the interval [begin_seconds_int, end_seconds_int]
+                    for second in range(begin_seconds_int, end_seconds_int + 1):
+                        subtitles[second] = (chinese_text, formatted_translations, translations_json, portuguese_text)
                     
     except Exception as e:
         print(f"Erro ao ler arquivo base {base_file_path}: {e}")
@@ -266,35 +235,7 @@ def get_font_path() -> Optional[Path]:
     return get_chinese_font_path()
 
 
-def resize_image_only(image_path: Path, output_path: Path = None) -> bool:
-    """
-    Resize image to R36S compatible resolution (640x480) without adding subtitles.
-    
-    Args:
-        image_path: Path to the original image
-        output_path: Output path (if None, overwrites original)
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        with Image.open(image_path) as img:
-            # Convert to RGB if necessary
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # Resize image to R36S compatible resolution (640x480)
-            resized_img = resize_image_for_r36s(img)
-            
-            # Save the resized image
-            save_path = output_path if output_path else image_path
-            resized_img.save(save_path, "PNG")
-            
-            return True
-            
-    except Exception as e:
-        print(f"Erro ao redimensionar {image_path}: {e}")
-        return False
+# resize_image_only function removed - no longer needed without R36S resizing
 
 
 def break_text_for_subtitle(text: str, font, max_width: int, draw, is_chinese: bool = True) -> list[str]:
@@ -452,50 +393,7 @@ def break_chinese_text_for_subtitle(text: str, font, max_width: int, draw) -> li
     return break_text_for_subtitle(text, font, max_width, draw, is_chinese=True)
 
 
-def resize_image_for_r36s(img: Image.Image) -> Image.Image:
-    """
-    Resize image to R36S compatible resolution (640x480) while maintaining aspect ratio.
-    Uses letterboxing (black bars) when needed to preserve original proportions.
-    
-    Args:
-        img: PIL Image object
-        
-    Returns:
-        Resized PIL Image object (always 640x480)
-    """
-    # R36S target resolution
-    target_width = 640
-    target_height = 480
-    
-    # Get original dimensions
-    original_width, original_height = img.size
-    
-    # Calculate aspect ratios
-    original_aspect = original_width / original_height
-    target_aspect = target_width / target_height
-    
-    # Calculate new dimensions to fit within target while maintaining aspect ratio
-    if original_aspect > target_aspect:
-        # Image is wider - fit to width, add horizontal letterboxing
-        new_width = target_width
-        new_height = int(target_width / original_aspect)
-    else:
-        # Image is taller - fit to height, add vertical letterboxing
-        new_height = target_height
-        new_width = int(target_height * original_aspect)
-    
-    # Resize the image with high quality
-    resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-    
-    # Create final image with black letterboxing
-    final_img = Image.new('RGB', (target_width, target_height), (0, 0, 0))
-    
-    # Center the resized image
-    paste_x = (target_width - new_width) // 2
-    paste_y = (target_height - new_height) // 2
-    final_img.paste(resized_img, (paste_x, paste_y))
-    
-    return final_img
+# resize_image_for_r36s function removed - no longer needed without R36S resizing
 
 
 def copy_images_to_destination(source_dir: Path, dest_dir: Path) -> int:
@@ -545,8 +443,8 @@ def add_top_translations(image_path: Path, translations_text: str, output_path: 
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Resize image to R36S compatible resolution (640x480)
-            new_img = resize_image_for_r36s(img)
+            # Use original image dimensions (no R36S resizing)
+            new_img = img.copy()
             width, height = new_img.size
             
             # Draw translations
@@ -673,8 +571,8 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Resize image to R36S compatible resolution (640x480)
-            new_img = resize_image_for_r36s(img)
+            # Use original image dimensions (no R36S resizing)
+            new_img = img.copy()
             width, height = new_img.size
             
             # Draw subtitles
@@ -822,212 +720,101 @@ def add_subtitle_with_portuguese(image_path: Path, chinese_text: str, portuguese
         return False
 
 
-def add_highlighted_word_subtitle(image_path: Path, full_subtitle: str, highlight_chars: str, word_translation: str, output_path: Path = None) -> bool:
+
+
+def wrap_text_to_width(text, font, draw, max_width):
     """
-    Create an image with Chinese subtitle where specific characters are highlighted in blue/violet,
-    and the word translation is shown at the top.
+    Break text into lines that fit within the specified width.
     
     Args:
-        image_path: Path to the original image
-        full_subtitle: Full Chinese subtitle text
-        highlight_chars: Characters to highlight (e.g., "三", "碼頭")
-        word_translation: Translation to show at top (e.g., "三 (sān): três")
-        output_path: Output path (if None, overwrites original)
-    
+        text: Text to wrap
+        font: Font to use for measuring
+        draw: ImageDraw object for text measurement
+        max_width: Maximum width in pixels
+        
     Returns:
-        True if successful, False otherwise
+        List of text lines that fit within max_width
     """
-    try:
-        with Image.open(image_path) as img:
-            # Convert to RGB if necessary
-            if img.mode != 'RGB':
-                img = img.convert('RGB')
-            
-            # Resize image to R36S compatible resolution (640x480)
-            new_img = resize_image_for_r36s(img)
-            width, height = new_img.size
-            
-            # Draw elements
-            draw = ImageDraw.Draw(new_img)
-            
-            # Get Chinese font
-            chinese_font_path = get_chinese_font_path()
-            
-            # Calculate areas for both texts
-            margin_from_bottom = 50
-            available_width = width - 40  # 20px padding on each side
-            
-            # === BOTTOM SUBTITLE (Chinese with highlighted characters) ===
-            # Start with larger font size for Chinese subtitle
-            max_chinese_font_size = min(72, int(50 * 1.2))
-            chinese_font_size = max_chinese_font_size
-            chinese_font = None
-            chinese_text_lines = []
-            chinese_total_height = 0
-            
-            # Adjust Chinese font size
-            for attempt in range(10):
-                try:
-                    if chinese_font_path:
-                        chinese_font = ImageFont.truetype(str(chinese_font_path), chinese_font_size)
-                    else:
-                        chinese_font = ImageFont.load_default()
-                    
-                    # Break text into lines
-                    chinese_text_lines = break_text_for_subtitle(full_subtitle, chinese_font, available_width, draw, is_chinese=True)
-                    
-                    # Calculate total height needed
-                    line_height = draw.textbbox((0, 0), "測試", font=chinese_font)[3] - draw.textbbox((0, 0), "測試", font=chinese_font)[1]
-                    chinese_total_height = len(chinese_text_lines) * line_height + (len(chinese_text_lines) - 1) * 5
-                    
-                    # Check if fits (reserve space for top translation)
-                    if chinese_total_height <= 80:  # Max 80px for Chinese subtitle
-                        break
-                    
-                    chinese_font_size = int(chinese_font_size * 0.9)
-                    if chinese_font_size < 16:
-                        break
-                        
-                except:
-                    chinese_font = ImageFont.load_default()
-                    chinese_text_lines = [full_subtitle]
-                    chinese_total_height = draw.textbbox((0, 0), full_subtitle, font=chinese_font)[3] - draw.textbbox((0, 0), full_subtitle, font=chinese_font)[1]
-                    break
-            
-            # === TOP TRANSLATION ===
-            # Adjust font size for word translation at top
-            max_translation_font_size = min(48, int(height * 0.1))
-            translation_font_size = max_translation_font_size
-            translation_font = None
-            translation_text_lines = []
-            translation_total_height = 0
-            
-            # Try to get Unicode font for mixed content
-            unicode_font_path = None
-            unicode_fonts = [
-                Path("/Library/Fonts/Arial Unicode.ttf"),
-                Path("/System/Library/Fonts/PingFang.ttc"),
-                get_chinese_font_path()
-            ]
-            for font_candidate in unicode_fonts:
-                if font_candidate and font_candidate.exists():
-                    unicode_font_path = font_candidate
-                    break
-            
-            for attempt in range(10):
-                try:
-                    if unicode_font_path:
-                        translation_font = ImageFont.truetype(str(unicode_font_path), translation_font_size)
-                    else:
-                        translation_font = ImageFont.load_default()
-                    
-                    # Break translation text
-                    translation_text_lines = break_text_for_subtitle(word_translation, translation_font, available_width, draw, is_chinese=False)
-                    
-                    # Calculate total height
-                    line_height = draw.textbbox((0, 0), "Test", font=translation_font)[3] - draw.textbbox((0, 0), "Test", font=translation_font)[1]
-                    translation_total_height = len(translation_text_lines) * line_height + (len(translation_text_lines) - 1) * 5
-                    
-                    # Check if fits in top area
-                    if translation_total_height <= height * 0.2:  # Max 20% of height
-                        break
-                    
-                    translation_font_size = int(translation_font_size * 0.9)
-                    if translation_font_size < 12:
-                        break
-                        
-                except:
-                    translation_font = ImageFont.load_default()
-                    translation_text_lines = [word_translation]
-                    translation_total_height = draw.textbbox((0, 0), word_translation, font=translation_font)[3] - draw.textbbox((0, 0), word_translation, font=translation_font)[1]
-                    break
-            
-            # === DRAW TOP TRANSLATION ===
-            if translation_font and translation_text_lines:
-                # Add semi-transparent background for better readability
-                padding = 10
-                bg_height = translation_total_height + 2 * padding
-                bg_rect = [0, 0, width, bg_height]
-                
-                # Create overlay for background
-                overlay = Image.new('RGBA', new_img.size, (0, 0, 0, 0))
-                overlay_draw = ImageDraw.Draw(overlay)
-                overlay_draw.rectangle(bg_rect, fill=(0, 0, 0, 128))  # Semi-transparent black
-                new_img = Image.alpha_composite(new_img.convert('RGBA'), overlay).convert('RGB')
-                draw = ImageDraw.Draw(new_img)
-                
-                # Draw translation lines
-                line_height = draw.textbbox((0, 0), "Test", font=translation_font)[3] - draw.textbbox((0, 0), "Test", font=translation_font)[1]
-                start_y = padding
-                
-                for i, line in enumerate(translation_text_lines):
-                    line_bbox = draw.textbbox((0, 0), line, font=translation_font)
-                    line_width = line_bbox[2] - line_bbox[0]
-                    line_x = (width - line_width) // 2
-                    line_y = start_y + i * (line_height + 5)
-                    
-                    # Draw in blue-violet (same color as highlighted characters)
-                    draw.text((line_x, line_y), line, fill=(138, 43, 226), font=translation_font)
-            
-            # === DRAW CHINESE SUBTITLE WITH HIGHLIGHTED CHARACTERS ===
-            if chinese_text_lines and chinese_font:
-                # Calculate starting position for Chinese text
-                chinese_start_y = height - margin_from_bottom - chinese_total_height
-                line_height = draw.textbbox((0, 0), "測試", font=chinese_font)[3] - draw.textbbox((0, 0), "測試", font=chinese_font)[1]
-                
-                for i, line in enumerate(chinese_text_lines):
-                    # Calculate position for this line
-                    line_bbox = draw.textbbox((0, 0), line, font=chinese_font)
-                    line_width = line_bbox[2] - line_bbox[0]
-                    line_x = (width - line_width) // 2
-                    line_y = chinese_start_y + i * (line_height + 5)
-                    
-                    # Draw line with character highlighting
-                    _draw_line_with_highlight(draw, line, line_x, line_y, chinese_font, highlight_chars)
-            
-            # Save the result
-            if output_path:
-                save_path = output_path
-            else:
-                stem = image_path.stem
-                suffix = image_path.suffix
-                save_path = image_path.parent / f"{stem}ba{suffix}"
-            
-            new_img.save(save_path, "PNG")
-            return True
-            
-    except Exception as e:
-        print(f"Erro ao criar imagem com palavra destacada {image_path}: {e}")
-        return False
+    if not text:
+        return []
+    
+    words = text.split()
+    if not words:
+        return []
+    
+    lines = []
+    current_line = []
+    
+    for word in words:
+        # Test if adding this word would exceed max width
+        test_line = ' '.join(current_line + [word])
+        test_width = draw.textbbox((0, 0), test_line, font=font)[2]
+        
+        if test_width <= max_width or not current_line:
+            # Word fits or it's the first word in line
+            current_line.append(word)
+        else:
+            # Word doesn't fit, start new line
+            if current_line:
+                lines.append(' '.join(current_line))
+            current_line = [word]
+    
+    # Don't forget the last line
+    if current_line:
+        lines.append(' '.join(current_line))
+    
+    return lines
 
 
-def _draw_line_with_highlight(draw, line: str, start_x: int, start_y: int, font, highlight_chars: str):
+def draw_text_with_border(draw, x, y, text, font, fill_color, border_color=(0, 0, 0), border_width=2):
     """
-    Draw a line of text with specific characters highlighted in blue/violet.
+    Draw text with a black border for better visibility.
     
     Args:
         draw: ImageDraw object
-        line: Text line to draw
-        start_x: Starting X position
-        start_y: Y position
+        x, y: Position coordinates
+        text: Text to draw
         font: Font to use
-        highlight_chars: Characters to highlight
+        fill_color: Main text color
+        border_color: Border color (default black)
+        border_width: Width of border in pixels
     """
-    current_x = start_x
+    # Draw border by drawing text in multiple positions around the main position
+    for dx in range(-border_width, border_width + 1):
+        for dy in range(-border_width, border_width + 1):
+            if dx != 0 or dy != 0:  # Don't draw on the main position yet
+                draw.text((x + dx, y + dy), text, fill=border_color, font=font)
     
-    for char in line:
-        # Check if this character should be highlighted
-        if char in highlight_chars:
-            color = (138, 43, 226)  # Blue-violet color
-        else:
-            color = (255, 255, 255)  # White
+    # Draw main text on top
+    draw.text((x, y), text, fill=fill_color, font=font)
+
+
+def draw_multiline_text_with_border(draw, x, y, text_lines, font, fill_color, border_color=(0, 0, 0), border_width=2, line_spacing=2):
+    """
+    Draw multiple lines of text with borders, centered horizontally.
+    
+    Args:
+        draw: ImageDraw object
+        x, y: Starting position (top-left of text block)
+        text_lines: List of text lines to draw
+        font: Font to use
+        fill_color: Main text color
+        border_color: Border color (default black)
+        border_width: Width of border in pixels
+        line_spacing: Extra spacing between lines
+    """
+    if not text_lines:
+        return
+    
+    line_height = draw.textbbox((0, 0), "Test", font=font)[3] - draw.textbbox((0, 0), "Test", font=font)[1]
+    current_y = y
+    
+    for line in text_lines:
+        line_width = draw.textbbox((0, 0), line, font=font)[2]
+        line_x = x - line_width // 2  # Center the line horizontally
         
-        # Draw the character
-        draw.text((current_x, start_y), char, fill=color, font=font)
-        
-        # Move to next character position
-        char_width = draw.textbbox((0, 0), char, font=font)[2]
-        current_x += char_width
+        draw_text_with_border(draw, line_x, current_y, line, font, fill_color, border_color, border_width)
+        current_y += line_height + line_spacing
 
 
 def add_pinyin_subtitle_to_image(image_path: Path, chinese_text: str, translations_json: str, output_path: Path = None) -> bool:
@@ -1049,8 +836,8 @@ def add_pinyin_subtitle_to_image(image_path: Path, chinese_text: str, translatio
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Resize image to R36S compatible resolution (640x480)
-            new_img = resize_image_for_r36s(img)
+            # Use original image dimensions (no R36S resizing)
+            new_img = img.copy()
             width, height = new_img.size
             
             # Draw subtitle
@@ -1063,110 +850,233 @@ def add_pinyin_subtitle_to_image(image_path: Path, chinese_text: str, translatio
             chinese_font_path = get_chinese_font_path()
             portuguese_font_path = get_portuguese_font_path()
             
-            # Font sizes
-            chinese_font_size = 32
-            pinyin_font_size = 20
-            portuguese_font_size = 16
+            # Calculate available space for subtitles  
+            margin_from_bottom = 80
+            available_width = width - 40  # 20px padding on each side
+            available_height = margin_from_bottom
+            
+            # Start with reasonable font sizes and adjust if needed
+            max_chinese_font_size = min(56, int(width * 0.08))  # Increased from 48 and 0.06
+            max_pinyin_font_size = int(max_chinese_font_size * 0.7)
+            max_portuguese_font_size = int(max_chinese_font_size * 0.6)
+            
+            chinese_font_size = max_chinese_font_size
+            pinyin_font_size = max_pinyin_font_size
+            portuguese_font_size = max_portuguese_font_size
             
             # Load fonts
             chinese_font = None
-            pinyin_font = None
+            pinyin_font = None  
             portuguese_font = None
             
-            try:
-                if chinese_font_path:
-                    chinese_font = ImageFont.truetype(str(chinese_font_path), chinese_font_size)
-                else:
+            # Build display text by grouping characters into words
+            clean_text = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '')  # Remove spaces and punctuation
+            display_items = []
+            processed_chars = set()
+            
+            # First pass: identify complete words from translation data
+            text_position = 0
+            remaining_text = clean_text
+            
+            while remaining_text:
+                found_word = False
+                
+                # Try to find the longest matching word starting at current position
+                for chinese_word, word_pinyin, word_portuguese in sorted(word_data, key=lambda x: len(x[0]), reverse=True):
+                    if remaining_text.startswith(chinese_word):
+                        # Found a word match
+                        word_chars = list(chinese_word)
+                        display_items.append((word_chars, word_pinyin, word_portuguese))
+                        
+                        # Mark characters as processed
+                        for char in word_chars:
+                            processed_chars.add(text_position)
+                            text_position += 1
+                        
+                        remaining_text = remaining_text[len(chinese_word):]
+                        found_word = True
+                        break
+                
+                if not found_word:
+                    # No word match found, treat as single character
+                    char = remaining_text[0]
+                    display_items.append(([char], "", ""))  # Single character with no pinyin/portuguese
+                    text_position += 1
+                    remaining_text = remaining_text[1:]
+            
+            # Auto-adjust font sizes and create line breaks
+            final_lines = []
+            fonts_ready = False
+            
+            for attempt in range(10):  # Try different font sizes
+                try:
+                    # Load fonts with current sizes
+                    if chinese_font_path:
+                        chinese_font = ImageFont.truetype(str(chinese_font_path), chinese_font_size)
+                        pinyin_font = ImageFont.truetype(str(chinese_font_path), pinyin_font_size)
+                    else:
+                        chinese_font = ImageFont.load_default()
+                        pinyin_font = ImageFont.load_default()
+                        
+                    if portuguese_font_path:
+                        portuguese_font = ImageFont.truetype(str(portuguese_font_path), portuguese_font_size)
+                    else:
+                        portuguese_font = ImageFont.load_default()
+                    
+                    # Break text into lines that fit within available width
+                    lines = []
+                    current_line = []
+                    current_line_width = 0
+                    
+                    for item in display_items:
+                        word_chars, pinyin, portuguese = item
+                        
+                        # Calculate width needed for this word block
+                        word_text = ''.join(word_chars)  # Join characters to form word
+                        word_width = draw.textbbox((0, 0), word_text, font=chinese_font)[2]
+                        pinyin_width = draw.textbbox((0, 0), pinyin, font=pinyin_font)[2] if pinyin else 0
+                        portuguese_width = draw.textbbox((0, 0), portuguese, font=portuguese_font)[2] if portuguese else 0
+                        
+                        max_width = max(word_width, pinyin_width, portuguese_width) + 12  # 12px spacing between words
+                        
+                        # Check if adding this word would exceed line width
+                        if current_line_width + max_width > available_width and current_line:
+                            # Start new line
+                            lines.append(current_line)
+                            current_line = [item]
+                            current_line_width = max_width
+                        else:
+                            # Add to current line
+                            current_line.append(item)
+                            current_line_width += max_width
+                    
+                    # Don't forget the last line
+                    if current_line:
+                        lines.append(current_line)
+                    
+                    # Calculate total height needed - need to consider Portuguese multiline text
+                    # Estimate height more accurately by considering max Portuguese lines per word
+                    max_portuguese_lines = 1
+                    for line in lines:
+                        for word_chars, pinyin, portuguese in line:
+                            if portuguese:
+                                word_text = ''.join(word_chars)
+                                word_width = draw.textbbox((0, 0), word_text, font=chinese_font)[2]
+                                portuguese_lines = wrap_text_to_width(portuguese, portuguese_font, draw, word_width)
+                                max_portuguese_lines = max(max_portuguese_lines, len(portuguese_lines))
+                    
+                    # Calculate height: Chinese + Pinyin + (Portuguese lines * font size) + spacing
+                    portuguese_height = max_portuguese_lines * portuguese_font_size + (max_portuguese_lines - 1) * 2  # 2px line spacing
+                    single_line_height = chinese_font_size + pinyin_font_size + portuguese_height + 20
+                    total_height = len(lines) * single_line_height
+                    
+                    # Check if it fits within available height
+                    if total_height <= available_height or chinese_font_size <= 16:
+                        final_lines = lines
+                        fonts_ready = True
+                        break
+                    
+                    # Reduce font sizes
+                    chinese_font_size = int(chinese_font_size * 0.9)
+                    pinyin_font_size = int(pinyin_font_size * 0.9)
+                    portuguese_font_size = int(portuguese_font_size * 0.9)
+                        
+                except Exception as e:
+                    # Fallback to default fonts
                     chinese_font = ImageFont.load_default()
-                    
-                if chinese_font_path:  # Use same font for pinyin
-                    pinyin_font = ImageFont.truetype(str(chinese_font_path), pinyin_font_size)
-                else:
                     pinyin_font = ImageFont.load_default()
-                    
-                if portuguese_font_path:
-                    portuguese_font = ImageFont.truetype(str(portuguese_font_path), portuguese_font_size)
-                else:
                     portuguese_font = ImageFont.load_default()
-            except:
+                    
+                    # Simple single line fallback
+                    final_lines = [display_items]
+                    fonts_ready = True
+                    break
+            
+            if not fonts_ready:
+                # Final fallback
                 chinese_font = ImageFont.load_default()
                 pinyin_font = ImageFont.load_default()
                 portuguese_font = ImageFont.load_default()
+                final_lines = [display_items]
             
-            # Calculate total width needed for all characters
-            total_width = 0
-            char_widths = []
+            # Draw lines of text from bottom up
+            # Calculate dynamic line height based on actual Portuguese lines needed
+            max_portuguese_lines = 1
+            for line in final_lines:
+                for word_chars, pinyin, portuguese in line:
+                    if portuguese:
+                        word_text = ''.join(word_chars)
+                        word_width = draw.textbbox((0, 0), word_text, font=chinese_font)[2]
+                        portuguese_lines = wrap_text_to_width(portuguese, portuguese_font, draw, word_width)
+                        max_portuguese_lines = max(max_portuguese_lines, len(portuguese_lines))
             
-            # Build display text by matching Chinese characters with translations
-            chinese_chars = list(chinese_text.replace(' ', '').replace('　', ''))  # Remove spaces
-            display_items = []
+            portuguese_height = max_portuguese_lines * portuguese_font_size + (max_portuguese_lines - 1) * 2
+            line_height = chinese_font_size + pinyin_font_size + portuguese_height + 25  # Extra spacing for multiline
+            total_subtitle_height = len(final_lines) * line_height
             
-            for char in chinese_chars:
-                # Find matching translation data - prioritize exact matches, then partial matches
-                pinyin = ""
-                portuguese = ""
-                
-                # First try exact match
-                for chinese_word, word_pinyin, word_portuguese in word_data:
-                    if char == chinese_word:
-                        pinyin = word_pinyin
-                        portuguese = word_portuguese
-                        break
-                
-                # If no exact match, try partial match
-                if not pinyin:
-                    for chinese_word, word_pinyin, word_portuguese in word_data:
-                        if char in chinese_word:
-                            pinyin = word_pinyin
-                            portuguese = word_portuguese
-                            break
-                
-                display_items.append((char, pinyin, portuguese))
-                
-                # Calculate width needed for this character (max of chinese, pinyin, portuguese)
-                char_width = draw.textbbox((0, 0), char, font=chinese_font)[2]
-                pinyin_width = draw.textbbox((0, 0), pinyin, font=pinyin_font)[2] if pinyin else 0
-                portuguese_width = draw.textbbox((0, 0), portuguese, font=portuguese_font)[2] if portuguese else 0
-                
-                max_width = max(char_width, pinyin_width, portuguese_width) + 5  # 5px spacing
-                char_widths.append(max_width)
-                total_width += max_width
+            # Start from bottom and work up
+            base_y = height - margin_from_bottom
             
-            # Calculate starting position (center horizontally)
-            start_x = (width - total_width) // 2
+            # Light purple color for pinyin and Portuguese
+            light_purple_color = (147, 112, 219)  # Medium slate blue - lighter purple
             
-            # Calculate vertical positions
-            margin_from_bottom = 60
-            chinese_y = height - margin_from_bottom
-            pinyin_y = chinese_y - 35  # 35px above Chinese
-            portuguese_y = chinese_y + 25  # 25px below Chinese
-            
-            # Draw each character with its pinyin and translation
-            current_x = start_x
-            
-            for i, (char, pinyin, portuguese) in enumerate(display_items):
-                char_max_width = char_widths[i]
+            for line_idx, line in enumerate(reversed(final_lines)):  # Draw from bottom line up
+                line_y_offset = line_idx * line_height
                 
-                # Calculate center position for this character block
-                char_width = draw.textbbox((0, 0), char, font=chinese_font)[2]
-                char_x = current_x + (char_max_width - char_width) // 2
+                # Calculate total width of this line for centering
+                line_width = 0
+                char_widths = []
                 
-                # Draw Chinese character (white)
-                draw.text((char_x, chinese_y), char, fill=(255, 255, 255), font=chinese_font)
+                for word_chars, pinyin, portuguese in line:
+                    word_text = ''.join(word_chars)  # Join characters to form word
+                    word_width = draw.textbbox((0, 0), word_text, font=chinese_font)[2]
+                    pinyin_width = draw.textbbox((0, 0), pinyin, font=pinyin_font)[2] if pinyin else 0
+                    portuguese_width = draw.textbbox((0, 0), portuguese, font=portuguese_font)[2] if portuguese else 0
+                    
+                    max_width = max(word_width, pinyin_width, portuguese_width) + 12
+                    char_widths.append(max_width)
+                    line_width += max_width
                 
-                # Draw pinyin above (light blue)
-                if pinyin:
-                    pinyin_width = draw.textbbox((0, 0), pinyin, font=pinyin_font)[2]
-                    pinyin_x = current_x + (char_max_width - pinyin_width) // 2
-                    draw.text((pinyin_x, pinyin_y), pinyin, fill=(173, 216, 230), font=pinyin_font)
+                # Center the line horizontally
+                start_x = (width - line_width) // 2
+                current_x = start_x
                 
-                # Draw Portuguese below (yellow)
-                if portuguese:
-                    portuguese_width = draw.textbbox((0, 0), portuguese, font=portuguese_font)[2]
-                    portuguese_x = current_x + (char_max_width - portuguese_width) // 2
-                    draw.text((portuguese_x, portuguese_y), portuguese, fill=(255, 255, 0), font=portuguese_font)
+                # Calculate vertical positions for this line
+                chinese_y = base_y - line_y_offset
+                pinyin_y = chinese_y - pinyin_font_size - 8  # Above Chinese
+                portuguese_y = chinese_y + chinese_font_size + 8  # Below Chinese
                 
-                current_x += char_max_width
+                # Draw each word in the line
+                for i, (word_chars, pinyin, portuguese) in enumerate(line):
+                    word_max_width = char_widths[i]  # This is actually word width now
+                    
+                    # Calculate center position for this word block
+                    word_text = ''.join(word_chars)
+                    word_width = draw.textbbox((0, 0), word_text, font=chinese_font)[2]
+                    word_x = current_x + (word_max_width - word_width) // 2
+                    
+                    # Draw Chinese word (white) with black border
+                    draw_text_with_border(draw, word_x, chinese_y, word_text, chinese_font, (255, 255, 255))
+                    
+                    # Draw pinyin above (light purple) with black border - centered over the word
+                    if pinyin:
+                        pinyin_width = draw.textbbox((0, 0), pinyin, font=pinyin_font)[2]
+                        pinyin_x = current_x + (word_max_width - pinyin_width) // 2
+                        draw_text_with_border(draw, pinyin_x, pinyin_y, pinyin, pinyin_font, light_purple_color)
+                    
+                    # Draw Portuguese below (light purple) with black border - wrapped to fit word width
+                    if portuguese:
+                        # Use word width as the maximum width for Portuguese text
+                        word_width = draw.textbbox((0, 0), word_text, font=chinese_font)[2]
+                        portuguese_lines = wrap_text_to_width(portuguese, portuguese_font, draw, word_width)
+                        
+                        if portuguese_lines:
+                            # Calculate center position for the multiline text block
+                            portuguese_center_x = current_x + word_max_width // 2
+                            draw_multiline_text_with_border(draw, portuguese_center_x, portuguese_y, portuguese_lines, 
+                                                          portuguese_font, light_purple_color)
+                    
+                    current_x += word_max_width
             
             # Save the result
             if output_path:
@@ -1203,8 +1113,8 @@ def add_subtitle_to_image(image_path: Path, subtitle_text: str, output_path: Pat
             if img.mode != 'RGB':
                 img = img.convert('RGB')
             
-            # Resize image to R36S compatible resolution (640x480)
-            new_img = resize_image_for_r36s(img)
+            # Use original image dimensions (no R36S resizing)
+            new_img = img.copy()
             width, height = new_img.size
             
             # Draw subtitle
@@ -1388,19 +1298,8 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
         if image_index in subtitles:
             chinese_text, translations_text, translations_json, portuguese_text = subtitles[image_index]
             
-            # Generate output filenames with "a", "b", and "c" suffixes
-            output_a = f"{png_file.stem}a{png_file.suffix}"
-            output_b = f"{png_file.stem}b{png_file.suffix}"
-            output_c = f"{png_file.stem}c{png_file.suffix}"
-            
-            # Count individual translations for B versions  
-            individual_translations = parse_individual_translations(translations_json) if translations_json else []
-            b_versions_text = f"{len(individual_translations)}×B" if individual_translations else "B"
-            
-            print(f"📸 {png_file.name} -> {output_a} + {b_versions_text} + {output_c}")
+            print(f"📸 {png_file.name} -> legendado all-in-one")
             print(f"   中文: \"{chinese_text}\"")
-            if translations_text:
-                print(f"   翻译: {len(individual_translations)} palavras individuais")
             if portuguese_text:
                 print(f"   PT: \"{portuguese_text}\"")
             
@@ -1408,86 +1307,20 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                 print("   [DRY RUN]")
                 processed_count += 1
             else:
-                # Create version A (Chinese subtitle with pinyin above and Portuguese below)
-                success_a = add_pinyin_subtitle_to_image(png_file, chinese_text, translations_json)
-                
-                # Create version C (Chinese + Portuguese above it)
-                success_c = add_subtitle_with_portuguese(png_file, chinese_text, portuguese_text)
-                
-                if success_a and success_c:
-                    # Create multiple B versions (ba, bb, bc, etc.) for individual word translations  
-                    individual_translations = parse_individual_translations(translations_json) if translations_json else []
-                    success_b_versions = []
-                    
-                    # Get stem and suffix for building filenames
-                    stem = png_file.stem
-                    suffix = png_file.suffix
-                    
-                    if individual_translations:
-                        # Create one image for each word translation
-                        for idx, (chinese_chars, full_translation) in enumerate(individual_translations):
-                            # Generate suffix: ba, bb, bc, bd, etc.
-                            suffix_letter = chr(ord('a') + idx)  # a, b, c, d, ...
-                            output_b_variant = f"{stem}b{suffix_letter}{suffix}"
-                            b_variant_path = png_file.parent / output_b_variant
-                            
-                            # Create highlighted word image
-                            success_variant = add_highlighted_word_subtitle(
-                                png_file, 
-                                chinese_text, 
-                                chinese_chars, 
-                                full_translation, 
-                                b_variant_path
-                            )
-                            
-                            success_b_versions.append(success_variant)
-                            
-                            if success_variant:
-                                print(f"   ✅ Criada versão {output_b_variant} (destaque: {chinese_chars})")
-                            else:
-                                print(f"   ❌ Erro na versão {output_b_variant}")
-                    else:
-                        # No individual translations available
-                        print("   ⚠️  Nenhuma tradução individual disponível para versões B")
-                        success_b_versions = [True]  # Consider it successful to proceed
-                    
-                    # Check if all B versions were created successfully
-                    all_b_success = all(success_b_versions) if success_b_versions else True
-                    
-                    if all_b_success:
-                        # Remove original file after all versions are created successfully
-                        try:
-                            import os
-                            os.unlink(png_file)
-                            b_count = len(success_b_versions) if individual_translations else 0
-                            print(f"   ✅ Versões A, {b_count}×B e C criadas (original removido)")
-                            processed_count += 1
-                        except OSError as e:
-                            print(f"   ⚠️  Versões criadas, mas erro ao remover original: {e}")
-                            processed_count += 1
-                    else:
-                        print("   ❌ Erro em uma ou mais versões B")
-                        error_count += 1
-                else:
-                    print("   ❌ Erro nas versões A ou C")
-                    error_count += 1
-        else:
-            # No subtitle for this image, but still resize it for R36S compatibility
-            print(f"🖼️  {png_file.name} -> redimensionamento R36S (sem legenda)")
-            
-            if dry_run:
-                print("   [DRY RUN] Redimensionamento apenas")
-                processed_count += 1
-            else:
-                # Just resize the image to R36S resolution
-                success = resize_image_only(png_file)
+                # Apply subtitle directly to original image (all-in-one mode)
+                # Use pinyin version as it's the most complete
+                success = add_pinyin_subtitle_to_image(png_file, chinese_text, translations_json, output_path=png_file)
                 
                 if success:
-                    print("   ✅ Redimensionada para R36S (640x480)")
-                    processed_count += 1
+                    print(f"   ✅ Legenda aplicada diretamente na imagem original")
+                            processed_count += 1
+                    else:
+                    print("   ❌ Erro ao aplicar legenda")
+                        error_count += 1
                 else:
-                    print("   ❌ Erro no redimensionamento")
-                    error_count += 1
+            # No subtitle for this image - skip processing
+            print(f"⏭️  {png_file.name} -> sem legenda (ignorado)")
+            skipped_count += 1
     
     return processed_count, skipped_count, error_count
 
@@ -1591,12 +1424,11 @@ Funcionamento:
   3. Copia apenas imagens PNG da subpasta "screenshots" para a pasta destino
   4. Busca o arquivo *_base.txt na pasta origem (não na subpasta screenshots)
   5. Processa as imagens na pasta destino:
-     - Redimensiona para R36S (640x480) mantendo aspect ratio
-     - Adiciona legendas nas versões A, Ba/Bb/Bc, C
+     - Aplica legendas diretamente na imagem original (all-in-one)
 
 Saída:
-  Para 5.png -> 5a.png (中文) + 5ba.png/5bb.png/5bc.png (destaque individual) + 5c.png (中文 + PT)
-  Original 5.png é removido após processamento (na pasta destino)
+  Para 5.png -> 5.png (modificada com legendas all-in-one)
+  Original é mantido mas com legendas aplicadas diretamente
         """
     )
     
@@ -1618,12 +1450,11 @@ Saída:
         print(f"Erro: Diretório assets {assets_dir} não encontrado.")
         return 1
     
-    print(f"🎬 Subtitle Printer - Legendas Chinesas + Traduções")
+    print(f"🎬 Subtitle Printer ALL-IN-ONE - Legendas Diretamente nas Imagens")
     print(f"🔍 Modo: {'DRY RUN (simulação)' if args.dry_run else 'PROCESSAMENTO REAL'}")
-    print(f"📋 Saída:")
-    print(f"    A: Legenda chinesa com pinyin acima e português abaixo de cada palavra")
-    print(f"    B: Ba/Bb/Bc... (destaque individual + tradução)")
-    print(f"    C: Legenda chinesa + tradução PT (acima)")
+    print(f"📋 Processamento:")
+    print(f"    🎯 Aplica legendas diretamente na imagem original (all-in-one)")
+    print(f"    📝 Pinyin acima + chinês + português abaixo de cada palavra")
     print("=" * 60)
     
     # Determine directories to process
@@ -1662,13 +1493,12 @@ Saída:
     print(f"📂 Diretórios processados: {len(directories_to_process)}")
     print(f"📊 Total de imagens: {total_files}")
     print(f"✅ Processadas: {total_processed}")
-    print(f"   ├── Com legendas (A+B+C): legendas aplicadas + R36S")
-    print(f"   └── Sem legendas: apenas redimensionamento R36S")
+    print(f"   └── Com legendas: aplicadas diretamente na imagem original")
     print(f"⏭️  Ignoradas (nomes inválidos): {total_skipped}")
     print(f"❌ Erros: {total_errors}")
     
     if args.dry_run and total_processed > 0:
-        print(f"\n💡 Execute novamente sem --dry-run para criar as versões A, B e C")
+        print(f"\n💡 Execute novamente sem --dry-run para aplicar as legendas")
     
     return 0 if total_errors == 0 else 1
 
