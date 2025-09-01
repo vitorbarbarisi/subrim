@@ -331,8 +331,26 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
     
     # Format for filter complex script file
     if filter_parts:
-        # Start with input and chain all filters, ending with output label
-        return f"[0:v]{','.join(filter_parts)}[v]"
+        # Use pipeline approach for better reliability with many filters
+        if len(filter_parts) == 1:
+            # Single filter case
+            return f"[0:v]{filter_parts[0]}[v]"
+        else:
+            # Multiple filters - chain them sequentially
+            result_parts = []
+            current_input = "[0:v]"
+            
+            for i, filter_part in enumerate(filter_parts):
+                if i == len(filter_parts) - 1:
+                    # Last filter outputs to [v]
+                    result_parts.append(f"{current_input}{filter_part}[v]")
+                else:
+                    # Intermediate filter
+                    temp_label = f"[tmp{i}]"
+                    result_parts.append(f"{current_input}{filter_part}{temp_label}")
+                    current_input = temp_label
+            
+            return "; ".join(result_parts)
     else:
         return "[0:v]copy[v]"  # No filters, just copy video
 
@@ -573,7 +591,7 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         print(f"📊 Total de legendas: {len(subtitles)}")
         
         # Split subtitles into batches of manageable size
-        batch_size = 100  # Process 100 subtitles at a time
+        batch_size = 10  # Process 10 subtitles at a time to avoid extremely long filter chains (optimized)
         subtitle_times = sorted(subtitles.keys())
         batches = [subtitle_times[i:i + batch_size] for i in range(0, len(subtitle_times), batch_size)]
         
@@ -616,6 +634,15 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             print(f"✅ Todos os lotes já foram processados!")
             return True
         
+        # Update video duration to reflect current input if we're resuming
+        if start_batch_idx > 0:
+            print(f"📏 Atualizando duração do vídeo para arquivo atual: {current_input.name}")
+            _, _, video_duration = get_video_info(current_input)
+            if video_duration > 0:
+                duration_min = int(video_duration // 60)
+                duration_sec = int(video_duration % 60)
+                print(f"⏱️  Nova duração: {duration_min}m{duration_sec:02d}s")
+        
         for batch_idx, batch_times in enumerate(batches):
             # Skip batches that are already completed
             if batch_idx < start_batch_idx:
@@ -648,10 +675,10 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                 '-i', str(current_input),
                 '-filter_complex', batch_filters,
                 '-map', '[v]',
-                '-c:v', 'libx264',
+                '-c:v', 'h264_videotoolbox',  # Hardware Apple codec
                 '-c:a', 'copy',
-                '-crf', '18',
-                '-preset', 'medium',
+                '-b:v', '5M',                     # 5 Mbps bitrate (good quality)
+                '-preset', 'fast',    # Changed from 'medium' to 'fast' for better speed
                 '-progress', 'pipe:1',
                 '-nostats',
                 '-y',
@@ -702,6 +729,10 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             if return_code == 0:
                 print(f"   ✅ Lote {batch_idx + 1} concluído!")
                 current_input = batch_output  # Use this output as input for next batch
+                
+                # Update video duration for next batch if not the last batch
+                if batch_idx < len(batches) - 1:
+                    _, _, video_duration = get_video_info(current_input)
             else:
                 print(f"   ❌ Erro no lote {batch_idx + 1} (código: {return_code})")
                 if stderr_output:
@@ -769,10 +800,10 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
             '-i', str(input_video),
             '-filter_complex', drawtext_filters,
             '-map', '[v]',
-            '-c:v', 'libx264',
+            '-c:v', 'h264_videotoolbox',  # Hardware Apple codec
             '-c:a', 'copy',
-            '-crf', '18',
-            '-preset', 'medium',
+            '-b:v', '5M',                     # 5 Mbps bitrate (good quality)
+            '-preset', 'fast',    # Changed from 'medium' to 'fast' for better speed
             '-progress', 'pipe:1',
             '-nostats',
             '-y',
