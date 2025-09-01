@@ -185,12 +185,12 @@ def find_base_file(directory: Path) -> Optional[Path]:
 
 
 def find_mp4_files(directory: Path) -> List[Path]:
-    """Find all MP4 files in the directory, excluding files that already have subtitles."""
+    """Find all MP4 files in the directory, excluding files that already have subtitles or are batch files."""
     mp4_files = []
     
     for file_path in directory.glob("*.mp4"):
-        # Skip files that already have subtitles (end with _sub.mp4)
-        if not file_path.stem.endswith('_sub'):
+        # Skip files that already have subtitles (end with _sub.mp4) or are batch files (_sub_batch_X.mp4)
+        if not file_path.stem.endswith('_sub') and '_batch_' not in file_path.stem:
             mp4_files.append(file_path)
     
     return sorted(mp4_files)
@@ -579,10 +579,48 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         
         print(f"📦 Dividido em {len(batches)} lotes de até {batch_size} legendas cada")
         
+        # Check for existing batch files to resume processing
+        existing_batches = []
+        start_batch_idx = 0
         current_input = input_video
         temp_files = []
         
+        print(f"🔍 Verificando lotes existentes...")
+        for batch_idx in range(len(batches)):
+            if batch_idx == len(batches) - 1:
+                # Last batch outputs to final file
+                batch_output = output_video
+            else:
+                # Intermediate batch outputs to temp file
+                temp_suffix = f"_batch_{batch_idx}.mp4"
+                batch_output = output_video.parent / (output_video.stem + temp_suffix)
+            
+            if batch_output.exists():
+                existing_batches.append(batch_idx)
+                start_batch_idx = batch_idx + 1
+                current_input = batch_output  # Use this as input for next batch
+                if batch_idx < len(batches) - 1:  # Don't add final output to temp_files
+                    temp_files.append(batch_output)
+                print(f"   ✅ Lote {batch_idx + 1} já existe: {batch_output.name}")
+            else:
+                break  # Stop at first missing batch
+        
+        if existing_batches:
+            print(f"🔄 Retomando processamento a partir do lote {start_batch_idx + 1}/{len(batches)}")
+            print(f"📂 Usando como entrada: {current_input.name}")
+        else:
+            print(f"🆕 Iniciando processamento do zero")
+        
+        # Check if all batches are already complete
+        if start_batch_idx >= len(batches):
+            print(f"✅ Todos os lotes já foram processados!")
+            return True
+        
         for batch_idx, batch_times in enumerate(batches):
+            # Skip batches that are already completed
+            if batch_idx < start_batch_idx:
+                continue
+                
             print(f"\n🔄 Processando lote {batch_idx + 1}/{len(batches)} ({len(batch_times)} legendas)...")
             
             # Create batch subtitles dictionary
