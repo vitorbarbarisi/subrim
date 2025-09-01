@@ -17,6 +17,7 @@ import argparse
 import shutil
 import subprocess
 import os
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 import re
@@ -292,9 +293,9 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         # Calculate starting x position to center the entire line
         start_x = (video_width - total_line_width) // 2
         
-        # Create time conditions
+        # Create time conditions - escape commas for FFmpeg enable parameter
         end_time = begin_time + duration
-        time_condition = f"between(t,{begin_time:.3f},{end_time:.3f})"
+        time_condition = f"between(t\\,{begin_time:.3f}\\,{end_time:.3f})"
         
         # Add each word with its pinyin and Portuguese positioned individually
         current_x = start_x
@@ -328,7 +329,12 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
             
             current_x += word_width
     
-    return ','.join(filter_parts)
+    # Format for filter complex script file
+    if filter_parts:
+        # Start with input and chain all filters, ending with output label
+        return f"[0:v]{','.join(filter_parts)}[v]"
+    else:
+        return "[0:v]copy[v]"  # No filters, just copy video
 
 
 def wrap_portuguese_to_chinese_width(portuguese_text: str, font_path: str, max_width: int) -> List[str]:
@@ -521,6 +527,166 @@ def parse_ffmpeg_progress(line: str) -> Optional[float]:
     return None
 
 
+def create_filter_file(drawtext_filters: str) -> str:
+    """
+    Create a temporary filter file for FFmpeg to avoid 'Argument list too long' errors.
+    
+    Args:
+        drawtext_filters: FFmpeg filter string
+        
+    Returns:
+        Path to temporary filter file
+    """
+    # Create temporary file for filters
+    fd, temp_path = tempfile.mkstemp(suffix='.txt', prefix='ffmpeg_filters_')
+    try:
+        with os.fdopen(fd, 'w', encoding='utf-8') as f:
+            # Write the filter chain to the file
+            f.write(drawtext_filters)
+        return temp_path
+    except Exception:
+        # If writing fails, cleanup the file descriptor
+        try:
+            os.close(fd)
+        except:
+            pass
+        raise
+
+
+def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[str, str, str, str, float]], output_video: Path, video_width: int, video_height: int, video_duration: float) -> bool:
+    """
+    Apply subtitles to video in batches to avoid argument list limitations.
+    
+    Args:
+        input_video: Path to input MP4 file
+        subtitles: Dictionary with subtitle data
+        output_video: Path to output MP4 file
+        video_width: Video width
+        video_height: Video height
+        video_duration: Video duration in seconds
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        print(f"🎬 Processamento em lotes iniciado...")
+        print(f"📊 Total de legendas: {len(subtitles)}")
+        
+        # Split subtitles into batches of manageable size
+        batch_size = 100  # Process 100 subtitles at a time
+        subtitle_times = sorted(subtitles.keys())
+        batches = [subtitle_times[i:i + batch_size] for i in range(0, len(subtitle_times), batch_size)]
+        
+        print(f"📦 Dividido em {len(batches)} lotes de até {batch_size} legendas cada")
+        
+        current_input = input_video
+        temp_files = []
+        
+        for batch_idx, batch_times in enumerate(batches):
+            print(f"\n🔄 Processando lote {batch_idx + 1}/{len(batches)} ({len(batch_times)} legendas)...")
+            
+            # Create batch subtitles dictionary
+            batch_subtitles = {time: subtitles[time] for time in batch_times}
+            
+            # Create drawtext filters for this batch
+            batch_filters = create_ffmpeg_drawtext_filters(batch_subtitles, video_width, video_height)
+            
+            if not batch_filters:
+                continue
+            
+            # Determine output file for this batch
+            if batch_idx == len(batches) - 1:
+                # Last batch outputs to final file
+                batch_output = output_video
+            else:
+                # Intermediate batch outputs to temp file
+                temp_suffix = f"_batch_{batch_idx}.mp4"
+                batch_output = output_video.parent / (output_video.stem + temp_suffix)
+                temp_files.append(batch_output)
+            
+            # FFmpeg command for this batch
+            cmd = [
+                'ffmpeg',
+                '-i', str(current_input),
+                '-filter_complex', batch_filters,
+                '-map', '[v]',
+                '-c:v', 'libx264',
+                '-c:a', 'copy',
+                '-crf', '18',
+                '-preset', 'medium',
+                '-progress', 'pipe:1',
+                '-nostats',
+                '-y',
+                str(batch_output)
+            ]
+            
+            print(f"   ⚙️  Aplicando {len(batch_subtitles)} legendas...")
+            print(f"   📂 Saída: {batch_output.name}")
+            
+            # Run FFmpeg for this batch
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            last_progress = -1
+            stderr_output = []
+            
+            # Read progress from stdout
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                    
+                if line:
+                    current_time = parse_ffmpeg_progress(line.strip())
+                    if current_time is not None and video_duration > 0:
+                        progress_percent = min(100.0, (current_time / video_duration) * 100)
+                        
+                        if int(progress_percent) > last_progress:
+                            last_progress = int(progress_percent)
+                            print(f"\r   📊 Lote {batch_idx + 1}: {last_progress:3d}% ({current_time:.1f}s/{video_duration:.1f}s)", end='', flush=True)
+            
+            # Read stderr
+            stderr_data = process.stderr.read()
+            if stderr_data:
+                stderr_output.append(stderr_data)
+            
+            # Wait for completion
+            return_code = process.wait()
+            
+            print()  # New line after progress
+            
+            if return_code == 0:
+                print(f"   ✅ Lote {batch_idx + 1} concluído!")
+                current_input = batch_output  # Use this output as input for next batch
+            else:
+                print(f"   ❌ Erro no lote {batch_idx + 1} (código: {return_code})")
+                if stderr_output:
+                    print(f"   STDERR: {''.join(stderr_output)}")
+                return False
+        
+        # Clean up temporary files
+        print(f"\n🧹 Limpando {len(temp_files)} arquivos temporários...")
+        for temp_file in temp_files:
+            try:
+                if temp_file.exists():
+                    temp_file.unlink()
+            except OSError:
+                pass  # Ignore cleanup errors
+        
+        print(f"🎉 Processamento em lotes concluído com sucesso!")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Erro no processamento em lotes: {e}")
+        return False
+
+
 def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str, str, str, str, float]], output_video: Path) -> bool:
     """
     Apply subtitles to video using FFmpeg drawtext filters with progress tracking.
@@ -549,75 +715,97 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
             print("⚠️  Nenhum filtro de legenda criado")
             return False
         
-        # FFmpeg command to burn subtitles into video using drawtext filters
+        # Check if we need to split processing for large filter chains
+        filter_size = len(drawtext_filters)
+        max_safe_size = 100000  # Conservative limit to avoid argument list issues
+        
+        if filter_size > max_safe_size:
+            print(f"🔧 Filtro muito grande ({filter_size:,} chars) - usando processamento em lotes")
+            return apply_subtitles_in_batches(input_video, subtitles, output_video, video_width, video_height, video_duration)
+        
+        print(f"🔧 Usando método direto ({filter_size:,} caracteres)")
+        
+        # For manageable filter chains, use direct method
         cmd = [
             'ffmpeg',
             '-i', str(input_video),
-            '-vf', drawtext_filters,
+            '-filter_complex', drawtext_filters,
+            '-map', '[v]',
             '-c:v', 'libx264',
             '-c:a', 'copy',
-            '-crf', '18',  # High quality encoding
+            '-crf', '18',
             '-preset', 'medium',
-            '-progress', 'pipe:1',  # Send progress to stdout
-            '-nostats',  # Don't show default stats
-            '-y',  # Overwrite output file
+            '-progress', 'pipe:1',
+            '-nostats',
+            '-y',
             str(output_video)
         ]
         
-        print(f"🎬 Aplicando legendas com FFmpeg...")
-        print(f"   Entrada: {input_video.name}")
-        print(f"   Saída: {output_video.name}")
-        print(f"   Filtros: {len(subtitles)} legendas processadas")
-        print(f"   ⏳ Processando vídeo...")
-        
-        # Run FFmpeg with real-time progress tracking
-        process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            bufsize=1,
-            universal_newlines=True
-        )
-        
-        last_progress = -1
-        stderr_output = []
-        
-        # Read progress from stdout
-        while True:
-            line = process.stdout.readline()
-            if not line and process.poll() is not None:
-                break
-                
-            if line:
-                current_time = parse_ffmpeg_progress(line.strip())
-                if current_time is not None and video_duration > 0:
-                    progress_percent = min(100.0, (current_time / video_duration) * 100)
-                    
-                    # Update progress every 1% or more
-                    if int(progress_percent) > last_progress:
-                        last_progress = int(progress_percent)
-                        print(f"\r   📊 Progresso: {last_progress:3d}% ({current_time:.1f}s/{video_duration:.1f}s)", end='', flush=True)
-        
-        # Read any remaining stderr
-        stderr_data = process.stderr.read()
-        if stderr_data:
-            stderr_output.append(stderr_data)
-        
-        # Wait for process to complete
-        return_code = process.wait()
-        
-        print()  # New line after progress
-        
-        if return_code == 0:
-            print(f"   ✅ Legendas aplicadas com sucesso!")
-            return True
-        else:
-            print(f"   ❌ Erro no FFmpeg (código: {return_code})")
-            if stderr_output:
-                print(f"   STDERR: {''.join(stderr_output)}")
-            return False
+        filter_file_path = None
+        try:
             
+            print(f"🎬 Aplicando legendas com FFmpeg...")
+            print(f"   Entrada: {input_video.name}")
+            print(f"   Saída: {output_video.name}")
+            print(f"   Filtros: {len(subtitles)} legendas processadas")
+            print(f"   ⏳ Processando vídeo...")
+            
+            # Run FFmpeg with real-time progress tracking
+            process = subprocess.Popen(
+                cmd,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                bufsize=1,
+                universal_newlines=True
+            )
+            
+            last_progress = -1
+            stderr_output = []
+            
+            # Read progress from stdout
+            while True:
+                line = process.stdout.readline()
+                if not line and process.poll() is not None:
+                    break
+                    
+                if line:
+                    current_time = parse_ffmpeg_progress(line.strip())
+                    if current_time is not None and video_duration > 0:
+                        progress_percent = min(100.0, (current_time / video_duration) * 100)
+                        
+                        # Update progress every 1% or more
+                        if int(progress_percent) > last_progress:
+                            last_progress = int(progress_percent)
+                            print(f"\r   📊 Progresso: {last_progress:3d}% ({current_time:.1f}s/{video_duration:.1f}s)", end='', flush=True)
+            
+            # Read any remaining stderr
+            stderr_data = process.stderr.read()
+            if stderr_data:
+                stderr_output.append(stderr_data)
+            
+            # Wait for process to complete
+            return_code = process.wait()
+            
+            print()  # New line after progress
+            
+            if return_code == 0:
+                print(f"   ✅ Legendas aplicadas com sucesso!")
+                return True
+            else:
+                print(f"   ❌ Erro no FFmpeg (código: {return_code})")
+                if stderr_output:
+                    print(f"   STDERR: {''.join(stderr_output)}")
+                return False
+                
+        finally:
+            # Clean up temporary filter file
+            if filter_file_path and os.path.exists(filter_file_path):
+                try:
+                    os.unlink(filter_file_path)
+                except OSError:
+                    pass  # Ignore cleanup errors
+                    
     except Exception as e:
         print(f"Erro ao aplicar legendas: {e}")
         return False
