@@ -915,8 +915,21 @@ def create_filter_file(drawtext_filters: str) -> str:
                     print(f"   📊 Original: {len(drawtext_filters)} chars, Arquivo: {len(written_content)} chars")
                 else:
                     print(f"   ✅ Arquivo verificado: conteúdo OK")
+                    
+            # Show a sample of what's actually in the file for debugging
+            lines = written_content.split('\n')
+            print(f"   📋 Total de linhas no arquivo: {len(lines)}")
+            if len(lines) > 0:
+                print(f"   📋 Primeira linha: {lines[0][:100]}...")
+                if len(lines) > 1:
+                    print(f"   📋 Última linha: ...{lines[-1][-100:] if lines[-1] else '(linha vazia)'}")
+                    
         except Exception as e:
             print(f"   ⚠️  ERRO ao verificar arquivo: {e}")
+        
+        # DO NOT delete the file - preserve for debugging
+        print(f"   🔧 ARQUIVO PRESERVADO PARA DEBUG: {temp_path}")
+        print(f"   🔧 Para examinar: cat '{temp_path}'")
         
         return temp_path
     except Exception:
@@ -1146,8 +1159,10 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                     print(f"   📄 Filtro longo ({len(batch_filters):,} chars) - usando arquivo temporário")
                     try:
                         filter_file_path = create_filter_file(batch_filters)
-                        filter_arg = ['-filter_complex_script', filter_file_path]
-                        print(f"   ✅ Usando filter_complex_script com arquivo: {filter_file_path}")
+                        # Use the newer syntax recommended by FFmpeg 8.0
+                        filter_arg = ['-/filter_complex', filter_file_path]
+                        print(f"   ✅ Usando -/filter_complex com arquivo: {filter_file_path}")
+                        print(f"   🔧 DEBUG: Preservando arquivo temporário para investigação")
                     except Exception as filter_error:
                         print(f"   ❌ ERRO ao criar arquivo de filtro: {filter_error}")
                         print(f"   🆘 Forçando filtro simples de cópia")
@@ -1180,6 +1195,36 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                 
                 print(f"   ⚙️  Aplicando {len(batch_subtitles)} legendas...")
                 print(f"   📂 Saída: {batch_output.name}")
+                
+                # DEBUG: Show complete command being executed
+                print(f"   🔧 DEBUG - Comando FFmpeg completo para lote {batch_idx + 1}:")
+                for i, arg in enumerate(cmd):
+                    if i < 10 or arg.startswith('-') or arg.endswith('.mp4') or arg.endswith('.txt'):
+                        print(f"   🔧   [{i:2d}]: {arg}")
+                    elif len(arg) > 100:
+                        print(f"   🔧   [{i:2d}]: {arg[:50]}...{arg[-50:]}")
+                    else:
+                        print(f"   🔧   [{i:2d}]: {arg}")
+                        
+                # If using filter file, show its current content right before execution
+                if filter_file_path and os.path.exists(filter_file_path):
+                    try:
+                        with open(filter_file_path, 'r', encoding='utf-8') as f:
+                            current_content = f.read()
+                        print(f"   🔧 DEBUG - Arquivo de filtro antes da execução:")
+                        print(f"   🔧   Arquivo: {filter_file_path}")
+                        print(f"   🔧   Tamanho: {len(current_content)} chars")
+                        print(f"   🔧   [v] presente: {'✅' if '[v]' in current_content else '❌'}")
+                        if current_content:
+                            lines = current_content.split('\n')
+                            print(f"   🔧   Total linhas: {len(lines)}")
+                            print(f"   🔧   Primeira linha: {lines[0][:100]}...")
+                            if len(lines) > 1 and lines[-1]:
+                                print(f"   🔧   Última linha: ...{lines[-1][-100:]}")
+                        else:
+                            print(f"   🔧   ❌ ARQUIVO VAZIO!")
+                    except Exception as debug_error:
+                        print(f"   🔧 DEBUG - ERRO ao ler arquivo de filtro: {debug_error}")
                 
                 # Run FFmpeg for this batch
                 process = subprocess.Popen(
@@ -1351,7 +1396,10 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
             if len(drawtext_filters) > 50000:  # Use filter file for very long filters
                 print(f"   📄 Filtro longo ({len(drawtext_filters):,} chars) - usando arquivo temporário")
                 filter_file_path = create_filter_file(drawtext_filters)
-                filter_arg = ['-filter_complex_script', filter_file_path]
+                # Use the newer syntax recommended by FFmpeg 8.0
+                filter_arg = ['-/filter_complex', filter_file_path]
+                print(f"   ✅ Usando -/filter_complex com arquivo: {filter_file_path}")
+                print(f"   🔧 DEBUG: Preservando arquivo temporário para investigação")
             else:
                 filter_arg = ['-filter_complex', drawtext_filters]
             
