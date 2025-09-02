@@ -1159,9 +1159,10 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                     print(f"   📄 Filtro longo ({len(batch_filters):,} chars) - usando arquivo temporário")
                     try:
                         filter_file_path = create_filter_file(batch_filters)
-                        # Use the newer syntax recommended by FFmpeg 8.0
-                        filter_arg = ['-/filter_complex', filter_file_path]
-                        print(f"   ✅ Usando -/filter_complex com arquivo: {filter_file_path}")
+                        # TEMPORARY: Use old syntax to test if it's a syntax issue
+                        filter_arg = ['-filter_complex_script', filter_file_path]
+                        print(f"   ✅ [TESTE] Usando -filter_complex_script (old syntax): {filter_file_path}")
+                        print(f"   ⚠️  [TESTE] Ignorando deprecated warning para testar se filtro funciona")
                         print(f"   🔧 DEBUG: Preservando arquivo temporário para investigação")
                     except Exception as filter_error:
                         print(f"   ❌ ERRO ao criar arquivo de filtro: {filter_error}")
@@ -1396,9 +1397,10 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
             if len(drawtext_filters) > 50000:  # Use filter file for very long filters
                 print(f"   📄 Filtro longo ({len(drawtext_filters):,} chars) - usando arquivo temporário")
                 filter_file_path = create_filter_file(drawtext_filters)
-                # Use the newer syntax recommended by FFmpeg 8.0
-                filter_arg = ['-/filter_complex', filter_file_path]
-                print(f"   ✅ Usando -/filter_complex com arquivo: {filter_file_path}")
+                # TEMPORARY: Use old syntax to test if it's a syntax issue
+                filter_arg = ['-filter_complex_script', filter_file_path]
+                print(f"   ✅ [TESTE] Usando -filter_complex_script (old syntax): {filter_file_path}")
+                print(f"   ⚠️  [TESTE] Ignorando deprecated warning para testar se filtro funciona")
                 print(f"   🔧 DEBUG: Preservando arquivo temporário para investigação")
             else:
                 filter_arg = ['-filter_complex', drawtext_filters]
