@@ -961,37 +961,43 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         print(f"📝 Nome base para lotes: {base_name_for_batches}")
         
         # Look for existing batch files with multiple patterns
-        # Need to escape special characters in filenames for glob patterns
-        import fnmatch
-        
-        # Escape special characters for glob pattern matching
-        def escape_glob_chars(text):
-            # Escape characters that have special meaning in glob patterns
-            special_chars = ['[', ']', '?', '*']
-            escaped = text
-            for char in special_chars:
-                if char in escaped and char != '*':  # Don't escape our intended wildcards
-                    escaped = escaped.replace(char, f'[{char}]')
-            return escaped
-        
-        escaped_base = escape_glob_chars(base_name_for_batches)
-        print(f"📝 Nome base escapado: {escaped_base}")
-        
-        batch_patterns = [
-            f"{escaped_base}_batch_*.mp4",
-            f"{escaped_base}_sub_batch_*.mp4", 
-            f"{escaped_base}_chromecast_temp_sub_batch_*.mp4"
-        ]
+        # Instead of using glob patterns with special characters, list all files and filter with regex
+        import re
         
         print(f"🔍 Procurando lotes no diretório: {input_video.parent}")
-        print(f"🔍 Padrões de busca:")
-        for pattern in batch_patterns:
+        
+        # Get all MP4 files in the directory
+        all_mp4_files = list(input_video.parent.glob("*.mp4"))
+        print(f"🔍 Total de arquivos MP4 no diretório: {len(all_mp4_files)}")
+        
+        # Create regex patterns to match batch files (escape special regex chars)
+        def escape_regex_chars(text):
+            # Escape characters that have special meaning in regex
+            return re.escape(text)
+        
+        escaped_base = escape_regex_chars(base_name_for_batches)
+        
+        batch_patterns_regex = [
+            f"{escaped_base}_batch_\\d+\\.mp4$",
+            f"{escaped_base}_sub_batch_\\d+\\.mp4$", 
+            f"{escaped_base}_chromecast_temp_sub_batch_\\d+\\.mp4$"
+        ]
+        
+        print(f"🔍 Padrões regex de busca:")
+        for pattern in batch_patterns_regex:
             print(f"   - {pattern}")
         
         all_existing_batch_files = []
-        for pattern in batch_patterns:
-            matching_files = list(input_video.parent.glob(pattern))
-            print(f"   ➜ Padrão '{pattern}': {len(matching_files)} arquivos encontrados")
+        
+        for pattern_regex in batch_patterns_regex:
+            pattern_obj = re.compile(pattern_regex)
+            matching_files = []
+            
+            for mp4_file in all_mp4_files:
+                if pattern_obj.search(mp4_file.name):
+                    matching_files.append(mp4_file)
+            
+            print(f"   ➜ Padrão regex: {len(matching_files)} arquivos encontrados")
             for f in matching_files:
                 print(f"     • {f.name}")
             all_existing_batch_files.extend(matching_files)
