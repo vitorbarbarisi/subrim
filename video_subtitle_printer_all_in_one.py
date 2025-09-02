@@ -961,10 +961,26 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         print(f"📝 Nome base para lotes: {base_name_for_batches}")
         
         # Look for existing batch files with multiple patterns
+        # Need to escape special characters in filenames for glob patterns
+        import fnmatch
+        
+        # Escape special characters for glob pattern matching
+        def escape_glob_chars(text):
+            # Escape characters that have special meaning in glob patterns
+            special_chars = ['[', ']', '?', '*']
+            escaped = text
+            for char in special_chars:
+                if char in escaped and char != '*':  # Don't escape our intended wildcards
+                    escaped = escaped.replace(char, f'[{char}]')
+            return escaped
+        
+        escaped_base = escape_glob_chars(base_name_for_batches)
+        print(f"📝 Nome base escapado: {escaped_base}")
+        
         batch_patterns = [
-            f"{base_name_for_batches}_batch_*.mp4",
-            f"{base_name_for_batches}_sub_batch_*.mp4", 
-            f"{base_name_for_batches}_chromecast_temp_sub_batch_*.mp4"
+            f"{escaped_base}_batch_*.mp4",
+            f"{escaped_base}_sub_batch_*.mp4", 
+            f"{escaped_base}_chromecast_temp_sub_batch_*.mp4"
         ]
         
         print(f"🔍 Procurando lotes no diretório: {input_video.parent}")
