@@ -953,12 +953,20 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         
         # Clean up the name to get the original base name without suffixes
         base_name_for_batches = input_video.stem
-        if '_chromecast_temp' in base_name_for_batches:
+        
+        # If input_video is a chromecast_temp file, we need to find the original name for batch detection
+        is_chromecast_temp_input = '_chromecast_temp' in base_name_for_batches
+        
+        if is_chromecast_temp_input:
+            # Remove _chromecast_temp suffix to get original base name
             base_name_for_batches = base_name_for_batches.replace('_chromecast_temp', '')
+            print(f"📝 Detectado input chromecast_temp - usando nome original para busca de lotes")
+        
         if '_sub' in base_name_for_batches:
             base_name_for_batches = base_name_for_batches.replace('_sub', '')
         
         print(f"📝 Nome base para lotes: {base_name_for_batches}")
+        print(f"📝 Input é chromecast_temp: {is_chromecast_temp_input}")
         
         # Look for existing batch files with multiple patterns
         # Instead of using glob patterns with special characters, list all files and filter with regex
