@@ -951,8 +951,7 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         
         print(f"🔍 Verificando lotes existentes...")
         
-        # Use input_video stem for consistent batch naming (not output_video which has _sub)
-        # Clean up the name to get the original base name without _chromecast_temp or other suffixes
+        # Clean up the name to get the original base name without suffixes
         base_name_for_batches = input_video.stem
         if '_chromecast_temp' in base_name_for_batches:
             base_name_for_batches = base_name_for_batches.replace('_chromecast_temp', '')
@@ -961,30 +960,66 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         
         print(f"📝 Nome base para lotes: {base_name_for_batches}")
         
-        for batch_idx in range(len(batches)):
-            if batch_idx == len(batches) - 1:
-                # Last batch outputs to final file
-                batch_output = output_video
-            else:
-                # Intermediate batch outputs to temp file with clean naming
-                temp_suffix = f"_batch_{batch_idx}.mp4"
-                batch_output = output_video.parent / (base_name_for_batches + temp_suffix)
-            
-            if batch_output.exists():
-                existing_batches.append(batch_idx)
-                start_batch_idx = batch_idx + 1
-                current_input = batch_output  # Use this as input for next batch
-                if batch_idx < len(batches) - 1:  # Don't add final output to temp_files
-                    temp_files.append(batch_output)
-                print(f"   ✅ Lote {batch_idx + 1} já existe: {batch_output.name}")
-            else:
-                break  # Stop at first missing batch
+        # Look for existing batch files with multiple patterns
+        batch_patterns = [
+            f"{base_name_for_batches}_batch_*.mp4",
+            f"{base_name_for_batches}_sub_batch_*.mp4", 
+            f"{base_name_for_batches}_chromecast_temp_sub_batch_*.mp4"
+        ]
         
-        if existing_batches:
+        all_existing_batch_files = []
+        for pattern in batch_patterns:
+            matching_files = list(input_video.parent.glob(pattern))
+            all_existing_batch_files.extend(matching_files)
+        
+        # Extract batch numbers and sort
+        batch_file_info = []
+        for batch_file in all_existing_batch_files:
+            # Extract batch number from filename (look for _batch_X.mp4 pattern)
+            import re
+            match = re.search(r'_batch_(\d+)\.mp4$', batch_file.name)
+            if match:
+                batch_num = int(match.group(1))
+                batch_file_info.append((batch_num, batch_file))
+        
+        # Sort by batch number
+        batch_file_info.sort(key=lambda x: x[0])
+        
+        if batch_file_info:
+            print(f"📁 Encontrados {len(batch_file_info)} arquivos de lote existentes:")
+            for batch_num, batch_file in batch_file_info:
+                print(f"   📄 Lote {batch_num + 1}: {batch_file.name}")
+            
+            # Use the highest batch number + 1 as starting point
+            last_batch_num = batch_file_info[-1][0]
+            last_batch_file = batch_file_info[-1][1]
+            
+            start_batch_idx = last_batch_num + 1
+            current_input = last_batch_file
+            
+            # Add existing batch files to temp_files for later cleanup
+            for batch_num, batch_file in batch_file_info:
+                if batch_file != output_video:  # Don't add final output to temp_files
+                    temp_files.append(batch_file)
+            
             print(f"🔄 Retomando processamento a partir do lote {start_batch_idx + 1}/{len(batches)}")
             print(f"📂 Usando como entrada: {current_input.name}")
         else:
-            print(f"🆕 Iniciando processamento do zero")
+            print(f"🆕 Nenhum lote existente encontrado, iniciando do zero")
+        
+        # For new batches, determine consistent naming based on current input
+        if start_batch_idx > 0:
+            # Use the pattern from the last existing batch
+            last_batch_name = current_input.stem
+            if '_batch_' in last_batch_name:
+                # Extract everything before _batch_X
+                base_pattern = last_batch_name.split('_batch_')[0]
+            else:
+                base_pattern = base_name_for_batches
+        else:
+            base_pattern = base_name_for_batches
+        
+        print(f"📝 Padrão para novos lotes: {base_pattern}_batch_X.mp4")
         
         # Check if all batches are already complete
         if start_batch_idx >= len(batches):
@@ -1021,9 +1056,9 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                 # Last batch outputs to final file
                 batch_output = output_video
             else:
-                # Intermediate batch outputs to temp file with consistent naming
+                # Intermediate batch outputs to temp file with consistent naming based on existing pattern
                 temp_suffix = f"_batch_{batch_idx}.mp4"
-                batch_output = output_video.parent / (base_name_for_batches + temp_suffix)
+                batch_output = output_video.parent / (base_pattern + temp_suffix)
                 temp_files.append(batch_output)
             
             # For large filter chains, use a filter file to avoid command line length limits
