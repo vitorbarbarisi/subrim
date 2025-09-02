@@ -434,13 +434,13 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
             word_center_x = current_x + word_width // 2
             
             # Chinese text (centered within word width) - using adaptive font size
-            chinese_filter = f"drawtext=text='{chinese_escaped}':x={word_center_x}-text_w/2:y={chinese_y}:fontfile='{chinese_font_path}':fontsize={base_chinese_font_size}:fontcolor=white:borderw={chinese_border_width}:bordercolor=black:enable='{time_condition}'"
+            chinese_filter = f'drawtext=text="{chinese_escaped}":x={word_center_x}-text_w/2:y={chinese_y}:fontfile=\'{chinese_font_path}\':fontsize={base_chinese_font_size}:fontcolor=white:borderw={chinese_border_width}:bordercolor=black:enable=\'{time_condition}\''
             if chinese_filter:  # Validate filter is not empty
                 filter_parts.append(chinese_filter)
             
             # Pinyin text (centered over the Chinese word) - using adaptive font size
             if pinyin_escaped and pinyin_escaped.strip():
-                pinyin_filter = f"drawtext=text='{pinyin_escaped}':x={word_center_x}-text_w/2:y={pinyin_y}:fontfile='{chinese_font_path}':fontsize={base_pinyin_font_size}:fontcolor=#9370DB:borderw={pinyin_border_width}:bordercolor=black:enable='{time_condition}'"
+                pinyin_filter = f'drawtext=text="{pinyin_escaped}":x={word_center_x}-text_w/2:y={pinyin_y}:fontfile=\'{chinese_font_path}\':fontsize={base_pinyin_font_size}:fontcolor=#9370DB:borderw={pinyin_border_width}:bordercolor=black:enable=\'{time_condition}\''
                 if pinyin_filter:  # Validate filter is not empty
                     filter_parts.append(pinyin_filter)
             
@@ -454,7 +454,7 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
                         portuguese_escaped = escape_ffmpeg_text(portuguese_line)
                         if portuguese_escaped and portuguese_escaped.strip():  # Validate escaped text
                             portuguese_line_y = portuguese_y + (line_idx * portuguese_line_height)
-                            portuguese_filter = f"drawtext=text='{portuguese_escaped}':x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile='{latin_font_path}':fontsize={base_portuguese_font_size}:fontcolor=yellow:borderw={portuguese_border_width}:bordercolor=black:enable='{time_condition}'"
+                            portuguese_filter = f'drawtext=text="{portuguese_escaped}":x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile=\'{latin_font_path}\':fontsize={base_portuguese_font_size}:fontcolor=yellow:borderw={portuguese_border_width}:bordercolor=black:enable=\'{time_condition}\''
                             if portuguese_filter:  # Validate filter is not empty
                                 filter_parts.append(portuguese_filter)
             
@@ -611,7 +611,7 @@ def get_best_latin_font() -> str:
 
 
 def escape_ffmpeg_text(text: str) -> str:
-    """Escape text for FFmpeg drawtext filter."""
+    """Escape text for FFmpeg drawtext filter using double quotes."""
     if not text or not isinstance(text, str):
         return ""
     
@@ -623,14 +623,15 @@ def escape_ffmpeg_text(text: str) -> str:
     if not text:
         return ""
     
-    # Escape special characters for FFmpeg
+    # Escape special characters for FFmpeg (using double quotes strategy)
     text = text.replace('\\', '\\\\')  # Backslash
-    text = text.replace("'", "\\'")    # Single quote  
+    text = text.replace('"', '\\"')    # Double quote (since we'll use double quotes)
     text = text.replace(':', '\\:')    # Colon
     text = text.replace('[', '\\[')    # Left bracket
     text = text.replace(']', '\\]')    # Right bracket
     text = text.replace('%', '\\%')    # Percent sign
     text = text.replace(';', '\\;')    # Semicolon
+    # NOTE: Single quotes don't need escaping when using double quotes
     
     return text
 
