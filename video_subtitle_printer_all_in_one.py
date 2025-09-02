@@ -216,10 +216,38 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
     
     print(f"   🔤 Fonte chinesa: {chinese_font_path}")
     print(f"   🔤 Fonte latina: {latin_font_path}")
+    print(f"   📐 Resolução do vídeo: {video_width}x{video_height}")
+    
+    # Calculate adaptive font sizes based on video resolution
+    # Base the font sizes on video height, similar to the C code logic
+    base_chinese_font_size = max(24, min(120, int(video_height * 0.06)))  # 6% of video height
+    base_pinyin_font_size = int(base_chinese_font_size * 0.65)  # 65% of Chinese font size
+    base_portuguese_font_size = int(base_chinese_font_size * 0.45)  # 45% of Chinese font size
+    
+    # Calculate adaptive spacing based on video width
+    # Aim to use about 85% of the video width for subtitles
+    max_subtitle_width = int(video_width * 0.85)
+    
+    print(f"   📝 Tamanhos adaptativos: Chinês={base_chinese_font_size}px, Pinyin={base_pinyin_font_size}px, PT={base_portuguese_font_size}px")
+    print(f"   📏 Largura máxima das legendas: {max_subtitle_width}px ({(max_subtitle_width/video_width)*100:.1f}% da tela)")
+    
+    # Sort subtitles by time and validate content
+    valid_subtitles = {}
+    for begin_time, subtitle_data in subtitles.items():
+        chinese_text, translations_text, translations_json, portuguese_text, duration = subtitle_data
+        # Skip empty or invalid subtitles
+        if chinese_text and chinese_text.strip() and chinese_text != 'N/A':
+            valid_subtitles[begin_time] = subtitle_data
+    
+    if not valid_subtitles:
+        print("   ⚠️  Nenhuma legenda válida encontrada, usando filtro de cópia")
+        return "[0:v]copy[v]"
+    
+    print(f"   📊 Processando {len(valid_subtitles)} legendas válidas de {len(subtitles)} totais")
     
     # Sort subtitles by time
-    for begin_time in sorted(subtitles.keys()):
-        chinese_text, translations_text, translations_json, portuguese_text, duration = subtitles[begin_time]
+    for begin_time in sorted(valid_subtitles.keys()):
+        chinese_text, translations_text, translations_json, portuguese_text, duration = valid_subtitles[begin_time]
         
         # Parse translations for pinyin and word-by-word Portuguese
         word_data = parse_pinyin_translations(translations_json) if translations_json else []
@@ -248,10 +276,70 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
                 display_items.append((char, "", ""))
                 remaining_text = remaining_text[1:]
         
-        # Calculate positioning for subtitle area (bottom 320px of video to accommodate multi-line Portuguese)
-        chinese_y = video_height - 170  # Chinese text in middle of subtitle area
-        portuguese_y = video_height - 80   # Portuguese below Chinese (more space to avoid overlap)
-        pinyin_y = video_height - 230    # Pinyin above Chinese
+        # Calculate adaptive positioning based on video height and font sizes
+        # Ensure subtitle area is large enough for the adaptive font sizes
+        min_subtitle_area = base_chinese_font_size + base_pinyin_font_size + (base_portuguese_font_size * 2) + 80  # Extra space for margins
+        subtitle_area_height = max(int(video_height * 0.25), min_subtitle_area)  # Use 25% of video height or minimum needed
+        
+        # Calculate margins based on font sizes for better proportions
+        bottom_margin = max(30, int(video_height * 0.04))  # 4% of height or minimum 30px (increased)
+        vertical_spacing = max(10, int(base_chinese_font_size * 0.20))  # 20% of Chinese font size (increased)
+        
+        # Reserve extra space for Portuguese multi-line text (can have 2-3 lines)
+        portuguese_extra_height = base_portuguese_font_size * 2  # Space for 2 additional lines
+        
+        # Calculate total height needed for all elements (more conservative)
+        total_text_height = (base_pinyin_font_size + vertical_spacing + 
+                           base_chinese_font_size + vertical_spacing + 
+                           base_portuguese_font_size + portuguese_extra_height)
+        
+        # Ensure we don't use more than 35% of screen height for subtitles
+        max_subtitle_height = int(video_height * 0.35)
+        if total_text_height > max_subtitle_height:
+            # Scale down spacing proportionally
+            scale_factor = max_subtitle_height / total_text_height
+            vertical_spacing = max(6, int(vertical_spacing * scale_factor))
+            portuguese_extra_height = int(portuguese_extra_height * scale_factor)
+            total_text_height = max_subtitle_height
+        
+        # Calculate Y positions from bottom up, with safety margins
+        # Portuguese starts higher to avoid bottom crop (considering baseline positioning)
+        portuguese_y = video_height - bottom_margin - portuguese_extra_height - (base_portuguese_font_size // 2)
+        chinese_y = portuguese_y - vertical_spacing - base_chinese_font_size
+        pinyin_y = chinese_y - vertical_spacing - base_pinyin_font_size
+        
+        # Safety check: ensure pinyin doesn't go off-screen at top
+        min_pinyin_y = base_pinyin_font_size + 15  # Keep at least 15px from top (increased)
+        if pinyin_y < min_pinyin_y:
+            # Recalculate with compressed layout
+            available_height = video_height - min_pinyin_y - bottom_margin - portuguese_extra_height
+            compressed_spacing = max(6, available_height // 8)  # Divide available space
+            
+            pinyin_y = min_pinyin_y
+            chinese_y = pinyin_y + base_pinyin_font_size + compressed_spacing
+            portuguese_y = chinese_y + base_chinese_font_size + compressed_spacing
+            
+            # Final safety check for bottom crop
+            max_portuguese_bottom = portuguese_y + base_portuguese_font_size + portuguese_extra_height
+            if max_portuguese_bottom > video_height - 10:
+                # Emergency compression - reduce font sizes if needed
+                overflow = max_portuguese_bottom - (video_height - 10)
+                portuguese_y -= overflow
+        
+        # Debug info for positioning (only for first subtitle to avoid spam)
+        if begin_time == sorted(subtitles.keys())[0]:
+            print(f"   📐 Posições Y adaptativas: Pinyin={pinyin_y}px, Chinês={chinese_y}px, PT={portuguese_y}px")
+            print(f"   📏 Área de legendas: {subtitle_area_height}px ({(subtitle_area_height/video_height)*100:.1f}% da altura)")
+            print(f"   🔵 Margem inferior: {bottom_margin}px, Espaçamento: {vertical_spacing}px")
+            print(f"   🛡️  Altura extra PT: {portuguese_extra_height}px, Altura total: {total_text_height}px")
+            
+            # Check for potential cropping
+            max_y_used = portuguese_y + base_portuguese_font_size + portuguese_extra_height
+            bottom_clearance = video_height - max_y_used
+            if bottom_clearance < 20:
+                print(f"   ⚠️  ATENÇÃO: Pouco espaço inferior ({bottom_clearance}px restantes)")
+            else:
+                print(f"   ✅ Espaço inferior seguro: {bottom_clearance}px restantes")
         
         # Build text for each line with proper spacing
         chinese_parts = []
@@ -276,19 +364,28 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         total_line_width = 0
         word_widths = []
         
+        # Calculate adaptive character widths based on font sizes
+        chinese_char_width = int(base_chinese_font_size * 0.85)  # Approximate width per Chinese character
+        pinyin_char_width = int(base_pinyin_font_size * 0.6)     # Approximate width per Latin character
+        min_word_spacing = max(60, int(video_width * 0.04))      # Minimum spacing between words (4% of width)
+        
         # Calculate width of each word for positioning
         for chinese_word, word_pinyin, word_portuguese in display_items:
-            # Use a dummy drawtext to estimate width (approximate calculation)
-            # Chinese word width (64px font)
-            chinese_word_width = len(chinese_word) * 45  # Approximate: 45px per Chinese character at 64px font
+            # Calculate adaptive word width based on resolution
+            chinese_word_width = len(chinese_word) * chinese_char_width
+            pinyin_width = len(word_pinyin) * pinyin_char_width if word_pinyin else 0
             
-            # Pinyin width (36px font) 
-            pinyin_width = len(word_pinyin) * 20 if word_pinyin else 0  # Approximate: 20px per Latin char at 36px font
-            
-            # Use the wider of the two for spacing
-            word_width = max(chinese_word_width, pinyin_width, 80)  # Minimum 80px spacing
+            # Use the wider of the two for spacing, with adaptive minimum
+            word_width = max(chinese_word_width, pinyin_width, min_word_spacing)
             word_widths.append(word_width)
             total_line_width += word_width
+        
+        # If the line is too wide, scale down word widths proportionally to fit max_subtitle_width
+        if total_line_width > max_subtitle_width:
+            scale_factor = max_subtitle_width / total_line_width
+            word_widths = [int(w * scale_factor) for w in word_widths]
+            total_line_width = sum(word_widths)
+            print(f"   📏 Linha muito larga, reduzida por fator {scale_factor:.2f}")
         
         # Calculate starting x position to center the entire line
         start_x = (video_width - total_line_width) // 2
@@ -296,6 +393,11 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         # Create time conditions - escape commas for FFmpeg enable parameter
         end_time = begin_time + duration
         time_condition = f"between(t\\,{begin_time:.3f}\\,{end_time:.3f})"
+        
+        # Calculate adaptive border widths based on font size
+        chinese_border_width = max(2, int(base_chinese_font_size * 0.05))  # 5% of font size
+        pinyin_border_width = max(1, int(base_pinyin_font_size * 0.05))
+        portuguese_border_width = max(1, int(base_portuguese_font_size * 0.05))
         
         # Add each word with its pinyin and Portuguese positioned individually
         current_x = start_x
@@ -306,42 +408,59 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
             chinese_escaped = escape_ffmpeg_text(chinese_word)
             pinyin_escaped = escape_ffmpeg_text(word_pinyin) if word_pinyin else ""
             
+            # Skip if Chinese text is empty after escaping
+            if not chinese_escaped or chinese_escaped.strip() == '':
+                current_x += word_width
+                continue
+            
             # Calculate center position for this word within its allocated width
             word_center_x = current_x + word_width // 2
             
-            # Chinese text (centered within word width)
-            filter_parts.append(f"drawtext=text='{chinese_escaped}':x={word_center_x}-text_w/2:y={chinese_y}:fontfile='{chinese_font_path}':fontsize=64:fontcolor=white:borderw=3:bordercolor=black:enable='{time_condition}'")
+            # Chinese text (centered within word width) - using adaptive font size
+            chinese_filter = f"drawtext=text='{chinese_escaped}':x={word_center_x}-text_w/2:y={chinese_y}:fontfile='{chinese_font_path}':fontsize={base_chinese_font_size}:fontcolor=white:borderw={chinese_border_width}:bordercolor=black:enable='{time_condition}'"
+            if chinese_filter:  # Validate filter is not empty
+                filter_parts.append(chinese_filter)
             
-            # Pinyin text (centered over the Chinese word)
-            if pinyin_escaped:
-                filter_parts.append(f"drawtext=text='{pinyin_escaped}':x={word_center_x}-text_w/2:y={pinyin_y}:fontfile='{chinese_font_path}':fontsize=36:fontcolor=#9370DB:borderw=2:bordercolor=black:enable='{time_condition}'")
+            # Pinyin text (centered over the Chinese word) - using adaptive font size
+            if pinyin_escaped and pinyin_escaped.strip():
+                pinyin_filter = f"drawtext=text='{pinyin_escaped}':x={word_center_x}-text_w/2:y={pinyin_y}:fontfile='{chinese_font_path}':fontsize={base_pinyin_font_size}:fontcolor=#9370DB:borderw={pinyin_border_width}:bordercolor=black:enable='{time_condition}'"
+                if pinyin_filter:  # Validate filter is not empty
+                    filter_parts.append(pinyin_filter)
             
-            # Portuguese text (centered below each Chinese word, with line breaks if needed)
-            if word_portuguese:
-                portuguese_lines = wrap_portuguese_to_chinese_width(word_portuguese, latin_font_path, word_width)
-                portuguese_line_height = 22  # Approximate line height for 20px font (reduced)
+            # Portuguese text (centered below each Chinese word, with line breaks if needed) - using adaptive font size
+            if word_portuguese and word_portuguese.strip():
+                portuguese_lines = wrap_portuguese_to_chinese_width(word_portuguese, latin_font_path, word_width, base_portuguese_font_size)
+                portuguese_line_height = int(base_portuguese_font_size * 1.2)  # Adaptive line height (120% of font size)
                 
                 for line_idx, portuguese_line in enumerate(portuguese_lines):
-                    if portuguese_line.strip():  # Only add non-empty lines
+                    if portuguese_line and portuguese_line.strip():  # Only add non-empty lines
                         portuguese_escaped = escape_ffmpeg_text(portuguese_line)
-                        portuguese_line_y = portuguese_y + (line_idx * portuguese_line_height)
-                        filter_parts.append(f"drawtext=text='{portuguese_escaped}':x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile='{latin_font_path}':fontsize=20:fontcolor=yellow:borderw=2:bordercolor=black:enable='{time_condition}'")
+                        if portuguese_escaped and portuguese_escaped.strip():  # Validate escaped text
+                            portuguese_line_y = portuguese_y + (line_idx * portuguese_line_height)
+                            portuguese_filter = f"drawtext=text='{portuguese_escaped}':x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile='{latin_font_path}':fontsize={base_portuguese_font_size}:fontcolor=yellow:borderw={portuguese_border_width}:bordercolor=black:enable='{time_condition}'"
+                            if portuguese_filter:  # Validate filter is not empty
+                                filter_parts.append(portuguese_filter)
             
             current_x += word_width
     
-    # Format for filter complex script file
-    if filter_parts:
+    # Format for filter complex script file - with validation
+    # Remove any empty or invalid filter parts
+    valid_filter_parts = [f for f in filter_parts if f and f.strip() and 'drawtext=' in f]
+    
+    print(f"   🔧 Gerados {len(valid_filter_parts)} filtros válidos de {len(filter_parts)} totais")
+    
+    if valid_filter_parts:
         # Use pipeline approach for better reliability with many filters
-        if len(filter_parts) == 1:
+        if len(valid_filter_parts) == 1:
             # Single filter case
-            return f"[0:v]{filter_parts[0]}[v]"
+            return f"[0:v]{valid_filter_parts[0]}[v]"
         else:
             # Multiple filters - chain them sequentially
             result_parts = []
             current_input = "[0:v]"
             
-            for i, filter_part in enumerate(filter_parts):
-                if i == len(filter_parts) - 1:
+            for i, filter_part in enumerate(valid_filter_parts):
+                if i == len(valid_filter_parts) - 1:
                     # Last filter outputs to [v]
                     result_parts.append(f"{current_input}{filter_part}[v]")
                 else:
@@ -350,12 +469,20 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
                     result_parts.append(f"{current_input}{filter_part}{temp_label}")
                     current_input = temp_label
             
-            return "; ".join(result_parts)
+            filter_result = "; ".join(result_parts)
+            
+            # Final validation - ensure the result contains [v] output
+            if "[v]" not in filter_result:
+                print("   ⚠️  Filtro final não contém saída [v], usando cópia")
+                return "[0:v]copy[v]"
+            
+            return filter_result
     else:
+        print("   ⚠️  Nenhum filtro válido criado, usando filtro de cópia")
         return "[0:v]copy[v]"  # No filters, just copy video
 
 
-def wrap_portuguese_to_chinese_width(portuguese_text: str, font_path: str, max_width: int) -> List[str]:
+def wrap_portuguese_to_chinese_width(portuguese_text: str, font_path: str, max_width: int, font_size: int = 20) -> List[str]:
     """
     Break Portuguese text into multiple lines to fit within the Chinese word width.
     Never breaks words in the middle - only breaks at word boundaries.
@@ -364,6 +491,7 @@ def wrap_portuguese_to_chinese_width(portuguese_text: str, font_path: str, max_w
         portuguese_text: Portuguese text to break
         font_path: Path to the font file
         max_width: Maximum width in pixels (width of the Chinese word)
+        font_size: Font size in pixels (default 20)
         
     Returns:
         List of text lines that fit within max_width
@@ -371,8 +499,8 @@ def wrap_portuguese_to_chinese_width(portuguese_text: str, font_path: str, max_w
     if not portuguese_text:
         return []
     
-    # Estimate character width for 20px font (reduced from 24px)
-    char_width = 10  # Average width for Latin characters at 20px
+    # Calculate character width based on actual font size
+    char_width = int(font_size * 0.6)  # Approximate: 60% of font size for Latin characters
     chars_per_line = max(3, max_width // char_width)  # Minimum 3 characters per line
     
     words = portuguese_text.split()
@@ -467,14 +595,26 @@ def get_best_latin_font() -> str:
 
 def escape_ffmpeg_text(text: str) -> str:
     """Escape text for FFmpeg drawtext filter."""
+    if not text or not isinstance(text, str):
+        return ""
+    
+    # Remove any null bytes that could cause issues
+    text = text.replace('\x00', '')
+    
+    # Strip whitespace and check if empty
+    text = text.strip()
     if not text:
         return ""
+    
     # Escape special characters for FFmpeg
     text = text.replace('\\', '\\\\')  # Backslash
-    text = text.replace("'", "\\'")    # Single quote
+    text = text.replace("'", "\\'")    # Single quote  
     text = text.replace(':', '\\:')    # Colon
     text = text.replace('[', '\\[')    # Left bracket
     text = text.replace(']', '\\]')    # Right bracket
+    text = text.replace('%', '\\%')    # Percent sign
+    text = text.replace(';', '\\;')    # Semicolon
+    
     return text
 
 
@@ -499,6 +639,199 @@ def get_video_info(video_path: Path) -> Tuple[int, int, float]:
     except:
         # Default values if detection fails
         return 1920, 1080, 0.0
+
+
+def get_video_encoding_info(video_path: Path) -> dict:
+    """Get detailed video encoding information to preserve quality."""
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'quiet',
+            '-print_format', 'json',
+            '-show_streams',
+            '-select_streams', 'v:0',
+            str(video_path)
+        ]
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
+        
+        if result.stdout:
+            import json
+            data = json.loads(result.stdout)
+            streams = data.get('streams', [])
+            
+            if streams:
+                stream = streams[0]
+                return {
+                    'codec_name': stream.get('codec_name', 'h264'),
+                    'profile': stream.get('profile', ''),
+                    'pix_fmt': stream.get('pix_fmt', 'yuv420p'),
+                    'bit_rate': int(stream.get('bit_rate', 0)) if stream.get('bit_rate') else 0,
+                    'width': int(stream.get('width', 1920)),
+                    'height': int(stream.get('height', 1080))
+                }
+    except:
+        pass
+    
+    # Default fallback
+    return {
+        'codec_name': 'h264',
+        'profile': '',
+        'pix_fmt': 'yuv420p',
+        'bit_rate': 0,
+        'width': 1920,
+        'height': 1080
+    }
+
+
+def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
+    """
+    Converte vídeo para formato compatível com Chromecast.
+    
+    Args:
+        input_video: Vídeo original
+        output_video: Vídeo convertido para Chromecast
+        
+    Returns:
+        True se conversão bem-sucedida
+    """
+    print(f"📱 Convertendo para formato Chromecast...")
+    print(f"   📁 Entrada: {input_video.name}")
+    print(f"   📁 Saída: {output_video.name}")
+    
+    # Configurações testadas e aprovadas para Chromecast
+    cmd = [
+        'ffmpeg',
+        '-i', str(input_video),
+        
+        # Codec de vídeo: H.264 software (máxima compatibilidade)
+        '-c:v', 'libx264',
+        '-profile:v', 'high',
+        '-level', '4.1',
+        
+        # Qualidade otimizada para streaming
+        '-crf', '20',              # Alta qualidade
+        '-preset', 'medium',       # Equilíbrio qualidade/velocidade
+        
+        # Codec de áudio: AAC (padrão Chromecast)
+        '-c:a', 'aac',
+        '-b:a', '128k',           # Bitrate áudio adequado
+        '-ar', '48000',           # Sample rate padrão
+        
+        # Configurações de compatibilidade
+        '-pix_fmt', 'yuv420p',    # Formato pixel compatível
+        '-movflags', '+faststart', # Otimização streaming
+        
+        # Resolução máxima suportada pelo Chromecast
+        '-vf', 'scale=min(1920\\,iw):min(1080\\,ih):force_original_aspect_ratio=decrease',
+        
+        # Progresso e otimizações
+        '-progress', 'pipe:1',
+        '-nostats',
+        '-y',                     # Sobrescrever arquivo se existir
+        
+        str(output_video)
+    ]
+    
+    try:
+        print("   🔄 Processando...")
+        
+        process = subprocess.Popen(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            universal_newlines=True
+        )
+        
+        # Mostrar progresso básico
+        for line in process.stdout:
+            if line.startswith('frame='):
+                parts = line.strip().split()
+                for part in parts:
+                    if part.startswith('time='):
+                        time_str = part.split('=')[1]
+                        print(f"   ⏱️  Progresso: {time_str}", end='\r')
+        
+        return_code = process.wait()
+        
+        if return_code != 0:
+            stderr_output = process.stderr.read()
+            print(f"\n❌ Erro na conversão:")
+            print(f"   {stderr_output}")
+            return False
+        
+        print(f"\n✅ Vídeo convertido para Chromecast com sucesso!")
+        
+        # Mostrar informações de tamanho
+        if output_video.exists():
+            original_size = input_video.stat().st_size / (1024*1024)
+            converted_size = output_video.stat().st_size / (1024*1024)
+            reduction = ((original_size - converted_size) / original_size) * 100
+            
+            print(f"   📊 Tamanho original: {original_size:.1f} MB")
+            print(f"   📊 Tamanho Chromecast: {converted_size:.1f} MB")
+            print(f"   📊 Otimização: {reduction:.1f}% menor")
+        
+        return True
+        
+    except Exception as e:
+        print(f"❌ Erro na conversão: {e}")
+        return False
+
+
+def get_optimal_encoding_settings(video_info: dict) -> dict:
+    """Get optimal encoding settings to preserve original quality."""
+    codec_name = video_info['codec_name']
+    bit_rate = video_info['bit_rate']
+    width = video_info['width']
+    height = video_info['height']
+    pix_fmt = video_info['pix_fmt']
+    
+    # Choose codec based on original
+    if codec_name == 'hevc':
+        # Use HEVC hardware encoder to preserve quality
+        video_codec = 'hevc_videotoolbox'
+        preset = 'medium'  # Better quality for HEVC
+    else:
+        # Use H.264 hardware encoder
+        video_codec = 'h264_videotoolbox'
+        preset = 'medium'  # Better quality than 'fast'
+    
+    # Calculate optimal settings
+    is_4k = width >= 3840 or height >= 2160
+    is_hd = width >= 1920 or height >= 1080
+    
+    if bit_rate > 0:
+        # Use CRF for better quality control instead of fixed bitrate
+        if is_4k:
+            crf = 18  # Very high quality for 4K
+            max_bitrate = max(15000, bit_rate // 1000)  # At least 15Mbps for 4K
+        elif is_hd:
+            crf = 20  # High quality for HD
+            max_bitrate = max(8000, bit_rate // 1000)   # At least 8Mbps for HD
+        else:
+            crf = 22  # Good quality for SD
+            max_bitrate = max(3000, bit_rate // 1000)   # At least 3Mbps for SD
+    else:
+        # Fallback values
+        if is_4k:
+            crf = 18
+            max_bitrate = 15000
+        elif is_hd:
+            crf = 20
+            max_bitrate = 8000
+        else:
+            crf = 22
+            max_bitrate = 3000
+    
+    return {
+        'video_codec': video_codec,
+        'crf': crf,
+        'max_bitrate': f'{max_bitrate}k',
+        'preset': preset,
+        'pix_fmt': pix_fmt
+    }
 
 
 def get_video_dimensions(video_path: Path) -> Tuple[int, int]:
@@ -590,6 +923,19 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         print(f"🎬 Processamento em lotes iniciado...")
         print(f"📊 Total de legendas: {len(subtitles)}")
         
+        # Get optimal encoding settings based on input video
+        video_encoding_info = get_video_encoding_info(input_video)
+        encoding_settings = get_optimal_encoding_settings(video_encoding_info)
+        
+        print(f"🎯 Configurações de qualidade detectadas:")
+        print(f"   📹 Codec original: {video_encoding_info['codec_name']} → {encoding_settings['video_codec']}")
+        print(f"   📊 Bitrate original: {video_encoding_info['bit_rate']//1000 if video_encoding_info['bit_rate'] > 0 else 'N/A'}kbps")
+        print(f"   🎨 Pixel format: {video_encoding_info['pix_fmt']}")
+        print(f"   ⚙️  CRF: {encoding_settings['crf']} (qualidade alta), Max bitrate: {encoding_settings['max_bitrate']}")
+        
+        # Clean up any existing batch files from previous runs
+        cleanup_existing_batch_files(output_video)
+        
         # Split subtitles into batches of manageable size
         batch_size = 10  # Process 10 subtitles at a time to avoid extremely long filter chains (optimized)
         subtitle_times = sorted(subtitles.keys())
@@ -669,16 +1015,20 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                 batch_output = output_video.parent / (output_video.stem + temp_suffix)
                 temp_files.append(batch_output)
             
-            # FFmpeg command for this batch
+            # FFmpeg command for this batch with optimal quality settings
             cmd = [
                 'ffmpeg',
                 '-i', str(current_input),
                 '-filter_complex', batch_filters,
-                '-map', '[v]',
-                '-c:v', 'h264_videotoolbox',  # Hardware Apple codec
-                '-c:a', 'copy',
-                '-b:v', '5M',                     # 5 Mbps bitrate (good quality)
-                '-preset', 'fast',    # Changed from 'medium' to 'fast' for better speed
+                '-map', '[v]',       # Map filtered video
+                '-map', '0:a',       # Map original audio
+                '-c:v', encoding_settings['video_codec'],  # Use optimal codec based on input
+                '-c:a', 'copy',      # Copy audio without re-encoding
+                '-crf', str(encoding_settings['crf']),     # Use CRF for quality control
+                '-maxrate', encoding_settings['max_bitrate'],  # Maximum bitrate cap
+                '-bufsize', encoding_settings['max_bitrate'],  # Buffer size
+                '-preset', encoding_settings['preset'],    # Quality-focused preset
+                '-pix_fmt', encoding_settings['pix_fmt'],  # Preserve pixel format
                 '-progress', 'pipe:1',
                 '-nostats',
                 '-y',
@@ -740,20 +1090,61 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                 return False
         
         # Clean up temporary files
-        print(f"\n🧹 Limpando {len(temp_files)} arquivos temporários...")
-        for temp_file in temp_files:
-            try:
-                if temp_file.exists():
-                    temp_file.unlink()
-            except OSError:
-                pass  # Ignore cleanup errors
+        cleanup_temp_files(temp_files)
         
         print(f"🎉 Processamento em lotes concluído com sucesso!")
         return True
         
     except Exception as e:
         print(f"❌ Erro no processamento em lotes: {e}")
+        # Clean up temporary files even on error
+        cleanup_temp_files(temp_files)
         return False
+
+
+def cleanup_temp_files(temp_files: list) -> None:
+    """Clean up temporary batch files."""
+    if not temp_files:
+        return
+        
+    print(f"\n🧹 Limpando {len(temp_files)} arquivos temporários...")
+    cleaned_count = 0
+    
+    for temp_file in temp_files:
+        try:
+            if temp_file.exists():
+                temp_file.unlink()
+                cleaned_count += 1
+                print(f"   🗑️  Removido: {temp_file.name}")
+        except OSError as e:
+            print(f"   ⚠️  Não foi possível remover {temp_file.name}: {e}")
+    
+    print(f"✅ {cleaned_count}/{len(temp_files)} arquivos temporários limpos")
+
+
+def cleanup_existing_batch_files(output_video: Path) -> None:
+    """Clean up any existing batch files from previous runs."""
+    if not output_video.parent.exists():
+        return
+    
+    # Pattern to match batch files: *_batch_*.mp4
+    batch_pattern = f"{output_video.stem}_batch_*.mp4"
+    existing_batch_files = list(output_video.parent.glob(batch_pattern))
+    
+    if existing_batch_files:
+        print(f"🧹 Encontrados {len(existing_batch_files)} arquivos de lotes anteriores - limpando...")
+        cleaned_count = 0
+        
+        for batch_file in existing_batch_files:
+            try:
+                if batch_file.exists():
+                    batch_file.unlink()
+                    cleaned_count += 1
+                    print(f"   🗑️  Removido: {batch_file.name}")
+            except OSError as e:
+                print(f"   ⚠️  Não foi possível remover {batch_file.name}: {e}")
+        
+        print(f"✅ {cleaned_count}/{len(existing_batch_files)} arquivos de lotes anteriores limpos")
 
 
 def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str, str, str, str, float]], output_video: Path) -> bool:
@@ -777,6 +1168,15 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
             duration_sec = int(video_duration % 60)
             print(f"⏱️  Duração do vídeo: {duration_min}m{duration_sec:02d}s")
         
+        # Get optimal encoding settings based on input video
+        video_encoding_info = get_video_encoding_info(input_video)
+        encoding_settings = get_optimal_encoding_settings(video_encoding_info)
+        
+        print(f"🎯 Configurações de qualidade detectadas:")
+        print(f"   📹 Codec: {video_encoding_info['codec_name']} → {encoding_settings['video_codec']}")
+        print(f"   📊 Bitrate: {video_encoding_info['bit_rate']//1000 if video_encoding_info['bit_rate'] > 0 else 'N/A'}kbps")
+        print(f"   ⚙️  CRF: {encoding_settings['crf']}, Max: {encoding_settings['max_bitrate']}")
+        
         # Create drawtext filters for subtitles
         drawtext_filters = create_ffmpeg_drawtext_filters(subtitles, video_width, video_height)
         
@@ -794,16 +1194,20 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
         
         print(f"🔧 Usando método direto ({filter_size:,} caracteres)")
         
-        # For manageable filter chains, use direct method
+        # For manageable filter chains, use direct method with optimal quality
         cmd = [
             'ffmpeg',
             '-i', str(input_video),
             '-filter_complex', drawtext_filters,
-            '-map', '[v]',
-            '-c:v', 'h264_videotoolbox',  # Hardware Apple codec
-            '-c:a', 'copy',
-            '-b:v', '5M',                     # 5 Mbps bitrate (good quality)
-            '-preset', 'fast',    # Changed from 'medium' to 'fast' for better speed
+            '-map', '[v]',       # Map filtered video
+            '-map', '0:a',       # Map original audio
+            '-c:v', encoding_settings['video_codec'],  # Use optimal codec based on input
+            '-c:a', 'copy',      # Copy audio without re-encoding
+            '-crf', str(encoding_settings['crf']),     # Use CRF for quality control
+            '-maxrate', encoding_settings['max_bitrate'],  # Maximum bitrate cap
+            '-bufsize', encoding_settings['max_bitrate'],  # Buffer size
+            '-preset', encoding_settings['preset'],    # Quality-focused preset
+            '-pix_fmt', encoding_settings['pix_fmt'],  # Preserve pixel format
             '-progress', 'pipe:1',
             '-nostats',
             '-y',
@@ -976,25 +1380,61 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                 print("   [DRY RUN] - Arquivo já existe - seria pulado")
                 skipped_count += 1
             else:
-                print("   [DRY RUN] - Simulação de processamento")
-                print("   [DRY RUN] - Cópia original seria removida após processamento")
+                # Check for existing temp file in dry-run
+                chromecast_temp_name = mp4_file.stem + '_chromecast_temp' + mp4_file.suffix
+                chromecast_temp_path = mp4_file.parent / chromecast_temp_name
+                
+                if chromecast_temp_path.exists():
+                    print("   [DRY RUN] - Arquivo temporário Chromecast encontrado")
+                    print("   [DRY RUN] - Conversão seria pulada, aplicaria apenas legendas")
+                else:
+                    print("   [DRY RUN] - Simulação de processamento em 2 etapas:")
+                    print("   [DRY RUN] - 1. Conversão para formato Chromecast")
+                    print("   [DRY RUN] - 2. Aplicação de legendas")
+                print("   [DRY RUN] - Arquivos temporários seriam removidos")
                 processed_count += 1
         else:
-            # Apply subtitles directly to video using drawtext filters
-            if apply_subtitles_to_video(mp4_file, subtitles, output_path):
-                print(f"   ✅ Vídeo com legendas criado: {output_name}")
-                
-                # Delete the original copy from destination directory to save space
-                try:
-                    mp4_file.unlink()
-                    print(f"   🗑️  Cópia original removida: {mp4_file.name}")
-                except Exception as e:
-                    print(f"   ⚠️  Não foi possível remover cópia original: {e}")
-                
-                processed_count += 1
+            # Prepare paths for processing
+            chromecast_temp_name = mp4_file.stem + '_chromecast_temp' + mp4_file.suffix
+            chromecast_temp_path = mp4_file.parent / chromecast_temp_name
+            
+            # Check if Chromecast conversion was already done (resumption logic)
+            chromecast_ready = False
+            
+            if chromecast_temp_path.exists():
+                print(f"   🔄 Arquivo Chromecast temporário encontrado: {chromecast_temp_name}")
+                print(f"   ⏭️  Pulando conversão, continuando com aplicação de legendas...")
+                chromecast_ready = True
             else:
-                print(f"   ❌ Erro ao aplicar legendas")
-                error_count += 1
+                # Step 1: Convert original video to Chromecast format
+                print(f"   🔄 Passo 1/2: Convertendo para formato Chromecast...")
+                if convert_to_chromecast_format(mp4_file, chromecast_temp_path):
+                    print(f"   📱 Vídeo Chromecast criado: {chromecast_temp_name}")
+                    chromecast_ready = True
+                else:
+                    print(f"   ❌ Erro na conversão para Chromecast: {mp4_file.name}")
+                    error_count += 1
+            
+            # Step 2: Apply subtitles (only if Chromecast conversion succeeded or was already done)
+            if chromecast_ready:
+                print(f"   🔄 Passo 2/2: Aplicando legendas...")
+                if apply_subtitles_to_video(chromecast_temp_path, subtitles, output_path):
+                    print(f"   ✅ Vídeo final com legendas criado: {output_name}")
+                    print(f"   📱 Formato: 100% compatível com Chromecast!")
+                    
+                    # Clean up temporary files
+                    try:
+                        mp4_file.unlink()  # Remove original
+                        chromecast_temp_path.unlink()  # Remove temp chromecast version
+                        print(f"   🗑️  Arquivos temporários removidos")
+                    except Exception as e:
+                        print(f"   ⚠️  Aviso na limpeza: {e}")
+                    
+                    processed_count += 1
+                else:
+                    print(f"   ❌ Erro ao aplicar legendas")
+                    print(f"   💡 Arquivo temporário mantido para nova tentativa: {chromecast_temp_name}")
+                    error_count += 1
     
     return processed_count, skipped_count, error_count
 
