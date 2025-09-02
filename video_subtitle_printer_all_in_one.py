@@ -967,12 +967,22 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             f"{base_name_for_batches}_chromecast_temp_sub_batch_*.mp4"
         ]
         
+        print(f"🔍 Procurando lotes no diretório: {input_video.parent}")
+        print(f"🔍 Padrões de busca:")
+        for pattern in batch_patterns:
+            print(f"   - {pattern}")
+        
         all_existing_batch_files = []
         for pattern in batch_patterns:
             matching_files = list(input_video.parent.glob(pattern))
+            print(f"   ➜ Padrão '{pattern}': {len(matching_files)} arquivos encontrados")
+            for f in matching_files:
+                print(f"     • {f.name}")
             all_existing_batch_files.extend(matching_files)
         
         # Extract batch numbers and sort
+        print(f"🔍 Total de arquivos encontrados: {len(all_existing_batch_files)}")
+        
         batch_file_info = []
         for batch_file in all_existing_batch_files:
             # Extract batch number from filename (look for _batch_X.mp4 pattern)
@@ -981,6 +991,9 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             if match:
                 batch_num = int(match.group(1))
                 batch_file_info.append((batch_num, batch_file))
+                print(f"   ✅ Lote {batch_num}: {batch_file.name}")
+            else:
+                print(f"   ❌ Não conseguiu extrair número do lote: {batch_file.name}")
         
         # Sort by batch number
         batch_file_info.sort(key=lambda x: x[0])
