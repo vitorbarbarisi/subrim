@@ -1484,7 +1484,17 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
         print(f"🎬 Processando: {mp4_file.name}")
         
         # Create output filename with '_sub' suffix
-        output_name = mp4_file.stem + '_sub' + mp4_file.suffix
+        # If input file is already a chromecast_temp file, derive original name for output
+        if '_chromecast_temp' in mp4_file.stem:
+            # Remove all chromecast_temp suffixes to get original base name
+            original_base_name = mp4_file.stem
+            while '_chromecast_temp' in original_base_name:
+                original_base_name = original_base_name.replace('_chromecast_temp', '')
+            output_name = original_base_name + '_sub' + mp4_file.suffix
+            print(f"   🔍 Derivando nome de saída do original: {original_base_name}")
+        else:
+            output_name = mp4_file.stem + '_sub' + mp4_file.suffix
+        
         output_path = mp4_file.parent / output_name
         
         # Check if output file already exists
@@ -1499,8 +1509,13 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                 skipped_count += 1
             else:
                 # Check for existing temp file in dry-run
-                chromecast_temp_name = mp4_file.stem + '_chromecast_temp' + mp4_file.suffix
-                chromecast_temp_path = mp4_file.parent / chromecast_temp_name
+                # If input file is already a chromecast_temp file, use it directly
+                if '_chromecast_temp' in mp4_file.stem:
+                    chromecast_temp_path = mp4_file
+                    chromecast_temp_name = mp4_file.name
+                else:
+                    chromecast_temp_name = mp4_file.stem + '_chromecast_temp' + mp4_file.suffix
+                    chromecast_temp_path = mp4_file.parent / chromecast_temp_name
                 
                 if chromecast_temp_path.exists():
                     print("   [DRY RUN] - Arquivo temporário Chromecast encontrado")
@@ -1513,8 +1528,16 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                 processed_count += 1
         else:
             # Prepare paths for processing
-            chromecast_temp_name = mp4_file.stem + '_chromecast_temp' + mp4_file.suffix
-            chromecast_temp_path = mp4_file.parent / chromecast_temp_name
+            # Check if the file is already a chromecast_temp file
+            if '_chromecast_temp' in mp4_file.stem:
+                # This file is already a chromecast_temp file, use it directly
+                chromecast_temp_path = mp4_file
+                chromecast_temp_name = mp4_file.name
+                print(f"   🔍 Arquivo de entrada já é chromecast_temp: {chromecast_temp_name}")
+            else:
+                # This is an original file, prepare chromecast_temp path
+                chromecast_temp_name = mp4_file.stem + '_chromecast_temp' + mp4_file.suffix
+                chromecast_temp_path = mp4_file.parent / chromecast_temp_name
             
             # Also check for batch files from previous failed runs
             base_name = mp4_file.stem
@@ -1523,7 +1546,12 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
             # Check if Chromecast conversion was already done (resumption logic)
             chromecast_ready = False
             
-            if chromecast_temp_path.exists():
+            if '_chromecast_temp' in mp4_file.stem:
+                # Input file is already a chromecast_temp file
+                print(f"   🔄 Arquivo de entrada já está no formato Chromecast: {chromecast_temp_name}")
+                print(f"   ⏭️  Pulando conversão, continuando com aplicação de legendas...")
+                chromecast_ready = True
+            elif chromecast_temp_path.exists():
                 print(f"   🔄 Arquivo Chromecast temporário encontrado: {chromecast_temp_name}")
                 print(f"   ⏭️  Pulando conversão, continuando com aplicação de legendas...")
                 chromecast_ready = True
