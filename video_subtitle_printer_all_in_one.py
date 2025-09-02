@@ -950,14 +950,25 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         temp_files = []
         
         print(f"🔍 Verificando lotes existentes...")
+        
+        # Use input_video stem for consistent batch naming (not output_video which has _sub)
+        # Clean up the name to get the original base name without _chromecast_temp or other suffixes
+        base_name_for_batches = input_video.stem
+        if '_chromecast_temp' in base_name_for_batches:
+            base_name_for_batches = base_name_for_batches.replace('_chromecast_temp', '')
+        if '_sub' in base_name_for_batches:
+            base_name_for_batches = base_name_for_batches.replace('_sub', '')
+        
+        print(f"📝 Nome base para lotes: {base_name_for_batches}")
+        
         for batch_idx in range(len(batches)):
             if batch_idx == len(batches) - 1:
                 # Last batch outputs to final file
                 batch_output = output_video
             else:
-                # Intermediate batch outputs to temp file
+                # Intermediate batch outputs to temp file with clean naming
                 temp_suffix = f"_batch_{batch_idx}.mp4"
-                batch_output = output_video.parent / (output_video.stem + temp_suffix)
+                batch_output = output_video.parent / (base_name_for_batches + temp_suffix)
             
             if batch_output.exists():
                 existing_batches.append(batch_idx)
@@ -1005,89 +1016,109 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             if not batch_filters:
                 continue
             
-            # Determine output file for this batch
+            # Determine output file for this batch (use consistent naming)
             if batch_idx == len(batches) - 1:
                 # Last batch outputs to final file
                 batch_output = output_video
             else:
-                # Intermediate batch outputs to temp file
+                # Intermediate batch outputs to temp file with consistent naming
                 temp_suffix = f"_batch_{batch_idx}.mp4"
-                batch_output = output_video.parent / (output_video.stem + temp_suffix)
+                batch_output = output_video.parent / (base_name_for_batches + temp_suffix)
                 temp_files.append(batch_output)
             
-            # FFmpeg command for this batch with optimal quality settings
-            cmd = [
-                'ffmpeg',
-                '-i', str(current_input),
-                '-filter_complex', batch_filters,
-                '-map', '[v]',       # Map filtered video
-                '-map', '0:a',       # Map original audio
-                '-c:v', encoding_settings['video_codec'],  # Use optimal codec based on input
-                '-c:a', 'copy',      # Copy audio without re-encoding
-                '-crf', str(encoding_settings['crf']),     # Use CRF for quality control
-                '-maxrate', encoding_settings['max_bitrate'],  # Maximum bitrate cap
-                '-bufsize', encoding_settings['max_bitrate'],  # Buffer size
-                '-preset', encoding_settings['preset'],    # Quality-focused preset
-                '-pix_fmt', encoding_settings['pix_fmt'],  # Preserve pixel format
-                '-progress', 'pipe:1',
-                '-nostats',
-                '-y',
-                str(batch_output)
-            ]
-            
-            print(f"   ⚙️  Aplicando {len(batch_subtitles)} legendas...")
-            print(f"   📂 Saída: {batch_output.name}")
-            
-            # Run FFmpeg for this batch
-            process = subprocess.Popen(
-                cmd,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
-                bufsize=1,
-                universal_newlines=True
-            )
-            
-            last_progress = -1
-            stderr_output = []
-            
-            # Read progress from stdout
-            while True:
-                line = process.stdout.readline()
-                if not line and process.poll() is not None:
-                    break
-                    
-                if line:
-                    current_time = parse_ffmpeg_progress(line.strip())
-                    if current_time is not None and video_duration > 0:
-                        progress_percent = min(100.0, (current_time / video_duration) * 100)
-                        
-                        if int(progress_percent) > last_progress:
-                            last_progress = int(progress_percent)
-                            print(f"\r   📊 Lote {batch_idx + 1}: {last_progress:3d}% ({current_time:.1f}s/{video_duration:.1f}s)", end='', flush=True)
-            
-            # Read stderr
-            stderr_data = process.stderr.read()
-            if stderr_data:
-                stderr_output.append(stderr_data)
-            
-            # Wait for completion
-            return_code = process.wait()
-            
-            print()  # New line after progress
-            
-            if return_code == 0:
-                print(f"   ✅ Lote {batch_idx + 1} concluído!")
-                current_input = batch_output  # Use this output as input for next batch
+            # For large filter chains, use a filter file to avoid command line length limits
+            filter_file_path = None
+            try:
+                if len(batch_filters) > 50000:  # Use filter file for very long filters
+                    print(f"   📄 Filtro longo ({len(batch_filters):,} chars) - usando arquivo temporário")
+                    filter_file_path = create_filter_file(batch_filters)
+                    filter_arg = ['-filter_complex_script', filter_file_path]
+                else:
+                    filter_arg = ['-filter_complex', batch_filters]
                 
-                # Update video duration for next batch if not the last batch
-                if batch_idx < len(batches) - 1:
-                    _, _, video_duration = get_video_info(current_input)
-            else:
-                print(f"   ❌ Erro no lote {batch_idx + 1} (código: {return_code})")
-                if stderr_output:
-                    print(f"   STDERR: {''.join(stderr_output)}")
-                return False
+                # FFmpeg command for this batch with optimal quality settings
+                cmd = [
+                    'ffmpeg',
+                    '-i', str(current_input)
+                ]
+                cmd.extend(filter_arg)  # Add filter argument (complex or script file)
+                cmd.extend([
+                    '-map', '[v]',       # Map filtered video
+                    '-map', '0:a',       # Map original audio
+                    '-c:v', encoding_settings['video_codec'],  # Use optimal codec based on input
+                    '-c:a', 'copy',      # Copy audio without re-encoding
+                    '-crf', str(encoding_settings['crf']),     # Use CRF for quality control
+                    '-maxrate', encoding_settings['max_bitrate'],  # Maximum bitrate cap
+                    '-bufsize', encoding_settings['max_bitrate'],  # Buffer size
+                    '-preset', encoding_settings['preset'],    # Quality-focused preset
+                    '-pix_fmt', encoding_settings['pix_fmt'],  # Preserve pixel format
+                    '-progress', 'pipe:1',
+                    '-nostats',
+                    '-y',
+                    str(batch_output)
+                ])
+                
+                print(f"   ⚙️  Aplicando {len(batch_subtitles)} legendas...")
+                print(f"   📂 Saída: {batch_output.name}")
+                
+                # Run FFmpeg for this batch
+                process = subprocess.Popen(
+                    cmd,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    bufsize=1,
+                    universal_newlines=True
+                )
+                
+                last_progress = -1
+                stderr_output = []
+                
+                # Read progress from stdout
+                while True:
+                    line = process.stdout.readline()
+                    if not line and process.poll() is not None:
+                        break
+                        
+                    if line:
+                        current_time = parse_ffmpeg_progress(line.strip())
+                        if current_time is not None and video_duration > 0:
+                            progress_percent = min(100.0, (current_time / video_duration) * 100)
+                            
+                            if int(progress_percent) > last_progress:
+                                last_progress = int(progress_percent)
+                                print(f"\r   📊 Lote {batch_idx + 1}: {last_progress:3d}% ({current_time:.1f}s/{video_duration:.1f}s)", end='', flush=True)
+                
+                # Read stderr
+                stderr_data = process.stderr.read()
+                if stderr_data:
+                    stderr_output.append(stderr_data)
+                
+                # Wait for completion
+                return_code = process.wait()
+                
+                print()  # New line after progress
+                
+                if return_code == 0:
+                    print(f"   ✅ Lote {batch_idx + 1} concluído!")
+                    current_input = batch_output  # Use this output as input for next batch
+                    
+                    # Update video duration for next batch if not the last batch
+                    if batch_idx < len(batches) - 1:
+                        _, _, video_duration = get_video_info(current_input)
+                else:
+                    print(f"   ❌ Erro no lote {batch_idx + 1} (código: {return_code})")
+                    if stderr_output:
+                        print(f"   STDERR: {''.join(stderr_output)}")
+                    return False
+                    
+            finally:
+                # Clean up temporary filter file
+                if filter_file_path and os.path.exists(filter_file_path):
+                    try:
+                        os.unlink(filter_file_path)
+                    except OSError:
+                        pass  # Ignore cleanup errors
         
         # Clean up temporary files
         cleanup_temp_files(temp_files)
@@ -1194,28 +1225,37 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
         
         print(f"🔧 Usando método direto ({filter_size:,} caracteres)")
         
-        # For manageable filter chains, use direct method with optimal quality
-        cmd = [
-            'ffmpeg',
-            '-i', str(input_video),
-            '-filter_complex', drawtext_filters,
-            '-map', '[v]',       # Map filtered video
-            '-map', '0:a',       # Map original audio
-            '-c:v', encoding_settings['video_codec'],  # Use optimal codec based on input
-            '-c:a', 'copy',      # Copy audio without re-encoding
-            '-crf', str(encoding_settings['crf']),     # Use CRF for quality control
-            '-maxrate', encoding_settings['max_bitrate'],  # Maximum bitrate cap
-            '-bufsize', encoding_settings['max_bitrate'],  # Buffer size
-            '-preset', encoding_settings['preset'],    # Quality-focused preset
-            '-pix_fmt', encoding_settings['pix_fmt'],  # Preserve pixel format
-            '-progress', 'pipe:1',
-            '-nostats',
-            '-y',
-            str(output_video)
-        ]
-        
+        # For large filter chains, use a filter file to avoid command line length limits
         filter_file_path = None
         try:
+            if len(drawtext_filters) > 50000:  # Use filter file for very long filters
+                print(f"   📄 Filtro longo ({len(drawtext_filters):,} chars) - usando arquivo temporário")
+                filter_file_path = create_filter_file(drawtext_filters)
+                filter_arg = ['-filter_complex_script', filter_file_path]
+            else:
+                filter_arg = ['-filter_complex', drawtext_filters]
+            
+            # For manageable filter chains, use direct method with optimal quality
+            cmd = [
+                'ffmpeg',
+                '-i', str(input_video)
+            ]
+            cmd.extend(filter_arg)  # Add filter argument (complex or script file)
+            cmd.extend([
+                '-map', '[v]',       # Map filtered video
+                '-map', '0:a',       # Map original audio
+                '-c:v', encoding_settings['video_codec'],  # Use optimal codec based on input
+                '-c:a', 'copy',      # Copy audio without re-encoding
+                '-crf', str(encoding_settings['crf']),     # Use CRF for quality control
+                '-maxrate', encoding_settings['max_bitrate'],  # Maximum bitrate cap
+                '-bufsize', encoding_settings['max_bitrate'],  # Buffer size
+                '-preset', encoding_settings['preset'],    # Quality-focused preset
+                '-pix_fmt', encoding_settings['pix_fmt'],  # Preserve pixel format
+                '-progress', 'pipe:1',
+                '-nostats',
+                '-y',
+                str(output_video)
+            ])
             
             print(f"🎬 Aplicando legendas com FFmpeg...")
             print(f"   Entrada: {input_video.name}")
@@ -1398,12 +1438,23 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
             chromecast_temp_name = mp4_file.stem + '_chromecast_temp' + mp4_file.suffix
             chromecast_temp_path = mp4_file.parent / chromecast_temp_name
             
+            # Also check for batch files from previous failed runs
+            base_name = mp4_file.stem
+            existing_batch_files = list(mp4_file.parent.glob(f"{base_name}_batch_*.mp4"))
+            
             # Check if Chromecast conversion was already done (resumption logic)
             chromecast_ready = False
             
             if chromecast_temp_path.exists():
                 print(f"   🔄 Arquivo Chromecast temporário encontrado: {chromecast_temp_name}")
                 print(f"   ⏭️  Pulando conversão, continuando com aplicação de legendas...")
+                chromecast_ready = True
+            elif existing_batch_files:
+                # If we have batch files but no chromecast_temp, use the last batch as input
+                latest_batch = max(existing_batch_files, key=lambda p: int(p.stem.split('_batch_')[1]))
+                print(f"   🔄 Encontrados arquivos de lote de execução anterior")
+                print(f"   🔄 Usando último lote como entrada: {latest_batch.name}")
+                chromecast_temp_path = latest_batch  # Use the latest batch as chromecast_temp
                 chromecast_ready = True
             else:
                 # Step 1: Convert original video to Chromecast format
@@ -1422,18 +1473,37 @@ def process_directory(directory: Path, dry_run: bool = False, source_directory: 
                     print(f"   ✅ Vídeo final com legendas criado: {output_name}")
                     print(f"   📱 Formato: 100% compatível com Chromecast!")
                     
-                    # Clean up temporary files
+                    # Clean up temporary files only after successful completion
                     try:
                         mp4_file.unlink()  # Remove original
-                        chromecast_temp_path.unlink()  # Remove temp chromecast version
-                        print(f"   🗑️  Arquivos temporários removidos")
+                        
+                        # Only remove chromecast_temp if it's the actual chromecast temp file, not a batch file
+                        if chromecast_temp_path.name.endswith('_chromecast_temp.mp4'):
+                            chromecast_temp_path.unlink()  # Remove temp chromecast version
+                        
+                        # Clean up any remaining batch files
+                        base_name = mp4_file.stem
+                        batch_files_to_clean = list(mp4_file.parent.glob(f"{base_name}_batch_*.mp4"))
+                        for batch_file in batch_files_to_clean:
+                            batch_file.unlink()
+                        
+                        if batch_files_to_clean:
+                            print(f"   🗑️  Arquivos temporários removidos ({len(batch_files_to_clean)} lotes + chromecast)")
+                        else:
+                            print(f"   🗑️  Arquivos temporários removidos")
                     except Exception as e:
                         print(f"   ⚠️  Aviso na limpeza: {e}")
                     
                     processed_count += 1
                 else:
                     print(f"   ❌ Erro ao aplicar legendas")
-                    print(f"   💡 Arquivo temporário mantido para nova tentativa: {chromecast_temp_name}")
+                    print(f"   💡 Arquivos temporários mantidos para nova tentativa")
+                    print(f"   📁 Chromecast temp: {chromecast_temp_path.name}")
+                    # List any existing batch files for debugging
+                    base_name = mp4_file.stem
+                    existing_batch_files = list(mp4_file.parent.glob(f"{base_name}_batch_*.mp4"))
+                    if existing_batch_files:
+                        print(f"   📁 Lotes existentes: {len(existing_batch_files)} arquivos")
                     error_count += 1
     
     return processed_count, skipped_count, error_count
