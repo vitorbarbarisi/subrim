@@ -973,8 +973,9 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         # Clean up any existing batch files from previous runs
         cleanup_existing_batch_files(output_video)
         
-        # Split subtitles into batches of manageable size
-        batch_size = 10  # Process 10 subtitles at a time to avoid extremely long filter chains (optimized)
+        # TEMPORARY: Test with smaller batches to see if large filters are the issue
+        batch_size = 3  # TESTING: Reduced from 10 to 3 to test if filter size is the problem
+        print(f"   🧪 [TESTE] Usando lotes de {batch_size} legendas (reduzido para teste de filtros grandes)")
         subtitle_times = sorted(subtitles.keys())
         batches = [subtitle_times[i:i + batch_size] for i in range(0, len(subtitle_times), batch_size)]
         
@@ -1159,10 +1160,10 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                     print(f"   📄 Filtro longo ({len(batch_filters):,} chars) - usando arquivo temporário")
                     try:
                         filter_file_path = create_filter_file(batch_filters)
-                        # TEMPORARY: Use old syntax to test if it's a syntax issue
-                        filter_arg = ['-filter_complex_script', filter_file_path]
-                        print(f"   ✅ [TESTE] Usando -filter_complex_script (old syntax): {filter_file_path}")
-                        print(f"   ⚠️  [TESTE] Ignorando deprecated warning para testar se filtro funciona")
+                        # Use the EXACT syntax recommended by FFmpeg 8.0
+                        filter_arg = ['-/filter_complex', filter_file_path]
+                        print(f"   ✅ [TESTE] Usando -/filter_complex (sintaxe recomendada pelo FFmpeg): {filter_file_path}")
+                        print(f"   📝 [TESTE] Testando com lotes menores E sintaxe correta")
                         print(f"   🔧 DEBUG: Preservando arquivo temporário para investigação")
                     except Exception as filter_error:
                         print(f"   ❌ ERRO ao criar arquivo de filtro: {filter_error}")
@@ -1279,12 +1280,14 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                     return False
                     
             finally:
-                # Clean up temporary filter file
+                # TEMPORARY: Don't clean up filter file for investigation
                 if filter_file_path and os.path.exists(filter_file_path):
-                    try:
-                        os.unlink(filter_file_path)
-                    except OSError:
-                        pass  # Ignore cleanup errors
+                    print(f"   🔧 [DEBUG] PRESERVANDO arquivo de filtro: {filter_file_path}")
+                    print(f"   🔧 [DEBUG] Para examinar: cat '{filter_file_path}'")
+                    # try:
+                    #     os.unlink(filter_file_path)
+                    # except OSError:
+                    #     pass  # Ignore cleanup errors
         
         # Clean up temporary files
         cleanup_temp_files(temp_files)
@@ -1397,10 +1400,10 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
             if len(drawtext_filters) > 50000:  # Use filter file for very long filters
                 print(f"   📄 Filtro longo ({len(drawtext_filters):,} chars) - usando arquivo temporário")
                 filter_file_path = create_filter_file(drawtext_filters)
-                # TEMPORARY: Use old syntax to test if it's a syntax issue
-                filter_arg = ['-filter_complex_script', filter_file_path]
-                print(f"   ✅ [TESTE] Usando -filter_complex_script (old syntax): {filter_file_path}")
-                print(f"   ⚠️  [TESTE] Ignorando deprecated warning para testar se filtro funciona")
+                # Use the EXACT syntax recommended by FFmpeg 8.0
+                filter_arg = ['-/filter_complex', filter_file_path]
+                print(f"   ✅ [TESTE] Usando -/filter_complex (sintaxe recomendada pelo FFmpeg): {filter_file_path}")
+                print(f"   📝 [TESTE] Testando com lotes menores E sintaxe correta")
                 print(f"   🔧 DEBUG: Preservando arquivo temporário para investigação")
             else:
                 filter_arg = ['-filter_complex', drawtext_filters]
@@ -1482,12 +1485,14 @@ def apply_subtitles_to_video(input_video: Path, subtitles: Dict[float, Tuple[str
                 return False
                 
         finally:
-            # Clean up temporary filter file
+            # TEMPORARY: Don't clean up filter file for investigation
             if filter_file_path and os.path.exists(filter_file_path):
-                try:
-                    os.unlink(filter_file_path)
-                except OSError:
-                    pass  # Ignore cleanup errors
+                print(f"   🔧 [DEBUG] PRESERVANDO arquivo de filtro: {filter_file_path}")
+                print(f"   🔧 [DEBUG] Para examinar: cat '{filter_file_path}'")
+                # try:
+                #     os.unlink(filter_file_path)
+                # except OSError:
+                #     pass  # Ignore cleanup errors
                     
     except Exception as e:
         print(f"Erro ao aplicar legendas: {e}")
