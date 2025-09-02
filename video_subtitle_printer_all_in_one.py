@@ -888,12 +888,36 @@ def create_filter_file(drawtext_filters: str) -> str:
     Returns:
         Path to temporary filter file
     """
+    # Validate that filter contains [v] output before writing
+    if "[v]" not in drawtext_filters:
+        print(f"   ⚠️  ERRO: Filtro não contém saída [v]:")
+        print(f"   📄 Conteúdo do filtro: {drawtext_filters[:500]}...")
+        raise ValueError("Filter does not contain required [v] output label")
+    
     # Create temporary file for filters
     fd, temp_path = tempfile.mkstemp(suffix='.txt', prefix='ffmpeg_filters_')
     try:
         with os.fdopen(fd, 'w', encoding='utf-8') as f:
             # Write the filter chain to the file
             f.write(drawtext_filters)
+        
+        print(f"   📄 Filtro escrito em arquivo temporário: {temp_path}")
+        print(f"   📄 Tamanho do filtro: {len(drawtext_filters):,} caracteres")
+        print(f"   📄 Primeiros 200 chars: {drawtext_filters[:200]}...")
+        print(f"   📄 Últimos 200 chars: ...{drawtext_filters[-200:]}")
+        
+        # Verify the file was written correctly by reading it back
+        try:
+            with open(temp_path, 'r', encoding='utf-8') as f:
+                written_content = f.read()
+                if written_content != drawtext_filters:
+                    print(f"   ⚠️  AVISO: Conteúdo do arquivo difere do original!")
+                    print(f"   📊 Original: {len(drawtext_filters)} chars, Arquivo: {len(written_content)} chars")
+                else:
+                    print(f"   ✅ Arquivo verificado: conteúdo OK")
+        except Exception as e:
+            print(f"   ⚠️  ERRO ao verificar arquivo: {e}")
+        
         return temp_path
     except Exception:
         # If writing fails, cleanup the file descriptor
@@ -1089,10 +1113,21 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             batch_subtitles = {time: subtitles[time] for time in batch_times}
             
             # Create drawtext filters for this batch
+            print(f"   🔧 Criando filtros para lote {batch_idx + 1} com {len(batch_subtitles)} legendas")
             batch_filters = create_ffmpeg_drawtext_filters(batch_subtitles, video_width, video_height)
             
             if not batch_filters:
+                print(f"   ⚠️  Lote {batch_idx + 1}: Nenhum filtro gerado, pulando")
                 continue
+                
+            if "[v]" not in batch_filters:
+                print(f"   ❌ ERRO: Lote {batch_idx + 1} - filtros não contêm [v]:")
+                print(f"   📄 Início: {batch_filters[:300]}...")
+                print(f"   📄 Fim: ...{batch_filters[-300:]}")
+                print(f"   🆘 Forçando filtro de cópia para lote {batch_idx + 1}")
+                batch_filters = "[0:v]copy[v]"
+            else:
+                print(f"   ✅ Lote {batch_idx + 1}: Filtros válidos gerados ({len(batch_filters):,} chars)")
             
             # Determine output file for this batch (use consistent naming)
             if batch_idx == len(batches) - 1:
@@ -1109,10 +1144,17 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             try:
                 if len(batch_filters) > 50000:  # Use filter file for very long filters
                     print(f"   📄 Filtro longo ({len(batch_filters):,} chars) - usando arquivo temporário")
-                    filter_file_path = create_filter_file(batch_filters)
-                    filter_arg = ['-filter_complex_script', filter_file_path]
+                    try:
+                        filter_file_path = create_filter_file(batch_filters)
+                        filter_arg = ['-filter_complex_script', filter_file_path]
+                        print(f"   ✅ Usando filter_complex_script com arquivo: {filter_file_path}")
+                    except Exception as filter_error:
+                        print(f"   ❌ ERRO ao criar arquivo de filtro: {filter_error}")
+                        print(f"   🆘 Forçando filtro simples de cópia")
+                        filter_arg = ['-filter_complex', '[0:v]copy[v]']
                 else:
                     filter_arg = ['-filter_complex', batch_filters]
+                    print(f"   ✅ Usando filter_complex direto ({len(batch_filters):,} chars)")
                 
                 # FFmpeg command for this batch with optimal quality settings
                 cmd = [
