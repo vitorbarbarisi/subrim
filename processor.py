@@ -13,7 +13,7 @@ processed timestamp. Manual resume is also available:
   python3 processor.py <folder_name_inside_assets> --resume-from-seconds 220.5
 
 Searches the folder under the local "assets" directory (recursively) for one SRT file containing "zht"
-in its name and one containing either "pt", "es" or "eng" (ignoring files that already contain
+in its name and one containing either "_pt", ending with ".pt-BR.srt", "_es" or "_eng" (ignoring files that already contain
 "_secs" or "_real"). If a "zht" SRT is not found, it is created by translating the
 non-zht file (pt-BR, es ou eng) into Traditional Chinese using the DeepSeek API. Converts SRT
 files to XML format with "_secs.xml" suffix.
@@ -809,6 +809,7 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     """Find up to one 'zht' and exactly one 'pt' or 'es' or 'eng' SRT under directory (recursive).
 
     Ignores files that already appear to be processed (contain '_secs' or '_real').
+    Searches for PT files by looking for "_pt" in filename or files ending with ".pt-BR.srt".
     Returns: (zht_file_or_none, other_file, other_lang) where other_lang is 'pt' or 'es' or 'eng'.
     """
     if not directory.is_dir():
@@ -825,7 +826,7 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     candidates = [p for p in all_srt if is_candidate(p)]
 
     zht_candidates = [p for p in candidates if re.search(r"_zht", p.name, re.IGNORECASE)]
-    pt_candidates = [p for p in candidates if re.search(r"_pt", p.name, re.IGNORECASE)]
+    pt_candidates = [p for p in candidates if (re.search(r"_pt", p.name, re.IGNORECASE) or p.name.lower().endswith(".pt-br.srt"))]
     es_candidates = [p for p in candidates if re.search(r"_es", p.name, re.IGNORECASE)]
     eng_candidates = [p for p in candidates if re.search(r"_eng", p.name, re.IGNORECASE)]
 
