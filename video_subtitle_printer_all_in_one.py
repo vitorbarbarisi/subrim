@@ -973,9 +973,9 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         # Clean up any existing batch files from previous runs
         cleanup_existing_batch_files(output_video)
         
-        # TEMPORARY: Test with smaller batches to see if large filters are the issue
-        batch_size = 3  # TESTING: Reduced from 10 to 3 to test if filter size is the problem
-        print(f"   🧪 [TESTE] Usando lotes de {batch_size} legendas (reduzido para teste de filtros grandes)")
+        # TEMPORARY: Test with single subtitle to isolate character issues
+        batch_size = 1  # TESTING: Reduced to 1 to test individual subtitle issues
+        print(f"   🧪 [TESTE DIAGNÓSTICO] Usando 1 legenda por lote para identificar problema de caracteres")
         subtitle_times = sorted(subtitles.keys())
         batches = [subtitle_times[i:i + batch_size] for i in range(0, len(subtitle_times), batch_size)]
         
@@ -1128,6 +1128,18 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             
             # Create drawtext filters for this batch
             print(f"   🔧 Criando filtros para lote {batch_idx + 1} com {len(batch_subtitles)} legendas")
+            
+            # DEBUG: Show what subtitle we're processing (for single subtitle testing)
+            if len(batch_subtitles) == 1:
+                subtitle_time = list(batch_subtitles.keys())[0]
+                chinese, pinyin, portuguese, translations_json, word_count = batch_subtitles[subtitle_time]
+                print(f"   🔍 [DEBUG] Processando legenda única:")
+                print(f"   🔍   Tempo: {subtitle_time}s")
+                print(f"   🔍   Chinês: '{chinese}'")
+                print(f"   🔍   Pinyin: '{pinyin}'") 
+                print(f"   🔍   Português: '{portuguese}'")
+                print(f"   🔍   Caracteres especiais detectados: {[c for c in chinese if ord(c) > 127]}")
+            
             batch_filters = create_ffmpeg_drawtext_filters(batch_subtitles, video_width, video_height)
             
             if not batch_filters:
@@ -1142,6 +1154,12 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                 batch_filters = "[0:v]copy[v]"
             else:
                 print(f"   ✅ Lote {batch_idx + 1}: Filtros válidos gerados ({len(batch_filters):,} chars)")
+                
+                # TEMPORARY: For single subtitle batches, test with ultra-simple filter first
+                if len(batch_subtitles) == 1 and batch_idx + 1 <= 5:  # Test first 5 only
+                    print(f"   🧪 [TESTE] Substituindo por filtro ultra-simples para testar caracteres")
+                    batch_filters = "[0:v]drawtext=text='TEST':x=100:y=100:fontsize=30:fontcolor=white[v]"
+                    print(f"   🧪 [TESTE] Filtro simplificado: {batch_filters}")
             
             # Determine output file for this batch (use consistent naming)
             if batch_idx == len(batches) - 1:
