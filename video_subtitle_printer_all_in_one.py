@@ -364,10 +364,10 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         total_line_width = 0
         word_widths = []
         
-        # Calculate adaptive character widths based on font sizes
-        chinese_char_width = int(base_chinese_font_size * 0.85)  # Approximate width per Chinese character
-        pinyin_char_width = int(base_pinyin_font_size * 0.6)     # Approximate width per Latin character
-        min_word_spacing = max(60, int(video_width * 0.04))      # Minimum spacing between words (4% of width)
+        # Calculate adaptive character widths based on font sizes (with safety margin)
+        chinese_char_width = int(base_chinese_font_size * 0.95)  # Increased from 0.85 to 0.95 for safety
+        pinyin_char_width = int(base_pinyin_font_size * 0.65)    # Increased from 0.6 to 0.65 for safety
+        min_word_spacing = max(80, int(video_width * 0.05))      # Increased minimum spacing: 5% of width (was 4%)
         
         # Calculate width of each word for positioning
         for chinese_word, word_pinyin, word_portuguese in display_items:
@@ -375,17 +375,34 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
             chinese_word_width = len(chinese_word) * chinese_char_width
             pinyin_width = len(word_pinyin) * pinyin_char_width if word_pinyin else 0
             
-            # Use the wider of the two for spacing, with adaptive minimum
-            word_width = max(chinese_word_width, pinyin_width, min_word_spacing)
+            # Use the wider of the two for spacing, with adaptive minimum + extra safety margin
+            base_word_width = max(chinese_word_width, pinyin_width, min_word_spacing)
+            # Add extra padding for safety (10% of base width, minimum 20px)
+            safety_padding = max(20, int(base_word_width * 0.10))
+            word_width = base_word_width + safety_padding
             word_widths.append(word_width)
             total_line_width += word_width
         
         # If the line is too wide, scale down word widths proportionally to fit max_subtitle_width
         if total_line_width > max_subtitle_width:
             scale_factor = max_subtitle_width / total_line_width
-            word_widths = [int(w * scale_factor) for w in word_widths]
+            
+            # Apply more conservative scaling to preserve minimum spacing
+            min_word_width = 40  # Minimum width per word to avoid complete overlap
+            scaled_widths = []
+            for w in word_widths:
+                scaled_width = max(min_word_width, int(w * scale_factor))
+                scaled_widths.append(scaled_width)
+            
+            word_widths = scaled_widths
             total_line_width = sum(word_widths)
-            print(f"   📏 Linha muito larga, reduzida por fator {scale_factor:.2f}")
+            
+            # If still too wide after conservative scaling, try reducing font sizes instead
+            if total_line_width > max_subtitle_width:
+                font_reduction_factor = max_subtitle_width / total_line_width
+                print(f"   📏 Linha ainda muito larga, reduzindo fontes por fator {font_reduction_factor:.2f}")
+            else:
+                print(f"   📏 Linha muito larga, reduzida por fator {scale_factor:.2f} (conservativo)")
         
         # Calculate starting x position to center the entire line
         start_x = (video_width - total_line_width) // 2
@@ -973,9 +990,9 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         # Clean up any existing batch files from previous runs
         cleanup_existing_batch_files(output_video)
         
-        # TEMPORARY: Test with single subtitle to isolate character issues
-        batch_size = 1  # TESTING: Reduced to 1 to test individual subtitle issues
-        print(f"   🧪 [TESTE DIAGNÓSTICO] Usando 1 legenda por lote para identificar problema de caracteres")
+        # Use moderate batch size to balance performance and avoid overlap issues
+        batch_size = 5  # Balanced: Not too big to cause overlap, not too small to be inefficient
+        print(f"   📦 Usando {batch_size} legendas por lote (otimizado para evitar sobreposição)")
         subtitle_times = sorted(subtitles.keys())
         batches = [subtitle_times[i:i + batch_size] for i in range(0, len(subtitle_times), batch_size)]
         
@@ -1129,17 +1146,6 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
             # Create drawtext filters for this batch
             print(f"   🔧 Criando filtros para lote {batch_idx + 1} com {len(batch_subtitles)} legendas")
             
-            # DEBUG: Show what subtitle we're processing (for single subtitle testing)
-            if len(batch_subtitles) == 1:
-                subtitle_time = list(batch_subtitles.keys())[0]
-                chinese, pinyin, portuguese, translations_json, word_count = batch_subtitles[subtitle_time]
-                print(f"   🔍 [DEBUG] Processando legenda única:")
-                print(f"   🔍   Tempo: {subtitle_time}s")
-                print(f"   🔍   Chinês: '{chinese}'")
-                print(f"   🔍   Pinyin: '{pinyin}'") 
-                print(f"   🔍   Português: '{portuguese}'")
-                print(f"   🔍   Caracteres especiais detectados: {[c for c in chinese if ord(c) > 127]}")
-            
             batch_filters = create_ffmpeg_drawtext_filters(batch_subtitles, video_width, video_height)
             
             if not batch_filters:
@@ -1154,12 +1160,6 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
                 batch_filters = "[0:v]copy[v]"
             else:
                 print(f"   ✅ Lote {batch_idx + 1}: Filtros válidos gerados ({len(batch_filters):,} chars)")
-                
-                # TEMPORARY: For single subtitle batches, test with ultra-simple filter first
-                if len(batch_subtitles) == 1 and batch_idx + 1 <= 5:  # Test first 5 only
-                    print(f"   🧪 [TESTE] Substituindo por filtro ultra-simples para testar caracteres")
-                    batch_filters = "[0:v]drawtext=text='TEST':x=100:y=100:fontsize=30:fontcolor=white[v]"
-                    print(f"   🧪 [TESTE] Filtro simplificado: {batch_filters}")
             
             # Determine output file for this batch (use consistent naming)
             if batch_idx == len(batches) - 1:
