@@ -285,7 +285,7 @@ def parse_base_file(base_file_path: Path) -> Dict[float, Tuple[str, str, str, st
 
 def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]], video_duration: float) -> List[Dict]:
     """
-    Cria chunks de vídeo baseados nos tempos das legendas.
+    Cria chunks de vídeo de ~30 segundos que são continuação perfeita um do outro.
 
     Args:
         subtitles: Dicionário com legendas
@@ -304,38 +304,30 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
         return chunks
 
     current_start = 0.0
-    chunk_subtitles = []
 
-    for i, begin_time in enumerate(sorted_times):
-        subtitle_data = subtitles[begin_time]
-        _, _, _, _, duration = subtitle_data
-        end_time = begin_time + duration
+    while current_start < video_duration:
+        # Calcular o fim do chunk atual
+        chunk_end = min(current_start + chunk_duration, video_duration)
 
-        # Se este é o último item ou se o tempo de fim excede o limite do chunk atual
-        if i == len(sorted_times) - 1 or end_time >= current_start + chunk_duration:
-            # Encontrar o último tempo de end que está dentro do chunk atual
-            chunk_end = current_start + chunk_duration
+        # Adicionar todas as legendas que estão dentro deste chunk
+        chunk_subs = {}
+        for sub_time in sorted_times:
+            if current_start <= sub_time < chunk_end:
+                chunk_subs[sub_time] = subtitles[sub_time]
 
-            # Se estamos no último item, usar o tempo final do vídeo
-            if i == len(sorted_times) - 1:
-                chunk_end = video_duration
+        # Criar o chunk
+        chunks.append({
+            'start_time': current_start,
+            'end_time': chunk_end,
+            'subtitles': chunk_subs
+        })
 
-            # Adicionar todas as legendas que estão dentro deste chunk
-            chunk_subs = {}
-            for sub_time in sorted_times:
-                if current_start <= sub_time < chunk_end:
-                    chunk_subs[sub_time] = subtitles[sub_time]
+        # Próximo chunk começa exatamente onde este terminou
+        current_start = chunk_end
 
-            if chunk_subs:
-                chunks.append({
-                    'start_time': current_start,
-                    'end_time': chunk_end,
-                    'subtitles': chunk_subs
-                })
-
-            # Preparar para o próximo chunk
-            current_start = end_time if i < len(sorted_times) - 1 else video_duration
-            chunk_subtitles = []
+        # Se chegamos ao fim do vídeo, parar
+        if current_start >= video_duration:
+            break
 
     return chunks
 
