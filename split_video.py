@@ -326,9 +326,9 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
             'subtitles': chunk_subs
         })
 
-        # Próximo chunk começa exatamente onde este terminou
-        # Adicionar pequeno offset para evitar sobreposição de frames
-        current_start = chunk_end + 0.001  # 1ms após o fim para evitar overlap
+        # Próximo chunk começa com margem de segurança para evitar sobreposição
+        # Adicionar offset maior para garantir que não haja frames duplicados
+        current_start = chunk_end + 0.05  # 50ms após o fim para margem de segurança
 
         # Se chegamos ao fim do vídeo, parar
         if current_start >= video_duration:
@@ -402,33 +402,36 @@ def cut_video_chunk(input_video: Path, output_video: Path, start_time: float, en
     """
     duration = end_time - start_time
 
-    # Método 1: Usar -ss antes do input (mais eficiente, mas pode ter quadros pretos)
-    # Adicionar pequeno offset negativo para evitar sobreposição de frames
-    safe_start_time = max(0, start_time - 0.001)  # 1ms antes para evitar overlap
-
-    cmd_fast = [
+    # Método 1: Re-encoding preciso para evitar qualquer sobreposição (mais confiável)
+    cmd_precise = [
         'ffmpeg',
-        '-ss', str(safe_start_time),  # Start time BEFORE input com offset
         '-i', str(input_video),
-        '-t', str(duration + 0.002),  # Duration + pequeno buffer
-        '-c', 'copy',           # Copy streams without re-encoding
+        '-ss', str(start_time),  # Start time exato
+        '-t', str(duration),     # Duration exata
+        '-c:v', 'libx264',      # Re-encode video para precisão
+        '-c:a', 'aac',          # Re-encode audio para sincronização
+        '-preset', 'ultrafast',  # Encoding rápido
+        '-crf', '20',           # Alta qualidade (ligeiramente reduzida para velocidade)
+        '-keyint_min', '25',    # Keyframe mínimo
+        '-g', '25',             # GOP size fixo para consistência
+        '-sc_threshold', '0',   # Desabilitar detecção de cena para consistência
         '-avoid_negative_ts', 'make_zero',
-        '-fflags', '+discardcorrupt',  # Descartar frames corrompidos
+        '-fflags', '+discardcorrupt+genpts',  # Gerar timestamps corretos
         '-y',
         str(output_video)
     ]
 
-    # Método 2: Re-encoding para precisão perfeita (mais lento, mas sem quadros pretos)
-    cmd_precise = [
+    # Método 2: Usar -ss antes do input com verificações extras (fallback)
+    safe_start_time = max(0, start_time - 0.01)  # 10ms antes para margem de segurança
+
+    cmd_fast = [
         'ffmpeg',
+        '-ss', str(safe_start_time),  # Start time BEFORE input com margem
         '-i', str(input_video),
-        '-ss', str(start_time),  # Start time
-        '-t', str(duration),     # Duration
-        '-c:v', 'libx264',      # Re-encode video
-        '-c:a', 'aac',          # Re-encode audio
-        '-preset', 'ultrafast',  # Fast encoding
-        '-crf', '18',           # High quality
+        '-t', str(duration + 0.02),  # Duration + margem de 20ms
+        '-c', 'copy',           # Copy streams
         '-avoid_negative_ts', 'make_zero',
+        '-fflags', '+discardcorrupt+genpts',
         '-y',
         str(output_video)
     ]
@@ -436,26 +439,26 @@ def cut_video_chunk(input_video: Path, output_video: Path, start_time: float, en
     try:
         print(f"   🎬 Cortando vídeo: {start_time:.1f}s - {end_time:.1f}s (duração: {duration:.1f}s)")
 
-        # Primeiro tenta o método rápido (copy)
-        print(f"   ⚡ Tentando método rápido (copy)...")
-        result = subprocess.run(cmd_fast, capture_output=True, text=True, check=False)
+        # Primeiro tenta o método preciso (re-encoding) - mais confiável
+        print(f"   🔄 Usando método preciso (re-encoding) para evitar sobreposições...")
+        result = subprocess.run(cmd_precise, capture_output=True, text=True, check=False)
 
         if result.returncode == 0:
-            print(f"   ✅ Método rápido bem-sucedido")
+            print(f"   ✅ Método preciso bem-sucedido - sem sobreposições")
             return True
         else:
-            print(f"   ⚠️  Método rápido falhou, tentando método preciso (re-encoding)...")
-            print(f"   🔄 Re-encoding para precisão perfeita...")
+            print(f"   ⚠️  Método preciso falhou, tentando método rápido (copy)...")
+            print(f"   ⚡ Fallback para método rápido...")
 
-            # Se o método rápido falhar, tenta o método preciso
-            result = subprocess.run(cmd_precise, capture_output=True, text=True, check=False)
+            # Se o método preciso falhar, tenta o método rápido como fallback
+            result = subprocess.run(cmd_fast, capture_output=True, text=True, check=False)
 
             if result.returncode == 0:
-                print(f"   ✅ Método preciso bem-sucedido")
+                print(f"   ✅ Método rápido bem-sucedido (fallback)")
                 return True
             else:
                 print(f"   ❌ Ambos os métodos falharam")
-                print(f"   📄 Erro método rápido: {result.stderr[:200]}...")
+                print(f"   📄 Erro método preciso: {result.stderr[:200]}...")
                 return False
 
     except Exception as e:
