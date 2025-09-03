@@ -342,7 +342,7 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
 
 def cut_video_chunk(input_video: Path, output_video: Path, start_time: float, end_time: float) -> bool:
     """
-    Corta um chunk do vídeo usando FFmpeg.
+    Corta um chunk do vídeo usando FFmpeg com método otimizado para evitar quadros pretos.
 
     Args:
         input_video: Vídeo de entrada
@@ -355,25 +355,57 @@ def cut_video_chunk(input_video: Path, output_video: Path, start_time: float, en
     """
     duration = end_time - start_time
 
-    cmd = [
+    # Método 1: Usar -ss antes do input (mais eficiente, mas pode ter quadros pretos)
+    cmd_fast = [
+        'ffmpeg',
+        '-ss', str(start_time),  # Start time BEFORE input
+        '-i', str(input_video),
+        '-t', str(duration),     # Duration
+        '-c', 'copy',           # Copy streams without re-encoding
+        '-avoid_negative_ts', 'make_zero',
+        '-y',
+        str(output_video)
+    ]
+
+    # Método 2: Re-encoding para precisão perfeita (mais lento, mas sem quadros pretos)
+    cmd_precise = [
         'ffmpeg',
         '-i', str(input_video),
         '-ss', str(start_time),  # Start time
         '-t', str(duration),     # Duration
-        '-c', 'copy',           # Copy streams without re-encoding
-        '-avoid_negative_ts', 'make_zero',  # Handle negative timestamps
-        '-y',                   # Overwrite output file
+        '-c:v', 'libx264',      # Re-encode video
+        '-c:a', 'aac',          # Re-encode audio
+        '-preset', 'ultrafast',  # Fast encoding
+        '-crf', '18',           # High quality
+        '-avoid_negative_ts', 'make_zero',
+        '-y',
         str(output_video)
     ]
 
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        print(f"   🎬 Cortando vídeo: {start_time:.1f}s - {end_time:.1f}s (duração: {duration:.1f}s)")
+
+        # Primeiro tenta o método rápido (copy)
+        print(f"   ⚡ Tentando método rápido (copy)...")
+        result = subprocess.run(cmd_fast, capture_output=True, text=True, check=False)
 
         if result.returncode == 0:
+            print(f"   ✅ Método rápido bem-sucedido")
             return True
         else:
-            print(f"   ❌ Erro no FFmpeg: {result.stderr}")
-            return False
+            print(f"   ⚠️  Método rápido falhou, tentando método preciso (re-encoding)...")
+            print(f"   🔄 Re-encoding para precisão perfeita...")
+
+            # Se o método rápido falhar, tenta o método preciso
+            result = subprocess.run(cmd_precise, capture_output=True, text=True, check=False)
+
+            if result.returncode == 0:
+                print(f"   ✅ Método preciso bem-sucedido")
+                return True
+            else:
+                print(f"   ❌ Ambos os métodos falharam")
+                print(f"   📄 Erro método rápido: {result.stderr[:200]}...")
+                return False
 
     except Exception as e:
         print(f"   ❌ Erro ao cortar vídeo: {e}")
