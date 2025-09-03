@@ -285,7 +285,7 @@ def parse_base_file(base_file_path: Path) -> Dict[float, Tuple[str, str, str, st
 
 def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]], video_duration: float) -> List[Dict]:
     """
-    Cria chunks de vídeo de ~30 segundos que são continuação perfeita um do outro.
+    Cria chunks de vídeo que respeitam os limites das legendas (sem cortar legendas no meio).
 
     Args:
         subtitles: Dicionário com legendas
@@ -295,7 +295,7 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
         Lista de chunks, cada um contendo start_time, end_time e subtitles
     """
     chunks = []
-    chunk_duration = 30.0  # 30 segundos por chunk
+    target_chunk_duration = 30.0  # Duração alvo de 30 segundos
 
     # Ordenar legendas por tempo
     sorted_times = sorted(subtitles.keys())
@@ -306,14 +306,18 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
     current_start = 0.0
 
     while current_start < video_duration:
-        # Calcular o fim do chunk atual
-        chunk_end = min(current_start + chunk_duration, video_duration)
+        # Encontrar o melhor ponto de corte para este chunk
+        chunk_end = find_best_chunk_end(current_start, target_chunk_duration, video_duration, subtitles, sorted_times)
 
-        # Adicionar todas as legendas que estão dentro deste chunk
+        # Adicionar todas as legendas que estão completamente dentro deste chunk
         chunk_subs = {}
         for sub_time in sorted_times:
             if current_start <= sub_time < chunk_end:
-                chunk_subs[sub_time] = subtitles[sub_time]
+                # Verificar se a legenda inteira cabe no chunk
+                _, _, _, _, duration = subtitles[sub_time]
+                sub_end_time = sub_time + duration
+                if sub_end_time <= chunk_end:
+                    chunk_subs[sub_time] = subtitles[sub_time]
 
         # Criar o chunk
         chunks.append({
@@ -330,6 +334,55 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
             break
 
     return chunks
+
+
+def find_best_chunk_end(current_start: float, target_duration: float, video_duration: float,
+                        subtitles: Dict[float, Tuple[str, str, str, str, float]],
+                        sorted_times: List[float]) -> float:
+    """
+    Encontra o melhor ponto de fim para um chunk, evitando cortar legendas no meio.
+
+    Args:
+        current_start: Início do chunk atual
+        target_duration: Duração alvo do chunk
+        video_duration: Duração total do vídeo
+        subtitles: Dicionário com todas as legendas
+        sorted_times: Lista ordenada dos tempos de início das legendas
+
+    Returns:
+        Melhor tempo de fim para o chunk
+    """
+    target_end = current_start + target_duration
+
+    # Se o target_end já é o fim do vídeo, usar ele
+    if target_end >= video_duration:
+        return video_duration
+
+    # Procurar a última legenda que termina antes ou no target_end
+    best_end = target_end
+
+    for sub_time in sorted_times:
+        if sub_time >= current_start and sub_time < target_end:
+            _, _, _, _, duration = subtitles[sub_time]
+            sub_end_time = sub_time + duration
+
+            # Se a legenda termina dentro do nosso target, considerar usar esse ponto
+            if sub_end_time <= target_end:
+                best_end = max(best_end, sub_end_time)
+            # Se a legenda termina depois do target, mas começa antes, precisamos
+            # incluir ela inteira no chunk
+            elif sub_time < target_end and sub_end_time > target_end:
+                best_end = max(best_end, sub_end_time)
+
+    # Garantir que não ultrapassamos o limite máximo (target_end + uma tolerância)
+    max_end = min(target_end + 10.0, video_duration)  # Máximo 10s de tolerância
+
+    # Se encontramos um bom ponto de corte, usar ele
+    if best_end <= max_end:
+        return best_end
+    else:
+        # Se não encontramos um bom ponto, usar o target_end
+        return target_end
 
 
 def cut_video_chunk(input_video: Path, output_video: Path, start_time: float, end_time: float) -> bool:
