@@ -309,15 +309,17 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
         # Encontrar o melhor ponto de corte para este chunk
         chunk_end = find_best_chunk_end(current_start, target_chunk_duration, video_duration, subtitles, sorted_times)
 
-        # Adicionar todas as legendas que estão completamente dentro deste chunk
+        # Adicionar todas as legendas que têm alguma parte dentro deste chunk
         chunk_subs = {}
         for sub_time in sorted_times:
-            if current_start <= sub_time < chunk_end:
-                # Verificar se a legenda inteira cabe no chunk
-                _, _, _, _, duration = subtitles[sub_time]
-                sub_end_time = sub_time + duration
-                if sub_end_time <= chunk_end:
-                    chunk_subs[sub_time] = subtitles[sub_time]
+            _, _, _, _, duration = subtitles[sub_time]
+            sub_end_time = sub_time + duration
+
+            # Incluir legenda se:
+            # 1. Começa dentro do chunk (atual)
+            # 2. OU termina dentro do chunk (mesmo que comece antes)
+            if (current_start <= sub_time < chunk_end) or (current_start < sub_end_time <= chunk_end):
+                chunk_subs[sub_time] = subtitles[sub_time]
 
         # Criar o chunk
         chunks.append({
