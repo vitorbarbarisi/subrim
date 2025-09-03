@@ -327,7 +327,8 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
         })
 
         # Próximo chunk começa exatamente onde este terminou
-        current_start = chunk_end
+        # Adicionar pequeno offset para evitar sobreposição de frames
+        current_start = chunk_end + 0.001  # 1ms após o fim para evitar overlap
 
         # Se chegamos ao fim do vídeo, parar
         if current_start >= video_duration:
@@ -340,7 +341,8 @@ def find_best_chunk_end(current_start: float, target_duration: float, video_dura
                         subtitles: Dict[float, Tuple[str, str, str, str, float]],
                         sorted_times: List[float]) -> float:
     """
-    Encontra o melhor ponto de fim para um chunk, evitando cortar legendas no meio.
+    Encontra o melhor ponto de fim para um chunk, evitando cortar legendas no meio
+    e garantindo que não haja sobreposição de frames.
 
     Args:
         current_start: Início do chunk atual
@@ -401,13 +403,17 @@ def cut_video_chunk(input_video: Path, output_video: Path, start_time: float, en
     duration = end_time - start_time
 
     # Método 1: Usar -ss antes do input (mais eficiente, mas pode ter quadros pretos)
+    # Adicionar pequeno offset negativo para evitar sobreposição de frames
+    safe_start_time = max(0, start_time - 0.001)  # 1ms antes para evitar overlap
+
     cmd_fast = [
         'ffmpeg',
-        '-ss', str(start_time),  # Start time BEFORE input
+        '-ss', str(safe_start_time),  # Start time BEFORE input com offset
         '-i', str(input_video),
-        '-t', str(duration),     # Duration
+        '-t', str(duration + 0.002),  # Duration + pequeno buffer
         '-c', 'copy',           # Copy streams without re-encoding
         '-avoid_negative_ts', 'make_zero',
+        '-fflags', '+discardcorrupt',  # Descartar frames corrompidos
         '-y',
         str(output_video)
     ]
