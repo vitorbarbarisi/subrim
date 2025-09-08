@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Merge Chunks - Junta todos os chunks de vídeo em um único arquivo
+Merge Processed Chunks - Junta todos os chunks processados em um único arquivo
 
 Usage: python3 merge_chunks.py <directory_name>
 Example: python3 merge_chunks.py onibus132
 
 O script:
-1. Encontra todos os chunks na pasta <directory_name>_sub
+1. Encontra todos os arquivos _processed.mp4 na pasta <directory_name>_sub
 2. Cria uma lista de concatenação para FFmpeg
-3. Junta todos os chunks em um vídeo _merged.mp4
-4. Mantém todos os arquivos originais
+3. Junta todos os chunks processados em um vídeo _merged.mp4
+4. Mantém todos os arquivos originais e processados
 """
 
 import sys
@@ -22,16 +22,16 @@ from typing import List
 
 def find_chunk_files(directory: Path) -> List[Path]:
     """
-    Encontra todos os arquivos de chunk (MP4) no diretório,
+    Encontra todos os arquivos processados (_processed.mp4) no diretório,
     ordenados numericamente.
     """
     chunk_files = []
 
-    # Procurar por arquivos que contenham "chunk" no nome
-    for file_path in directory.glob("*chunk*.mp4"):
+    # Procurar por arquivos que terminem com _processed.mp4
+    for file_path in directory.glob("*_processed.mp4"):
         chunk_files.append(file_path)
 
-    # Ordenar por nome (chunk_001, chunk_002, etc.)
+    # Ordenar por nome (capitulo_132_chromecast_chunk_001_processed.mp4, etc.)
     chunk_files.sort(key=lambda x: x.name)
 
     return chunk_files
@@ -48,14 +48,14 @@ def create_concat_list(chunk_files: List[Path], list_file: Path) -> bool:
                 f.write(f"file '{chunk_file.absolute()}'\n")
 
         print(f"📄 Lista de concatenação criada: {list_file}")
-        print(f"📊 Total de chunks para mergear: {len(chunk_files)}")
+        print(f"📊 Total de arquivos processados para mergear: {len(chunk_files)}")
 
-        # Mostrar preview dos primeiros chunks
+        # Mostrar preview dos primeiros arquivos processados
         for i, chunk in enumerate(chunk_files[:5], 1):
             print(f"   {i:2d}. {chunk.name}")
 
         if len(chunk_files) > 5:
-            print(f"   ... e mais {len(chunk_files) - 5} chunks")
+            print(f"   ... e mais {len(chunk_files) - 5} arquivos processados")
 
         return True
 
@@ -69,12 +69,12 @@ def merge_chunks(chunk_files: List[Path], output_file: Path) -> bool:
     Junta todos os chunks usando FFmpeg concat.
     """
     if not chunk_files:
-        print("❌ Nenhum chunk encontrado para mergear")
+        print("❌ Nenhum arquivo processado encontrado para mergear")
         return False
 
-    print("\n🎬 Iniciando merge dos chunks...")
+    print("\n🎬 Iniciando merge dos arquivos processados...")
     print(f"📁 Arquivo de saída: {output_file.name}")
-    print(f"📊 Total de chunks: {len(chunk_files)}")
+    print(f"📊 Total de arquivos processados: {len(chunk_files)}")
 
     # Criar arquivo de lista temporário
     list_file = output_file.parent / "concat_list.txt"
@@ -161,22 +161,23 @@ def check_ffmpeg() -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Junta todos os chunks de vídeo em um único arquivo",
+        description="Junta todos os arquivos processados em um único arquivo",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
-  python3 merge_chunks.py onibus132    # Junta chunks em onibus132_sub/
+  python3 merge_chunks.py onibus132    # Junta arquivos processados em onibus132_sub/
 
 Funcionamento:
-  1. Encontra todos os chunks na pasta <directory_name>_sub
+  1. Encontra todos os arquivos _processed.mp4 na pasta <directory_name>_sub
   2. Cria lista de concatenação para FFmpeg
-  3. Junta todos os chunks em _merged.mp4
-  4. Mantém todos os arquivos originais
+  3. Junta todos os arquivos processados em _merged.mp4
+  4. Mantém todos os arquivos originais e processados
 
 Requisitos:
   - FFmpeg deve estar instalado
-  - Chunks devem estar na pasta _sub
-  - Arquivos devem seguir padrão: *chunk*.mp4
+  - Arquivos _processed.mp4 devem estar na pasta _sub
+  - Execute primeiro: python3 process_chunks.py <directory_name>
+  - Arquivos devem seguir padrão: *_processed.mp4
         """
     )
 
@@ -188,8 +189,8 @@ Requisitos:
     source_dir = Path('assets') / f"{args.directory}_sub"
     output_file = source_dir / f"{args.directory}_chromecast_merged.mp4"
 
-    print("🎬 Merge Chunks - Junta chunks em vídeo único")
-    print("=" * 50)
+    print("🎬 Merge Processed Chunks - Junta arquivos processados em vídeo único")
+    print("=" * 60)
     print(f"📁 Diretório fonte: {source_dir}")
     print(f"📁 Arquivo destino: {output_file.name}")
 
@@ -207,16 +208,17 @@ Requisitos:
         return 1
 
     try:
-        # Find chunk files
-        print("\n🔍 Procurando chunks...")
+        # Find processed files
+        print("\n🔍 Procurando arquivos processados...")
         chunk_files = find_chunk_files(source_dir)
 
         if not chunk_files:
-            print(f"❌ Nenhum arquivo de chunk encontrado em {source_dir}")
-            print("   Certifique-se de que os arquivos seguem o padrão: *chunk*.mp4")
+            print(f"❌ Nenhum arquivo processado encontrado em {source_dir}")
+            print("   Certifique-se de que os arquivos seguem o padrão: *_processed.mp4")
+            print("   Execute primeiro: python3 process_chunks.py onibus132")
             return 1
 
-        print(f"✅ Encontrados {len(chunk_files)} chunks")
+        print(f"✅ Encontrados {len(chunk_files)} arquivos processados")
 
         # Check if output file already exists
         if output_file.exists():
@@ -230,7 +232,7 @@ Requisitos:
         if merge_chunks(chunk_files, output_file):
             print("\n🎉 Merge concluído!")
             print(f"📁 Arquivo final: {output_file}")
-            print("💡 Arquivos originais mantidos intactos")
+            print("💡 Arquivos originais e processados mantidos intactos")
             return 0
         else:
             print("❌ Falha no merge")

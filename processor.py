@@ -41,6 +41,7 @@ import json
 from urllib import request as urlrequest, error as urlerror
 import sys
 import xml.etree.ElementTree as ET
+import time
 
 
 # TTML/IMSC namespaces used in the input file
@@ -311,6 +312,56 @@ def _sanitize_tsv_field(text: str) -> str:
     return cleaned
 
 
+def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, **kwargs):
+    """Retry API call with exponential backoff on failures.
+
+    Usage: _retry_api_call(function_name, arg1, arg2, max_retries=3, base_delay=2.0)
+    """
+    last_exception = None
+
+    for attempt in range(max_retries):
+        try:
+            return func(*args, **kwargs)
+        except Exception as e:  # Capturar todas as exceções, não só RuntimeError
+            last_exception = e
+            error_msg = str(e).lower()
+
+            # Don't retry on authentication or configuration errors
+            if any(keyword in error_msg for keyword in ["api key", "autenticação", "configuração"]):
+                raise e
+
+            # Check if this is a network-related error that should be retried
+            is_network_error = (
+                # Check error message for network-related keywords
+                any(keyword in error_msg for keyword in [
+                    "connection abort", "software caused connection abort", "errno 53",
+                    "timeout", "timed out", "servidor", "rede", "http error", "url error",
+                    "connection", "connection reset", "broken pipe", "network", "unreachable",
+                    "urlopen error", "connection failed"
+                ]) or
+                # Check exception type directly
+                isinstance(e, (TimeoutError, OSError, ConnectionError)) or
+                # Check if it's a wrapped network error
+                (hasattr(e, '__cause__') and isinstance(e.__cause__, (TimeoutError, OSError, ConnectionError)))
+            )
+
+            if is_network_error:
+                if attempt < max_retries - 1:  # Don't sleep on last attempt
+                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    print(f"⚠️  Tentativa {attempt + 1}/{max_retries} falhou ({type(e).__name__}): {str(e)[:100]}...", file=sys.stderr)
+                    print(f"⏳ Aguardando {delay:.1f}s antes da próxima tentativa...", file=sys.stderr)
+                    time.sleep(delay)
+                    continue
+                else:
+                    print(f"❌ Todas as {max_retries} tentativas falharam. Último erro: {e}", file=sys.stderr)
+            else:
+                # For non-network errors, don't retry
+                raise e
+
+    # If we get here, all retries failed
+    raise last_exception
+
+
 def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     """Call DeepSeek chat API to extract list ["palavra: tradução", ...] for zht_text.
 
@@ -319,11 +370,11 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
       - DEEPSEEK_API_BASE (default: https://api.deepseek.com)
       - DEEPSEEK_MODEL (default: deepseek-chat)
 
-    Returns the raw model string on success, or 'N/A' on failure/unavailable.
+    Returns the raw model string on success, raises RuntimeError on network errors for retry.
     """
     api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        return "N/A"
+    if not api_key or api_key.strip() == "":
+        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente")
 
     api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -368,19 +419,34 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
                 pass
             # Fallback: sanitize raw content
             return _sanitize_tsv_field(content)
-    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError):
-        return "N/A"
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
+        # Enhanced error handling with more specific messages for pairs extraction
+        if isinstance(exc, urlerror.HTTPError):
+            if exc.code == 401:
+                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
+            elif exc.code == 429:
+                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
+            elif exc.code >= 500:
+                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
+        elif isinstance(exc, TimeoutError):
+            raise RuntimeError(f"Timeout na extração de pares DeepSeek API ({timeout_sec}s). Possível problema de rede ou servidor sobrecarregado.")
+        elif isinstance(exc, OSError) and getattr(exc, 'errno', None) == 53:
+            raise RuntimeError("Conexão abortada na extração de pares DeepSeek API (Errno 53). Servidor pode ter fechado a conexão.")
+        elif "connection abort" in str(exc).lower() or "software caused connection abort" in str(exc).lower():
+            raise RuntimeError("Conexão abortada na extração de pares DeepSeek API. Possível problema de rede ou servidor indisponível.")
+        else:
+            raise RuntimeError(f"Falha ao extrair pares via DeepSeek: {exc}")
 
 
-def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 20.0) -> str:
+def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 30.0) -> str:
     """Translate 'text' from source_lang ("pt" or "es") to Traditional Chinese (zht).
 
     On any failure (missing API key, HTTP/timeout, or empty response), raises
     RuntimeError to stop the pipeline, avoiding writing untranslated content.
     """
     api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY não encontrada no ambiente para tradução via LLM")
+    if not api_key or api_key.strip() == "":
+        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
 
     api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -421,8 +487,23 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
             if not content:
                 raise RuntimeError("DeepSeek retornou resposta vazia para tradução")
             return content.strip()
-    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError) as exc:
-        raise RuntimeError(f"Falha ao chamar DeepSeek para tradução: {exc}")
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
+        # Enhanced error handling with more specific messages
+        if isinstance(exc, urlerror.HTTPError):
+            if exc.code == 401:
+                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
+            elif exc.code == 429:
+                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
+            elif exc.code >= 500:
+                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
+        elif isinstance(exc, TimeoutError):
+            raise RuntimeError(f"Timeout na conexão com DeepSeek API ({timeout_sec}s). Possível problema de rede ou servidor sobrecarregado.")
+        elif isinstance(exc, OSError) and getattr(exc, 'errno', None) == 53:
+            raise RuntimeError("Conexão abortada com DeepSeek API (Errno 53). Servidor pode ter fechado a conexão.")
+        elif "connection abort" in str(exc).lower() or "software caused connection abort" in str(exc).lower():
+            raise RuntimeError("Conexão abortada com DeepSeek API. Possível problema de rede ou servidor indisponível.")
+        else:
+            raise RuntimeError(f"Falha ao chamar DeepSeek para tradução: {exc}")
 
 
 def _determine_zht_secs_output_from(source_secs: Path) -> Path:
@@ -529,7 +610,10 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
             _print_progress(g_idx, total, prefix="Gerando zht via LLM")
             continue
 
-        translated = _call_deepseek_translate_to_zht(merged_text, source_lang)
+        translated = _retry_api_call(_call_deepseek_translate_to_zht, merged_text, source_lang)
+
+        # Small pause between API calls to avoid overwhelming the server
+        time.sleep(0.1)  # 100ms pause
 
         # Keep only the first node for this begin; remove the rest
         for extra in dest_candidates[1:]:
@@ -758,7 +842,7 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
             if zht_norm in pairs_cache:
                 pairs_str = pairs_cache[zht_norm]
             else:
-                pairs_str = _call_deepseek_pairs(zht_norm)
+                pairs_str = _retry_api_call(_call_deepseek_pairs, zht_norm)
                 pairs_cache[zht_norm] = pairs_str
             
             # Use tab-separated fields for safety; insert end time after begin time
@@ -913,9 +997,10 @@ def main(argv: list[str]) -> int:
         if not assets_root.exists() or not assets_root.is_dir():
             print(f"Erro: diretório 'assets' não encontrado: {assets_root}", file=sys.stderr)
             return 1
-        subdirs = sorted([p for p in assets_root.iterdir() if p.is_dir()], key=lambda p: p.name.lower())
+        # Filter out directories ending with '_sub'
+        subdirs = sorted([p for p in assets_root.iterdir() if p.is_dir() and not p.name.endswith('_sub')], key=lambda p: p.name.lower())
         if not subdirs:
-            print("Nenhum subdiretório encontrado em 'assets'", file=sys.stderr)
+            print("Nenhum subdiretório encontrado em 'assets' (ignorando diretórios *_sub)", file=sys.stderr)
             return 1
         overall_rc = 0
         for sub in subdirs:

@@ -815,7 +815,7 @@ def get_optimal_encoding_settings(video_info: dict) -> dict:
     else:
         # Use H.264 hardware encoder
         video_codec = 'h264_videotoolbox'
-        preset = 'medium'  # Better quality than 'fast'
+        preset = 'slow'  # Maximum quality for subtitle rendering
     
     # Calculate optimal settings
     is_4k = width >= 3840 or height >= 2160
@@ -824,25 +824,25 @@ def get_optimal_encoding_settings(video_info: dict) -> dict:
     if bit_rate > 0:
         # Use CRF for better quality control instead of fixed bitrate
         if is_4k:
-            crf = 18  # Very high quality for 4K
-            max_bitrate = max(15000, bit_rate // 1000)  # At least 15Mbps for 4K
+            crf = 16  # High quality for 4K with subtitles
+            max_bitrate = max(20000, bit_rate // 1000)  # At least 20Mbps for 4K
         elif is_hd:
-            crf = 20  # High quality for HD
-            max_bitrate = max(8000, bit_rate // 1000)   # At least 8Mbps for HD
+            crf = 17  # High quality for HD with subtitles
+            max_bitrate = max(12000, bit_rate // 1000)   # At least 12Mbps for HD
         else:
-            crf = 22  # Good quality for SD
-            max_bitrate = max(3000, bit_rate // 1000)   # At least 3Mbps for SD
+            crf = 19  # Good quality for SD with subtitles
+            max_bitrate = max(5000, bit_rate // 1000)   # At least 5Mbps for SD
     else:
         # Fallback values
         if is_4k:
-            crf = 18
-            max_bitrate = 15000
+            crf = 16
+            max_bitrate = 20000
         elif is_hd:
-            crf = 20
-            max_bitrate = 8000
+            crf = 17
+            max_bitrate = 12000
         else:
-            crf = 22
-            max_bitrate = 3000
+            crf = 19
+            max_bitrate = 5000
     
     return {
         'video_codec': video_codec,
@@ -993,7 +993,7 @@ def apply_subtitles_in_batches(input_video: Path, subtitles: Dict[float, Tuple[s
         cleanup_existing_batch_files(output_video)
         
         # Use moderate batch size to balance performance and avoid overlap issues
-        batch_size = 5  # Balanced: Not too big to cause overlap, not too small to be inefficient
+        batch_size = 1  # Balanced: Not too big to cause overlap, not too small to be inefficient
         print(f"   📦 Usando {batch_size} legendas por lote (otimizado para evitar sobreposição)")
         subtitle_times = sorted(subtitles.keys())
         batches = [subtitle_times[i:i + batch_size] for i in range(0, len(subtitle_times), batch_size)]

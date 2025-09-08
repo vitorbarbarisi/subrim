@@ -161,8 +161,20 @@ def split_video(video_path: Path) -> None:
     # Ler o arquivo base.txt
     subtitles = parse_base_file(base_file)
     if not subtitles:
-        print("   ❌ Nenhuma legenda encontrada no arquivo base")
-        return
+        print("   ⚠️  Arquivo base.txt vazio - fazendo cópia do vídeo original com tag _processed")
+
+        # Criar caminho para o vídeo processado
+        processed_video_path = video_path.parent / f"{video_path.stem}_processed{video_path.suffix}"
+
+        # Copiar o vídeo original para o arquivo processado
+        try:
+            shutil.copy2(video_path, processed_video_path)
+            print(f"   ✅ Vídeo copiado com sucesso: {processed_video_path.name}")
+            print(f"\n🎉 Processamento concluído! Vídeo copiado como {processed_video_path.name}")
+            return
+        except Exception as e:
+            print(f"   ❌ Erro ao copiar vídeo: {e}")
+            return
 
     # Obter duração do vídeo
     video_width, video_height, video_duration = get_video_info(video_path)
