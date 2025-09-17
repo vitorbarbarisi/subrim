@@ -274,24 +274,42 @@ def split_subtitles(directory_name: str) -> None:
     # Sort subtitles by time
     sorted_subtitles = sorted(subtitles.items())
 
-    # Process each video chunk
-    for i, video_chunk in enumerate(video_chunks, 1):
-        print(f"\n   🔄 Processando chunk {i:03d}/{len(video_chunks):03d}")
-        print(f"   📁 Vídeo: {video_chunk.name}")
+    # Calculate cumulative durations for all chunks to get correct time offsets
+    print("   📊 Calculando durações cumulativas dos chunks...")
+    chunk_info = []
+    total_duration = 0.0
 
-        # Get video duration
+    for i, video_chunk in enumerate(video_chunks, 1):
         video_duration = get_video_duration(video_chunk)
         if video_duration <= 0:
             print(f"   ⚠️  Não foi possível obter duração do vídeo {video_chunk.name}, pulando...")
             continue
 
+        chunk_start_time = total_duration
+        chunk_end_time = total_duration + video_duration
+
+        chunk_info.append({
+            'chunk': video_chunk,
+            'start_time': chunk_start_time,
+            'end_time': chunk_end_time,
+            'duration': video_duration
+        })
+
+        print(f"   📊 Chunk {i:03d}: {chunk_start_time:.1f}s - {chunk_end_time:.1f}s ({video_duration:.1f}s)")
+        total_duration += video_duration
+
+    print(f"   📊 Duração total calculada: {total_duration:.1f}s")
+
+    # Process each video chunk
+    for i, chunk_data in enumerate(chunk_info, 1):
+        video_chunk = chunk_data['chunk']
+        chunk_start_time = chunk_data['start_time']
+        chunk_end_time = chunk_data['end_time']
+        video_duration = chunk_data['duration']
+
+        print(f"\n   🔄 Processando chunk {i:03d}/{len(chunk_info):03d}")
+        print(f"   📁 Vídeo: {video_chunk.name}")
         print(f"   ⏱️  Duração: {video_duration:.1f}s")
-
-        # Calculate time offset for this chunk (based on chunk number)
-        # Assuming each chunk is approximately 30 seconds
-        chunk_start_time = (i - 1) * 30.0
-        chunk_end_time = chunk_start_time + video_duration
-
         print(f"   📊 Tempo relativo: {chunk_start_time:.1f}s - {chunk_end_time:.1f}s")
 
         # Find subtitles that belong to this chunk
