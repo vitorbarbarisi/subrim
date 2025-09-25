@@ -459,15 +459,23 @@ def _call_maritaca_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
             content = obj.get("choices", [{}])[0].get("message", {}).get("content")
             if not content:
                 return "N/A"
+            
+            # Clean markdown formatting if present
+            cleaned_content = content.strip()
+            if cleaned_content.startswith("```json") and cleaned_content.endswith("```"):
+                cleaned_content = cleaned_content[7:-3].strip()
+            elif cleaned_content.startswith("```") and cleaned_content.endswith("```"):
+                cleaned_content = cleaned_content[3:-3].strip()
+            
             # Try to strictly keep only a JSON array of strings
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(cleaned_content)
                 if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
                     return json.dumps(parsed, ensure_ascii=False)
             except Exception:
                 pass
             # Fallback: sanitize raw content
-            return _sanitize_tsv_field(content)
+            return _sanitize_tsv_field(cleaned_content)
     except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
         # Enhanced error handling with more specific messages for pairs extraction
         if isinstance(exc, urlerror.HTTPError):
