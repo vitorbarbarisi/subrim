@@ -25,7 +25,7 @@ and the matched translation from the other language (pt, es ou eng). The file is
 "<zht_secs_stem>_base.txt" and saved alongside the zht_secs file.
 
 AI API Support:
-- Maritaca AI (sabiazinho-3 model): Set MARITACA_API_KEY environment variable
+- Maritaca AI (sabia-3 model): Set MARITACA_API_KEY environment variable
 - DeepSeek API: Set DEEPSEEK_API_KEY environment variable
 - The processor automatically chooses Maritaca AI if MARITACA_API_KEY is available,
   otherwise falls back to DeepSeek API.
@@ -414,9 +414,10 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
 def _call_maritaca_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     """Call Maritaca AI API to extract list ["palavra: tradução", ...] for zht_text.
 
+    Uses OpenAI-compatible API format as per Maritaca AI documentation.
     Reads configuration from env vars:
       - MARITACA_API_KEY (required to enable calls)
-      - MARITACA_MODEL (default: sabiazinho-3)
+      - MARITACA_MODEL (default: sabia-3)
 
     Returns the raw model string on success, raises RuntimeError on network errors for retry.
     """
@@ -424,8 +425,8 @@ def _call_maritaca_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     if not api_key or api_key.strip() == "":
         raise RuntimeError("MARITACA_API_KEY não encontrada ou vazia no ambiente")
 
-    model = os.getenv("MARITACA_MODEL", "sabiazinho-3")
-    url = "https://api.maritaca.ai/chat/completions"
+    model = os.getenv("MARITACA_MODEL", "sabia-3")
+    url = "https://chat.maritaca.ai/api/chat/completions"
 
     prompt = (
         "Você é um extrator. Dada a frase em chinês tradicional (zht), responda EXTRAINDO "
@@ -443,6 +444,7 @@ def _call_maritaca_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
+        "max_tokens": 8000
     }
     data = json.dumps(body).encode("utf-8")
 
@@ -564,6 +566,7 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
 def _call_maritaca_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 30.0) -> str:
     """Translate 'text' from source_lang ("pt" or "es") to Traditional Chinese (zht) using Maritaca AI.
 
+    Uses OpenAI-compatible API format as per Maritaca AI documentation.
     On any failure (missing API key, HTTP/timeout, or empty response), raises
     RuntimeError to stop the pipeline, avoiding writing untranslated content.
     """
@@ -571,8 +574,8 @@ def _call_maritaca_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
     if not api_key or api_key.strip() == "":
         raise RuntimeError("MARITACA_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
 
-    model = os.getenv("MARITACA_MODEL", "sabiazinho-3")
-    url = "https://api.maritaca.ai/chat/completions"
+    model = os.getenv("MARITACA_MODEL", "sabia-3")
+    url = "https://chat.maritaca.ai/api/chat/completions"
 
     sl = source_lang.lower()
     if sl.startswith("pt"):
@@ -594,6 +597,7 @@ def _call_maritaca_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
             {"role": "user", "content": prompt},
         ],
         "temperature": 0.2,
+        "max_tokens": 8000
     }
     data = json.dumps(body).encode("utf-8")
 
