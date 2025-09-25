@@ -94,6 +94,33 @@ def capture_video_frame(video_path, timestamp_seconds, output_path, translation_
         return False
 
 
+def extract_pinyin(word, pairs_column):
+    """
+    Extrai o pinyin de uma palavra chinesa da coluna pairs.
+    
+    Args:
+        word (str): Palavra chinesa
+        pairs_column (str): Coluna pairs com formato ["palavra (pinyin): tradução"]
+        
+    Returns:
+        str: Pinyin da palavra ou palavra original se não encontrado
+    """
+    import re
+    
+    # Encontra todas as palavras entre colchetes e aspas
+    word_matches = re.findall(r'"([^"]+)"', pairs_column)
+    
+    for match in word_matches:
+        # Extrai apenas a parte da palavra (antes do espaço e parênteses)
+        word_part = match.split()[0] if match.split() else match
+        if word_part == word:
+            # Procura por pinyin entre parênteses
+            pinyin_match = re.search(r'\(([^)]+)\)', match)
+            if pinyin_match:
+                return pinyin_match.group(1)
+    
+    return word  # Retorna a palavra original se não encontrar pinyin
+
 def add_translation_text(frame, translation_text):
     """
     Adiciona texto de tradução na parte superior do frame.
@@ -301,9 +328,13 @@ def main():
                                 # Extrai a tradução da última coluna
                                 translation = columns[-1] if len(columns) > 5 else "N/A"
                                 
+                                # Extrai o pinyin da palavra
+                                pinyin = extract_pinyin(word, pairs_column)
+                                
                                 matching_lines.append({
                                     'line_num': line_num,
                                     'word': word,
+                                    'pinyin': pinyin,
                                     'word_index': word_index,
                                     'begin': begin_time,
                                     'end': end_time,
@@ -328,7 +359,9 @@ def main():
                         
                         # Captura screenshot
                         asset_name = base_file.stem.replace('_base', '')
-                        screenshot_name = f"{match['word_index'] + 1}_line{match['line_num']:04d}_{asset_name}.png"
+                        # Inclui o pinyin no nome do arquivo
+                        pinyin_clean = match['pinyin'].replace(' ', '_').replace(':', '').replace('(', '').replace(')', '')
+                        screenshot_name = f"{match['word_index'] + 1}_{pinyin_clean}_line{match['line_num']:04d}_{asset_name}.png"
                         screenshot_path = screenshots_dir / screenshot_name
                         
                         # Screenshot com tradução sobreposta
