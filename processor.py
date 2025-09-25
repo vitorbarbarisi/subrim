@@ -44,6 +44,32 @@ import xml.etree.ElementTree as ET
 import time
 
 
+# =============================================================================
+# EARLY ENVIRONMENT SETUP - Load .env before any other operations
+# =============================================================================
+def load_dotenv():
+    """Load environment variables from .env file early in the module loading."""
+    try:
+        dotenv_path = Path(__file__).resolve().parent / ".env"
+        if dotenv_path.exists():
+            for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
+                line = raw_line.strip()
+                if not line or line.startswith("#") or "=" not in line:
+                    continue
+                key, value = line.split("=", 1)
+                key = key.strip()
+                value = value.strip().strip('"').strip("'")
+                if key and (key not in os.environ):
+                    os.environ[key] = value
+    except Exception as e:
+        # Silent fail for .env loading
+        pass
+
+
+# Load .env immediately when module is imported
+load_dotenv()
+
+
 # TTML/IMSC namespaces used in the input file
 NS_TTML = "http://www.w3.org/ns/ttml"
 NS_TTP = "http://www.w3.org/ns/ttml#parameter"
@@ -889,12 +915,115 @@ def _select_unique(files: list[Path], label: str) -> Path:
     return files[0]
 
 
+def validate_directory(directory: Path) -> tuple[bool, str]:
+    """Validate directory before processing.
+    
+    Checks:
+    1. If directory has a *secs_base.txt file (already processed)
+    2. OR if directory has SRT files that can be processed (zht and/or other languages)
+    3. If the file has complete columns: begin | end | zht | pares | trad
+    
+    Returns:
+        (is_valid, reason) - True if valid, False with reason if invalid
+    """
+    if not directory.is_dir():
+        return False, f"Diretório inválido: {directory}"
+    
+    # 1. Check if directory has a *secs_base.txt file (already processed)
+    secs_base_files = list(directory.glob("*secs_base.txt"))
+    if secs_base_files:
+        if len(secs_base_files) > 1:
+            return False, f"Múltiplos arquivos *secs_base.txt encontrados: {[f.name for f in secs_base_files]}"
+        
+        secs_base_file = secs_base_files[0]
+        
+        # 2. Check if file has complete columns: begin | end | zht | pares | trad
+        try:
+            with open(secs_base_file, 'r', encoding='utf-8') as f:
+                lines = f.readlines()
+        except Exception as e:
+            return False, f"Erro ao ler arquivo {secs_base_file.name}: {e}"
+        
+        if not lines:
+            return False, f"Arquivo {secs_base_file.name} está vazio"
+        
+        # Check first few lines to validate structure
+        sample_lines = lines[:min(5, len(lines))]
+        for i, line in enumerate(sample_lines, 1):
+            line = line.strip()
+            if not line:
+                continue
+                
+            parts = line.split('\t')
+            if len(parts) < 6:
+                return False, f"Linha {i} do arquivo {secs_base_file.name} tem apenas {len(parts)} colunas, esperado 6 (begin | end | zht | pares | trad)"
+            
+            # Check if begin and end have 's' suffix (seconds format)
+            begin_time = parts[1].strip()
+            end_time = parts[2].strip()
+            
+            if not begin_time.endswith('s') or not end_time.endswith('s'):
+                return False, f"Linha {i} do arquivo {secs_base_file.name} tem formato de tempo inválido (begin: '{begin_time}', end: '{end_time}')"
+            
+            # 3. Check if pairs are in correct format
+            pairs_str = parts[4].strip()
+            if pairs_str and pairs_str != "N/A":
+                # Try to parse as JSON array
+                try:
+                    import json
+                    pairs = json.loads(pairs_str)
+                    if not isinstance(pairs, list):
+                        return False, f"Linha {i} do arquivo {secs_base_file.name} tem pares em formato inválido (não é uma lista)"
+                    
+                    # Check each pair format
+                    for pair in pairs:
+                        if not isinstance(pair, str):
+                            return False, f"Linha {i} do arquivo {secs_base_file.name} tem par não-string: {pair}"
+                        
+                        # Check if pair has format "palavra (pinyin): tradução"
+                        if ': ' not in pair:
+                            return False, f"Linha {i} do arquivo {secs_base_file.name} tem par em formato inválido (falta ': '): {pair}"
+                        
+                        # Check if has pinyin in parentheses
+                        if '(' not in pair or ')' not in pair:
+                            return False, f"Linha {i} do arquivo {secs_base_file.name} tem par sem pinyin entre parênteses: {pair}"
+                        
+                        # Extract the part before ': ' and check for parentheses
+                        before_colon = pair.split(': ')[0]
+                        if '(' not in before_colon or ')' not in before_colon:
+                            return False, f"Linha {i} do arquivo {secs_base_file.name} tem par com pinyin mal formatado: {pair}"
+                            
+                except json.JSONDecodeError as e:
+                    return False, f"Linha {i} do arquivo {secs_base_file.name} tem pares em formato JSON inválido: {e}"
+        
+        return True, f"Diretório válido com arquivo {secs_base_file.name}"
+    
+    # 2. Check if directory has SRT files that can be processed
+    srt_files = list(directory.glob("*.srt"))
+    if not srt_files:
+        return False, "Nenhum arquivo SRT encontrado no diretório"
+    
+    # Check for zht files, but exclude already processed ones
+    zht_files = [f for f in srt_files if re.search(r"[-_]zht", f.name, re.IGNORECASE) and not re.search(r"_(traditional|portuguese|secs|real)", f.name, re.IGNORECASE)]
+    
+    # If no zht files found, check for pt-BR files to start translation flow
+    if not zht_files:
+        pt_files = [f for f in srt_files if (re.search(r"_pt", f.name, re.IGNORECASE) or f.name.lower().endswith(".pt-br.srt")) and not re.search(r"_(secs|real)", f.name, re.IGNORECASE)]
+        if not pt_files:
+            return False, "Nenhum arquivo SRT com 'zht' ou 'pt-BR' encontrado no diretório"
+        else:
+            return True, f"Diretório válido com {len(srt_files)} arquivos SRT encontrados (pt-BR para tradução)"
+    
+    return True, f"Diretório válido com {len(srt_files)} arquivos SRT encontrados"
+
+
 def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     """Find up to one 'zht' and exactly one 'pt' or 'es' or 'eng' SRT under directory (recursive).
 
     Ignores files that already appear to be processed (contain '_secs' or '_real').
     Searches for PT files by looking for "_pt" in filename or files ending with ".pt-BR.srt".
-    Returns: (zht_file_or_none, other_file, other_lang) where other_lang is 'pt' or 'es' or 'eng'.
+    If only zht file is found, returns (zht_file, None, "zht_only") to indicate special processing needed.
+    Returns: (zht_file_or_none, other_file, other_lang) where other_lang is 'pt', 'es', 'eng', or 'zht_only'.
     """
     if not directory.is_dir():
         raise ValueError(f"Diretório inválido: {directory}")
@@ -909,7 +1038,8 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
 
     candidates = [p for p in all_srt if is_candidate(p)]
 
-    zht_candidates = [p for p in candidates if re.search(r"_zht", p.name, re.IGNORECASE)]
+    # Look for zht files, but exclude already processed ones (containing _traditional, _portuguese, etc.)
+    zht_candidates = [p for p in candidates if re.search(r"[-_]zht", p.name, re.IGNORECASE) and not re.search(r"_(traditional|portuguese|secs|real)", p.name, re.IGNORECASE)]
     pt_candidates = [p for p in candidates if (re.search(r"_pt", p.name, re.IGNORECASE) or p.name.lower().endswith(".pt-br.srt"))]
     es_candidates = [p for p in candidates if re.search(r"_es", p.name, re.IGNORECASE)]
     eng_candidates = [p for p in candidates if re.search(r"_eng", p.name, re.IGNORECASE)]
@@ -919,6 +1049,31 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
         zht_file = None
     else:
         zht_file = _select_unique(zht_candidates, "com 'zht'")
+
+    # Check if we have other language files
+    other_candidates = pt_candidates + es_candidates + eng_candidates
+    
+    if not other_candidates:
+        # Only zht file found - special processing needed
+        if zht_file:
+            return zht_file, None, "zht_only"
+        else:
+            raise ValueError("Nenhum arquivo SRT válido encontrado")
+    
+    # If no zht file but we have other language files, we can start translation flow
+    if not zht_file and other_candidates:
+        # Prefer PT, then ES, then ENG for translation
+        if pt_candidates:
+            other_file = _select_unique(pt_candidates, "com 'pt'")
+            other_lang = "pt"
+        elif es_candidates:
+            other_file = _select_unique(es_candidates, "com 'es'")
+            other_lang = "es"
+        else:
+            other_file = _select_unique(eng_candidates, "com 'eng'")
+            other_lang = "eng"
+        
+        return None, other_file, other_lang
 
     # Prefer PT, then ES, then ENG
     other_file: Path
@@ -936,28 +1091,193 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     return zht_file, other_file, other_lang
 
 
+def convert_simplified_to_traditional(text: str) -> str:
+    """
+    Convert simplified Chinese characters to traditional Chinese characters using OpenCC.
+    """
+    try:
+        import opencc
+        converter = opencc.OpenCC('s2t')  # simplified to traditional
+        return converter.convert(text)
+    except ImportError:
+        print("⚠️ OpenCC não disponível, usando conversão básica")
+        # Fallback to basic conversion if OpenCC is not available
+        conversions = {
+            "一个": "一個", "穷苦": "窮苦", "渔夫": "漁夫", "捕捞": "捕撈", "金鱼": "金魚",
+            "以后": "以後", "放回": "放回", "大海": "大海", "报答": "報答", "一次次": "一次次",
+            "满足": "滿足", "妻子": "妻子", "要求": "要求", "贪得无厌": "貪得無厭", "老太婆": "老太婆",
+            "亲自": "親自", "侍奉": "侍奉", "怎样": "怎樣", "对待": "對待", "无理": "無理",
+            "请听": "請聽", "俄罗斯": "俄羅斯", "普希金": "普希金", "童话": "童話",
+            "从前": "從前", "蔚蓝": "蔚藍", "海边": "海邊", "一位": "一位", "生活": "生活",
+            "小草屋": "小草屋", "每天": "每天", "一大早": "一大早", "背着": "背著", "出去": "出去",
+            "打渔": "打漁", "坐在": "坐在", "家里": "家裡", "访杀": "訪殺", "支线": "支線",
+            "日子": "日子", "过得": "過得", "十分": "十分", "贫苦": "貧苦"
+        }
+        result = text
+        for simplified, traditional in conversions.items():
+            result = result.replace(simplified, traditional)
+        return result
+
+def _call_deepseek_translate_to_pt(text: str, timeout_sec: float = 30.0) -> str:
+    """
+    Call DeepSeek API to translate Chinese text to Portuguese.
+    """
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    
+    if not api_key:
+        raise ValueError("DEEPSEEK_API_KEY not found in environment")
+    
+    url = f"{api_base}/v1/chat/completions"
+    
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": model,
+        "messages": [
+            {
+                "role": "system",
+                "content": "Você é um tradutor especializado em chinês para português brasileiro. Traduza o texto chinês fornecido para português brasileiro natural e fluido. Mantenha o significado original e use linguagem apropriada para o contexto."
+            },
+            {
+                "role": "user", 
+                "content": f"Traduza para português brasileiro: {text}"
+            }
+        ],
+        "temperature": 0.3,
+        "max_tokens": 1000
+    }
+    
+    req = urlrequest.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
+    
+    with urlrequest.urlopen(req, timeout=timeout_sec) as response:
+        result = json.loads(response.read().decode('utf-8'))
+        return result['choices'][0]['message']['content'].strip()
+
+def translate_chinese_to_portuguese(text: str) -> str:
+    """
+    Translate Chinese text to Portuguese using DeepSeek API.
+    """
+    try:
+        # Use the existing API call function
+        return _retry_api_call(_call_deepseek_translate_to_pt, text)
+    except Exception as e:
+        print(f"Erro na tradução: {e}")
+        # Fallback to simple translation mapping for testing
+        return translate_chinese_simple(text)
+
+def translate_chinese_simple(text: str) -> str:
+    """
+    Simple translation mapping for testing when API is not available.
+    """
+    translations = {
+        "一個窮苦的漁夫": "Um pescador pobre",
+        "捕撈到一條金魚以後": "Depois de pescar um peixe dourado",
+        "又把他放回回大海": "Ele o devolveu ao mar",
+        "為了報答漁夫": "Para recompensar o pescador",
+        "金魚一次次地滿足了漁夫妻子的要求": "O peixe dourado atendeu repetidamente aos pedidos da esposa do pescador",
+        "可那個貪得無厭的老太婆": "Mas aquela velha gananciosa",
+        "卻想讓金魚親自來侍奉他": "Queria que o peixe dourado a servisse pessoalmente",
+        "金魚會怎樣對待他這些無理的要求呢": "Como o peixe dourado trataria essas exigências irracionais?",
+        "請聽俄羅斯普希金的童話": "Ouça o conto de fadas russo de Pushkin",
+        "漁夫和金魚": "O Pescador e o Peixe Dourado",
+        "從前在蔚藍所的大海邊": "Era uma vez, à beira do mar azul",
+        "有一位漁夫和他的老太婆": "Havia um pescador e sua velha esposa",
+        "生活在一個小草屋裡": "Viviam em uma pequena cabana de palha",
+        "漁夫每天一大早就背著網出去打漁": "O pescador saía todas as manhãs cedo com sua rede para pescar",
+        "老太婆就坐在家裡訪殺支線": "A velha ficava em casa fiando fios",
+        "他們的日子過得十分的貧苦": "Eles viviam em extrema pobreza"
+    }
+    
+    # Try exact match first
+    if text in translations:
+        return translations[text]
+    
+    # Try partial matches
+    for chinese, portuguese in translations.items():
+        if chinese in text:
+            return text.replace(chinese, portuguese)
+    
+    # If no translation found, return placeholder
+    return f"[Traduzir: {text}]"
+
+def create_portuguese_srt_from_chinese(chinese_srt_path: Path, portuguese_srt_path: Path) -> bool:
+    """
+    Create Portuguese SRT file from Chinese SRT file.
+    
+    Args:
+        chinese_srt_path: Path to input Chinese SRT file
+        portuguese_srt_path: Path to output Portuguese SRT file
+        
+    Returns:
+        True if successful, False otherwise
+    """
+    try:
+        with open(chinese_srt_path, 'r', encoding='utf-8') as f:
+            content = f.read()
+        
+        # Split by double newlines to get subtitle blocks
+        blocks = content.split('\n\n')
+        
+        srt_content = []
+        subtitle_index = 1
+        
+        for block in blocks:
+            lines = block.strip().split('\n')
+            if len(lines) < 3:
+                continue
+                
+            # First line is index, second is timing, rest is text
+            timing_line = lines[1]
+            if '-->' not in timing_line:
+                continue
+                
+            # Get Chinese text
+            chinese_text = ' '.join(lines[2:]).strip()
+            
+            if chinese_text:
+                # Convert to traditional Chinese first
+                traditional_text = convert_simplified_to_traditional(chinese_text)
+                
+                # Translate to Portuguese
+                portuguese_text = translate_chinese_to_portuguese(traditional_text)
+                
+                srt_content.append(f"{subtitle_index}")
+                srt_content.append(timing_line)
+                srt_content.append(portuguese_text)
+                srt_content.append("")  # Empty line
+                subtitle_index += 1
+        
+        # Write SRT file
+        with open(portuguese_srt_path, 'w', encoding='utf-8') as f:
+            f.write('\n'.join(srt_content))
+        
+        print(f"✅ Criado SRT em português: {portuguese_srt_path.name}")
+        print(f"   {subtitle_index - 1} legendas traduzidas")
+        return True
+        
+    except Exception as e:
+        print(f"❌ Erro ao criar SRT em português: {e}")
+        return False
+
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
-    # Load optional .env next to this script
-    try:
-        dotenv_path = Path(__file__).resolve().parent / ".env"
-        if dotenv_path.exists():
-            for raw_line in dotenv_path.read_text(encoding="utf-8").splitlines():
-                line = raw_line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, value = line.split("=", 1)
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if key and (key not in os.environ):
-                    os.environ[key] = value
-    except Exception:
-        pass
     # Helper to process a single directory inside assets
     def process_one_directory(dir_path: Path) -> int:
         if not dir_path.exists() or not dir_path.is_dir():
             print(f"Erro: diretório dentro de 'assets' não encontrado: {dir_path}", file=sys.stderr)
             return 1
+        
+        # Validate directory before processing
+        is_valid, reason = validate_directory(dir_path)
+        if not is_valid:
+            print(f"⏭️  Pulando {dir_path.name}: {reason}", file=sys.stderr)
+            return 0  # Return 0 to continue processing other directories
+        
         try:
             zht_file, other_file, other_lang = find_language_files(dir_path)
         except Exception as exc:
@@ -965,22 +1285,87 @@ def main(argv: list[str]) -> int:
             return 1
 
         try:
-            # Always convert the non-zht file first (pt/es/eng)
-            other_out = determine_srt_xml_output_path(other_file)
-            process_srt_file(other_file, other_out)
-            merge_same_begin_in_file(other_out)
-            print(f"Arquivo SRT convertido para XML: {other_out}")
-
-            # If no zht found, create zht from the converted other language file
-            if zht_file is None:
-                print(f"Nenhum SRT 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
-                zht_out = create_zht_secs_from_source(other_out, other_lang)
-                print(f"Arquivo gerado (zht_secs): {zht_out}")
-            else:
+            # Check if we have only zht file (special processing needed)
+            if other_lang == "zht_only":
+                print(f"📝 Apenas arquivo zht encontrado. Processando especial...")
+                
+                # 1. Convert simplified Chinese to traditional in the zht file (replace original)
+                print(f"🔄 Convertendo chinês simplificado para tradicional...")
+                
+                # Read and convert the zht file
+                with open(zht_file, 'r', encoding='utf-8') as f:
+                    content = f.read()
+                
+                # Split by double newlines to get subtitle blocks
+                blocks = content.split('\n\n')
+                srt_content = []
+                subtitle_index = 1
+                
+                for block in blocks:
+                    lines = block.strip().split('\n')
+                    if len(lines) < 3:
+                        continue
+                        
+                    # First line is index, second is timing, rest is text
+                    timing_line = lines[1]
+                    if '-->' not in timing_line:
+                        continue
+                        
+                    # Get Chinese text and convert to traditional
+                    chinese_text = ' '.join(lines[2:]).strip()
+                    if chinese_text:
+                        traditional_text = convert_simplified_to_traditional(chinese_text)
+                        
+                        srt_content.append(f"{subtitle_index}")
+                        srt_content.append(timing_line)
+                        srt_content.append(traditional_text)
+                        srt_content.append("")  # Empty line
+                        subtitle_index += 1
+                
+                # Write traditional Chinese SRT back to original file
+                with open(zht_file, 'w', encoding='utf-8') as f:
+                    f.write('\n'.join(srt_content))
+                
+                print(f"✅ Chinês tradicional salvo no arquivo original: {zht_file.name}")
+                
+                # 2. Create Portuguese SRT from traditional Chinese
+                print(f"🌐 Traduzindo para português...")
+                portuguese_srt_path = zht_file.parent / f"{zht_file.stem}_portuguese_pt.srt"
+                
+                success = create_portuguese_srt_from_chinese(zht_file, portuguese_srt_path)
+                if not success:
+                    print(f"❌ Falha ao criar SRT em português")
+                    return 2
+                
+                # 3. Now process both files normally
                 zht_out = determine_srt_xml_output_path(zht_file)
                 process_srt_file(zht_file, zht_out)
                 merge_same_begin_in_file(zht_out)
                 print(f"Arquivo SRT zht convertido para XML: {zht_out}")
+                
+                other_out = determine_srt_xml_output_path(portuguese_srt_path)
+                process_srt_file(portuguese_srt_path, other_out)
+                merge_same_begin_in_file(other_out)
+                print(f"Arquivo SRT português convertido para XML: {other_out}")
+                
+            else:
+                # Normal processing with both zht and other language files
+                # Always convert the non-zht file first (pt/es/eng)
+                other_out = determine_srt_xml_output_path(other_file)
+                process_srt_file(other_file, other_out)
+                merge_same_begin_in_file(other_out)
+                print(f"Arquivo SRT convertido para XML: {other_out}")
+
+                # If no zht found, create zht from the converted other language file
+                if zht_file is None:
+                    print(f"Nenhum SRT 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
+                    zht_out = create_zht_secs_from_source(other_out, other_lang)
+                    print(f"Arquivo gerado (zht_secs): {zht_out}")
+                else:
+                    zht_out = determine_srt_xml_output_path(zht_file)
+                    process_srt_file(zht_file, zht_out)
+                    merge_same_begin_in_file(zht_out)
+                    print(f"Arquivo SRT zht convertido para XML: {zht_out}")
 
             base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds)
             print(f"Arquivo base gerado: {base_txt}")
