@@ -321,16 +321,14 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
         # Encontrar o melhor ponto de corte para este chunk
         chunk_end = find_best_chunk_end(current_start, target_chunk_duration, video_duration, subtitles, sorted_times)
 
-        # Adicionar todas as legendas que têm alguma parte dentro deste chunk
+        # Adicionar todas as legendas que começam dentro deste chunk
         chunk_subs = {}
         for sub_time in sorted_times:
             _, _, _, _, duration = subtitles[sub_time]
             sub_end_time = sub_time + duration
 
-            # Incluir legenda se:
-            # 1. Começa dentro do chunk (atual)
-            # 2. OU termina dentro do chunk (mesmo que comece antes)
-            if (current_start <= sub_time < chunk_end) or (current_start < sub_end_time <= chunk_end):
+            # Incluir legenda se começa dentro do chunk atual
+            if current_start <= sub_time < chunk_end:
                 chunk_subs[sub_time] = subtitles[sub_time]
 
         # Criar o chunk
@@ -340,9 +338,8 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
             'subtitles': chunk_subs
         })
 
-        # Próximo chunk começa com margem de segurança para evitar sobreposição
-        # Adicionar offset maior para garantir que não haja frames duplicados
-        current_start = chunk_end + 0.05  # 50ms após o fim para margem de segurança
+        # Próximo chunk começa exatamente onde o atual termina
+        current_start = chunk_end
 
         # Se chegamos ao fim do vídeo, parar
         if current_start >= video_duration:
@@ -382,12 +379,9 @@ def find_best_chunk_end(current_start: float, target_duration: float, video_dura
             _, _, _, _, duration = subtitles[sub_time]
             sub_end_time = sub_time + duration
 
-            # Se a legenda termina dentro do nosso target, considerar usar esse ponto
+            # Só considerar legendas que terminam dentro do target_end
+            # Isso garante que não haverá legendas cortadas no meio
             if sub_end_time <= target_end:
-                best_end = max(best_end, sub_end_time)
-            # Se a legenda termina depois do target, mas começa antes, precisamos
-            # incluir ela inteira no chunk
-            elif sub_time < target_end and sub_end_time > target_end:
                 best_end = max(best_end, sub_end_time)
 
     # Garantir que não ultrapassamos o limite máximo (target_end + uma tolerância)
