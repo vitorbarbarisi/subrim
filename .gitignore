@@ -18,3 +18,7 @@ assets/
 __pycache__/
 *.pyc
 *.pyo
+
+# Google OAuth credentials
+client_secret_*.json
+google_drive_config.json
