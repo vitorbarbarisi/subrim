@@ -7,6 +7,9 @@ Supports both Chinese Traditional (zht) and other languages (pt-BR, es, eng).
 
 Usage:
   python3 processor.py <folder_name_inside_assets>
+  python3 processor.py <folder_name_inside_assets> -m    # Force Maritaca AI
+  python3 processor.py <folder_name_inside_assets> -d    # Force DeepSeek
+  python3 processor.py <folder_name_inside_assets> --resume-from-seconds 220.5
   
 The processor automatically detects existing base files and resumes from the last
 processed timestamp. Manual resume is also available:
@@ -344,15 +347,32 @@ def _sanitize_tsv_field(text: str) -> str:
     return cleaned
 
 
-def _get_api_provider() -> str:
-    """Determine which API provider to use based on environment variables.
+def _get_api_provider(force_provider: str | None = None) -> str:
+    """Determine which API provider to use based on environment variables or forced selection.
+    
+    Args:
+        force_provider: If provided, force use of this provider ('maritaca' or 'deepseek')
     
     Returns:
-        'maritaca' if MARITACA_API_KEY is set, 'deepseek' otherwise
+        'maritaca' or 'deepseek' based on available keys or forced selection
     """
     maritaca_key = os.getenv("MARITACA_API_KEY")
     deepseek_key = os.getenv("DEEPSEEK_API_KEY")
     
+    # If a provider is forced, validate it has the required API key
+    if force_provider:
+        if force_provider == "maritaca":
+            if not maritaca_key or not maritaca_key.strip():
+                raise RuntimeError("MARITACA_API_KEY não encontrada ou vazia no ambiente")
+            return "maritaca"
+        elif force_provider == "deepseek":
+            if not deepseek_key or not deepseek_key.strip():
+                raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente")
+            return "deepseek"
+        else:
+            raise ValueError(f"Provedor inválido: {force_provider}. Use 'maritaca' ou 'deepseek'")
+    
+    # Auto-selection based on available keys
     if maritaca_key and maritaca_key.strip():
         return "maritaca"
     elif deepseek_key and deepseek_key.strip():
@@ -738,10 +758,10 @@ def create_zht_secs_from_srt(source_srt: Path, source_lang: str) -> Path:
     process_srt_file(source_srt, xml_output)
     
     # Now create zht version from the XML
-    return create_zht_secs_from_source(xml_output, source_lang)
+    return create_zht_secs_from_source(xml_output, source_lang, None)
 
 
-def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
+def create_zht_secs_from_source(source_secs: Path, source_lang: str, force_provider: str | None = None) -> Path:
     """Create a zht_secs XML by translating each <p> text from source_lang (pt or es).
 
     - Preserves structure/timings
@@ -817,8 +837,8 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
             _print_progress(g_idx, total, prefix="Gerando zht via LLM")
             continue
 
-        # Choose API provider based on environment variables
-        provider = _get_api_provider()
+        # Choose API provider based on environment variables or forced selection
+        provider = _get_api_provider(force_provider)
         try:
             if provider == "maritaca":
                 translated = _retry_api_call(_call_maritaca_translate_to_zht, merged_text, source_lang)
@@ -942,7 +962,7 @@ def merge_same_begin_in_file(xml_path: Path) -> None:
         pass
 
 
-def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_seconds: float | None = None) -> Path:
+def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_seconds: float | None = None, force_provider: str | None = None) -> Path:
     """Create a TSV file with: index, begin, end, zht text, pairs, pt text.
 
     PT matched by time within ZHT window; pairs fetched via DeepSeek if configured.
@@ -1066,8 +1086,8 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
             if zht_norm in pairs_cache:
                 pairs_str = pairs_cache[zht_norm]
             else:
-                # Choose API provider based on environment variables
-                provider = _get_api_provider()
+                # Choose API provider based on environment variables or forced selection
+                provider = _get_api_provider(force_provider)
                 try:
                     if provider == "maritaca":
                         pairs_str = _retry_api_call(_call_maritaca_pairs, zht_norm)
@@ -1117,6 +1137,20 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         default=None,
         help="Resume LLM processing from this timestamp onwards - useful to continue interrupted runs",
     )
+    
+    # API provider selection
+    api_group = parser.add_mutually_exclusive_group()
+    api_group.add_argument(
+        "-m", "--maritaca",
+        action="store_true",
+        help="Force use of Maritaca AI API (requires MARITACA_API_KEY)"
+    )
+    api_group.add_argument(
+        "-d", "--deepseek",
+        action="store_true",
+        help="Force use of DeepSeek API (requires DEEPSEEK_API_KEY)"
+    )
+    
     return parser.parse_args(argv)
 
 
@@ -1481,6 +1515,14 @@ def create_portuguese_srt_from_chinese(chinese_srt_path: Path, portuguese_srt_pa
 
 def main(argv: list[str]) -> int:
     args = parse_args(argv)
+    
+    # Determine forced API provider from command line arguments
+    force_provider = None
+    if args.maritaca:
+        force_provider = "maritaca"
+    elif args.deepseek:
+        force_provider = "deepseek"
+    
     # Helper to process a single directory inside assets
     def process_one_directory(dir_path: Path) -> int:
         if not dir_path.exists() or not dir_path.is_dir():
@@ -1574,7 +1616,7 @@ def main(argv: list[str]) -> int:
                 # If no zht found, create zht from the converted other language file
                 if zht_file is None:
                     print(f"Nenhum SRT 'zht' encontrado. Gerando via LLM a partir de '{other_lang}'.")
-                    zht_out = create_zht_secs_from_source(other_out, other_lang)
+                    zht_out = create_zht_secs_from_source(other_out, other_lang, force_provider)
                     print(f"Arquivo gerado (zht_secs): {zht_out}")
                 else:
                     zht_out = determine_srt_xml_output_path(zht_file)
@@ -1582,7 +1624,7 @@ def main(argv: list[str]) -> int:
                     merge_same_begin_in_file(zht_out)
                     print(f"Arquivo SRT zht convertido para XML: {zht_out}")
 
-            base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds)
+            base_txt = generate_zht_base_file(zht_out, other_out, args.resume_from_seconds, force_provider)
             print(f"Arquivo base gerado: {base_txt}")
         except Exception as exc:
             print(f"Erro ao processar '{dir_path.name}': {exc}", file=sys.stderr)
