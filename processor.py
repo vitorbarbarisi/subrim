@@ -25,7 +25,7 @@ and the matched translation from the other language (pt, es ou eng). The file is
 "<zht_secs_stem>_base.txt" and saved alongside the zht_secs file.
 
 AI API Support:
-- Maritaca AI (sabia-3 model): Set MARITACA_API_KEY environment variable
+- Maritaca AI (sabiazinho-3 model): Set MARITACA_API_KEY environment variable
 - DeepSeek API: Set DEEPSEEK_API_KEY environment variable
 - The processor automatically chooses Maritaca AI if MARITACA_API_KEY is available,
   otherwise falls back to DeepSeek API.
@@ -408,6 +408,7 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
                 raise e
 
     # If we get here, all retries failed
+    print(f"❌ Todas as {max_retries} tentativas falharam. Último erro: {last_exception}")
     raise last_exception
 
 
@@ -417,7 +418,7 @@ def _call_maritaca_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     Uses OpenAI-compatible API format as per Maritaca AI documentation.
     Reads configuration from env vars:
       - MARITACA_API_KEY (required to enable calls)
-      - MARITACA_MODEL (default: sabia-3)
+      - MARITACA_MODEL (default: sabiazinho-3)
 
     Returns the raw model string on success, raises RuntimeError on network errors for retry.
     """
@@ -425,7 +426,7 @@ def _call_maritaca_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     if not api_key or api_key.strip() == "":
         raise RuntimeError("MARITACA_API_KEY não encontrada ou vazia no ambiente")
 
-    model = os.getenv("MARITACA_MODEL", "sabia-3")
+    model = os.getenv("MARITACA_MODEL", "sabiazinho-3")
     url = "https://chat.maritaca.ai/api/chat/completions"
 
     prompt = (
@@ -582,7 +583,7 @@ def _call_maritaca_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
     if not api_key or api_key.strip() == "":
         raise RuntimeError("MARITACA_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
 
-    model = os.getenv("MARITACA_MODEL", "sabia-3")
+    model = os.getenv("MARITACA_MODEL", "sabiazinho-3")
     url = "https://chat.maritaca.ai/api/chat/completions"
 
     sl = source_lang.lower()
@@ -814,10 +815,19 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
 
         # Choose API provider based on environment variables
         provider = _get_api_provider()
-        if provider == "maritaca":
-            translated = _retry_api_call(_call_maritaca_translate_to_zht, merged_text, source_lang)
-        else:
-            translated = _retry_api_call(_call_deepseek_translate_to_zht, merged_text, source_lang)
+        try:
+            if provider == "maritaca":
+                translated = _retry_api_call(_call_maritaca_translate_to_zht, merged_text, source_lang)
+            else:
+                translated = _retry_api_call(_call_deepseek_translate_to_zht, merged_text, source_lang)
+        except Exception as e:
+            print(f"\n❌ Erro fatal na tradução via LLM: {e}")
+            print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM")
+            # Remove any partial output file to avoid corrupted data
+            if out_path.exists():
+                out_path.unlink()
+                print(f"🗑️  Arquivo parcial removido: {out_path}")
+            raise SystemExit(1)
 
         # Small pause between API calls to avoid overwhelming the server
         time.sleep(0.1)  # 100ms pause
@@ -1051,11 +1061,20 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
             else:
                 # Choose API provider based on environment variables
                 provider = _get_api_provider()
-                if provider == "maritaca":
-                    pairs_str = _retry_api_call(_call_maritaca_pairs, zht_norm)
-                else:
-                    pairs_str = _retry_api_call(_call_deepseek_pairs, zht_norm)
-                pairs_cache[zht_norm] = pairs_str
+                try:
+                    if provider == "maritaca":
+                        pairs_str = _retry_api_call(_call_maritaca_pairs, zht_norm)
+                    else:
+                        pairs_str = _retry_api_call(_call_deepseek_pairs, zht_norm)
+                    pairs_cache[zht_norm] = pairs_str
+                except Exception as e:
+                    print(f"\n❌ Erro fatal na extração de pares via LLM: {e}")
+                    print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM")
+                    # Remove any partial base file to avoid corrupted data
+                    if base_out_path.exists():
+                        base_out_path.unlink()
+                        print(f"🗑️  Arquivo base parcial removido: {base_out_path}")
+                    raise SystemExit(1)
             
             # Use tab-separated fields for safety; insert end time after begin time
             line = (
