@@ -375,8 +375,8 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
             last_exception = e
             error_msg = str(e).lower()
 
-            # Don't retry on authentication or configuration errors
-            if any(keyword in error_msg for keyword in ["api key", "autenticação", "configuração"]):
+            # Don't retry on configuration errors (but allow retry for auth errors)
+            if any(keyword in error_msg for keyword in ["configuração"]):
                 raise e
 
             # Check if this is a network-related error that should be retried
@@ -386,10 +386,10 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
                     "connection abort", "software caused connection abort", "errno 53",
                     "timeout", "timed out", "servidor", "rede", "http error", "url error",
                     "connection", "connection reset", "broken pipe", "network", "unreachable",
-                    "urlopen error", "connection failed"
+                    "urlopen error", "connection failed", "autenticação", "401", "authentication"
                 ]) or
                 # Check exception type directly
-                isinstance(e, (TimeoutError, OSError, ConnectionError)) or
+                isinstance(e, (TimeoutError, OSError, ConnectionError, RuntimeError)) or
                 # Check if it's a wrapped network error
                 (hasattr(e, '__cause__') and isinstance(e.__cause__, (TimeoutError, OSError, ConnectionError)))
             )
@@ -397,16 +397,16 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
             if is_network_error:
                 if attempt < max_retries - 1:  # Don't sleep on last attempt
                     delay = base_delay * (2 ** attempt)  # Exponential backoff
-                    print(f"⚠️  Tentativa {attempt + 1}/{max_retries} falhou:")
-                    print(f"   Tipo: {type(e).__name__}")
-                    print(f"   Erro: {str(e)[:200]}...")
-                    print(f"⏳ Aguardando {delay:.1f}s antes da próxima tentativa...")
+                    print(f"⚠️  Tentativa {attempt + 1}/{max_retries} falhou:", file=sys.stderr)
+                    print(f"   Tipo: {type(e).__name__}", file=sys.stderr)
+                    print(f"   Erro: {str(e)[:200]}...", file=sys.stderr)
+                    print(f"⏳ Aguardando {delay:.1f}s antes da próxima tentativa...", file=sys.stderr)
                     time.sleep(delay)
                     continue
                 else:
-                    print(f"❌ Todas as {max_retries} tentativas falharam:")
-                    print(f"   Tipo do último erro: {type(e).__name__}")
-                    print(f"   Último erro: {e}")
+                    print(f"❌ Todas as {max_retries} tentativas falharam:", file=sys.stderr)
+                    print(f"   Tipo do último erro: {type(e).__name__}", file=sys.stderr)
+                    print(f"   Último erro: {e}", file=sys.stderr)
             else:
                 # For non-network errors, don't retry
                 raise e
@@ -825,15 +825,15 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
             else:
                 translated = _retry_api_call(_call_deepseek_translate_to_zht, merged_text, source_lang)
         except Exception as e:
-            print(f"\n❌ Erro fatal na tradução via LLM:")
-            print(f"   Tipo do erro: {type(e).__name__}")
-            print(f"   Mensagem: {e}")
-            print(f"   Texto sendo traduzido: {merged_text[:100]}...")
-            print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM")
+            print(f"\n❌ Erro fatal na tradução via LLM:", file=sys.stderr)
+            print(f"   Tipo do erro: {type(e).__name__}", file=sys.stderr)
+            print(f"   Mensagem: {e}", file=sys.stderr)
+            print(f"   Texto sendo traduzido: {merged_text[:100]}...", file=sys.stderr)
+            print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM", file=sys.stderr)
             # Remove any partial output file to avoid corrupted data
             if out_path.exists():
                 out_path.unlink()
-                print(f"🗑️  Arquivo parcial removido: {out_path}")
+                print(f"🗑️  Arquivo parcial removido: {out_path}", file=sys.stderr)
             raise SystemExit(1)
 
         # Small pause between API calls to avoid overwhelming the server
@@ -1075,15 +1075,15 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
                         pairs_str = _retry_api_call(_call_deepseek_pairs, zht_norm)
                     pairs_cache[zht_norm] = pairs_str
                 except Exception as e:
-                    print(f"\n❌ Erro fatal na extração de pares via LLM:")
-                    print(f"   Tipo do erro: {type(e).__name__}")
-                    print(f"   Mensagem: {e}")
-                    print(f"   Texto para extrair pares: {zht_norm[:100]}...")
-                    print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM")
+                    print(f"\n❌ Erro fatal na extração de pares via LLM:", file=sys.stderr)
+                    print(f"   Tipo do erro: {type(e).__name__}", file=sys.stderr)
+                    print(f"   Mensagem: {e}", file=sys.stderr)
+                    print(f"   Texto para extrair pares: {zht_norm[:100]}...", file=sys.stderr)
+                    print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM", file=sys.stderr)
                     # Remove any partial base file to avoid corrupted data
                     if base_out_path.exists():
                         base_out_path.unlink()
-                        print(f"🗑️  Arquivo base parcial removido: {base_out_path}")
+                        print(f"🗑️  Arquivo base parcial removido: {base_out_path}", file=sys.stderr)
                     raise SystemExit(1)
             
             # Use tab-separated fields for safety; insert end time after begin time
