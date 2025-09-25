@@ -22,3 +22,4 @@ __pycache__/
 # Google OAuth credentials
 client_secret_*.json
 google_drive_config.json
+warehouse/screenshots/
