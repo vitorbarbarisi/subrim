@@ -15,7 +15,7 @@ processed timestamp. Manual resume is also available:
 Searches the folder under the local "assets" directory (recursively) for one SRT file containing "zht"
 in its name and one containing either "_pt", ending with ".pt-BR.srt", "_es" or "_eng" (ignoring files that already contain
 "_secs" or "_real"). If a "zht" SRT is not found, it is created by translating the
-non-zht file (pt-BR, es ou eng) into Traditional Chinese using the DeepSeek API. Converts SRT
+non-zht file (pt-BR, es ou eng) into Traditional Chinese using AI APIs. Converts SRT
 files to XML format with "_secs.xml" suffix.
 
 Additionally, a base TXT file is generated from the zht_secs XML with one line
@@ -24,8 +24,14 @@ text, a list of strings generated via LLM no formato ["palavra: tradução", ...
 and the matched translation from the other language (pt, es ou eng). The file is named
 "<zht_secs_stem>_base.txt" and saved alongside the zht_secs file.
 
+AI API Support:
+- Maritaca AI (sabiazinho-3 model): Set MARITACA_API_KEY environment variable
+- DeepSeek API: Set DEEPSEEK_API_KEY environment variable
+- The processor automatically chooses Maritaca AI if MARITACA_API_KEY is available,
+  otherwise falls back to DeepSeek API.
+
 If a ".env" file is present next to this script, variables defined there (e.g.,
-DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL) will be loaded if not
+MARITACA_API_KEY, DEEPSEEK_API_KEY, DEEPSEEK_API_BASE, DEEPSEEK_MODEL) will be loaded if not
 already present in the environment.
 """
 
@@ -338,6 +344,23 @@ def _sanitize_tsv_field(text: str) -> str:
     return cleaned
 
 
+def _get_api_provider() -> str:
+    """Determine which API provider to use based on environment variables.
+    
+    Returns:
+        'maritaca' if MARITACA_API_KEY is set, 'deepseek' otherwise
+    """
+    maritaca_key = os.getenv("MARITACA_API_KEY")
+    deepseek_key = os.getenv("DEEPSEEK_API_KEY")
+    
+    if maritaca_key and maritaca_key.strip():
+        return "maritaca"
+    elif deepseek_key and deepseek_key.strip():
+        return "deepseek"
+    else:
+        raise RuntimeError("Nenhuma API key encontrada. Configure MARITACA_API_KEY ou DEEPSEEK_API_KEY")
+
+
 def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, **kwargs):
     """Retry API call with exponential backoff on failures.
 
@@ -386,6 +409,80 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
 
     # If we get here, all retries failed
     raise last_exception
+
+
+def _call_maritaca_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
+    """Call Maritaca AI API to extract list ["palavra: tradução", ...] for zht_text.
+
+    Reads configuration from env vars:
+      - MARITACA_API_KEY (required to enable calls)
+      - MARITACA_MODEL (default: sabiazinho-3)
+
+    Returns the raw model string on success, raises RuntimeError on network errors for retry.
+    """
+    api_key = os.getenv("MARITACA_API_KEY")
+    if not api_key or api_key.strip() == "":
+        raise RuntimeError("MARITACA_API_KEY não encontrada ou vazia no ambiente")
+
+    model = os.getenv("MARITACA_MODEL", "sabiazinho-3")
+    url = "https://api.maritaca.ai/chat/completions"
+
+    prompt = (
+        "Você é um extrator. Dada a frase em chinês tradicional (zht), responda EXTRAINDO "
+        "apenas as palavras da própria frase com suas traduções para pt-BR.\n"
+        "RETORNE SOMENTE uma lista JSON de strings no formato \"palavra (pinyin): tradução\";\n"
+        "sem explicações, sem texto extra, sem rótulos, sem markdown.\n"
+        "Exemplo de formato: [\"三 (sān): três\", \"號 (hào): número\", \"碼頭 (mǎ tóu): cais\"].\n"
+        "Não invente palavras fora da frase.\n\n"
+        f"Frase: {zht_text}"
+    )
+
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
+    data = json.dumps(body).encode("utf-8")
+
+    req = urlrequest.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_sec) as resp:
+            resp_data = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(resp_data)
+            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
+            if not content:
+                return "N/A"
+            # Try to strictly keep only a JSON array of strings
+            try:
+                parsed = json.loads(content)
+                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+                    return json.dumps(parsed, ensure_ascii=False)
+            except Exception:
+                pass
+            # Fallback: sanitize raw content
+            return _sanitize_tsv_field(content)
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
+        # Enhanced error handling with more specific messages for pairs extraction
+        if isinstance(exc, urlerror.HTTPError):
+            if exc.code == 401:
+                raise RuntimeError("Erro de autenticação com Maritaca AI API. Verifique sua API key.")
+            elif exc.code == 429:
+                raise RuntimeError("Limite de taxa da API Maritaca AI excedido. Aguarde alguns minutos.")
+            elif exc.code >= 500:
+                raise RuntimeError(f"Erro no servidor Maritaca AI (HTTP {exc.code}). Tente novamente mais tarde.")
+        elif isinstance(exc, TimeoutError):
+            raise RuntimeError(f"Timeout na extração de pares Maritaca AI API ({timeout_sec}s). Possível problema de rede ou servidor sobrecarregado.")
+        elif isinstance(exc, OSError) and getattr(exc, 'errno', None) == 53:
+            raise RuntimeError("Conexão abortada na extração de pares Maritaca AI API (Errno 53). Servidor pode ter fechado a conexão.")
+        elif "connection abort" in str(exc).lower() or "software caused connection abort" in str(exc).lower():
+            raise RuntimeError("Conexão abortada na extração de pares Maritaca AI API. Possível problema de rede ou servidor indisponível.")
+        else:
+            raise RuntimeError(f"Falha ao extrair pares via Maritaca AI: {exc}")
 
 
 def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
@@ -462,6 +559,73 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
             raise RuntimeError("Conexão abortada na extração de pares DeepSeek API. Possível problema de rede ou servidor indisponível.")
         else:
             raise RuntimeError(f"Falha ao extrair pares via DeepSeek: {exc}")
+
+
+def _call_maritaca_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 30.0) -> str:
+    """Translate 'text' from source_lang ("pt" or "es") to Traditional Chinese (zht) using Maritaca AI.
+
+    On any failure (missing API key, HTTP/timeout, or empty response), raises
+    RuntimeError to stop the pipeline, avoiding writing untranslated content.
+    """
+    api_key = os.getenv("MARITACA_API_KEY")
+    if not api_key or api_key.strip() == "":
+        raise RuntimeError("MARITACA_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
+
+    model = os.getenv("MARITACA_MODEL", "sabiazinho-3")
+    url = "https://api.maritaca.ai/chat/completions"
+
+    sl = source_lang.lower()
+    if sl.startswith("pt"):
+        src_label = "português do Brasil"
+    elif sl.startswith("es"):
+        src_label = "espanhol"
+    else:
+        src_label = "inglês"
+
+    prompt = (
+        f"Traduza do {src_label} para chinês tradicional (zht).\n"
+        "RETORNE SOMENTE o texto traduzido (sem marcações, sem explicações).\n\n"
+        f"Texto: {text}"
+    )
+
+    body = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": prompt},
+        ],
+        "temperature": 0.2,
+    }
+    data = json.dumps(body).encode("utf-8")
+
+    req = urlrequest.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_sec) as resp:
+            resp_data = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(resp_data)
+            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
+            if not content:
+                raise RuntimeError("Maritaca AI retornou resposta vazia para tradução")
+            return content.strip()
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
+        # Enhanced error handling with more specific messages
+        if isinstance(exc, urlerror.HTTPError):
+            if exc.code == 401:
+                raise RuntimeError("Erro de autenticação com Maritaca AI API. Verifique sua API key.")
+            elif exc.code == 429:
+                raise RuntimeError("Limite de taxa da API Maritaca AI excedido. Aguarde alguns minutos.")
+            elif exc.code >= 500:
+                raise RuntimeError(f"Erro no servidor Maritaca AI (HTTP {exc.code}). Tente novamente mais tarde.")
+        elif isinstance(exc, TimeoutError):
+            raise RuntimeError(f"Timeout na conexão com Maritaca AI API ({timeout_sec}s). Possível problema de rede ou servidor sobrecarregado.")
+        elif isinstance(exc, OSError) and getattr(exc, 'errno', None) == 53:
+            raise RuntimeError("Conexão abortada com Maritaca AI API (Errno 53). Servidor pode ter fechado a conexão.")
+        elif "connection abort" in str(exc).lower() or "software caused connection abort" in str(exc).lower():
+            raise RuntimeError("Conexão abortada com Maritaca AI API. Possível problema de rede ou servidor indisponível.")
+        else:
+            raise RuntimeError(f"Falha ao chamar Maritaca AI para tradução: {exc}")
 
 
 def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 30.0) -> str:
@@ -636,7 +800,12 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
             _print_progress(g_idx, total, prefix="Gerando zht via LLM")
             continue
 
-        translated = _retry_api_call(_call_deepseek_translate_to_zht, merged_text, source_lang)
+        # Choose API provider based on environment variables
+        provider = _get_api_provider()
+        if provider == "maritaca":
+            translated = _retry_api_call(_call_maritaca_translate_to_zht, merged_text, source_lang)
+        else:
+            translated = _retry_api_call(_call_deepseek_translate_to_zht, merged_text, source_lang)
 
         # Small pause between API calls to avoid overwhelming the server
         time.sleep(0.1)  # 100ms pause
@@ -868,7 +1037,12 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
             if zht_norm in pairs_cache:
                 pairs_str = pairs_cache[zht_norm]
             else:
-                pairs_str = _retry_api_call(_call_deepseek_pairs, zht_norm)
+                # Choose API provider based on environment variables
+                provider = _get_api_provider()
+                if provider == "maritaca":
+                    pairs_str = _retry_api_call(_call_maritaca_pairs, zht_norm)
+                else:
+                    pairs_str = _retry_api_call(_call_deepseek_pairs, zht_norm)
                 pairs_cache[zht_norm] = pairs_str
             
             # Use tab-separated fields for safety; insert end time after begin time
