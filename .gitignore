@@ -6,6 +6,9 @@ r36s_viewer
 warehouse/*.mp4
 warehouse/*.txt
 
+# Ignore audio files
+*.mp3
+
 # Ignore assets folder (contains large/generated inputs)
 assets/
 
