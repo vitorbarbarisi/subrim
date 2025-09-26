@@ -62,21 +62,21 @@ def check_word_api_health() -> bool:
         True se a API está funcionando, False caso contrário
     """
     try:
-        print("🔍 Verificando status da word-api...")
+        print("🔍 Verificando status da word-api...", flush=True)
         response = requests.get(f"{WORD_API_BASE_URL}/health", timeout=5)
         
         if response.status_code == 200:
-            print("✅ Word-api está funcionando")
+            print("✅ Word-api está funcionando", flush=True)
             return True
         else:
-            print(f"❌ Word-api retornou status {response.status_code}")
+            print(f"❌ Word-api retornou status {response.status_code}", flush=True)
             return False
             
     except requests.exceptions.RequestException as e:
-        print(f"❌ Erro ao conectar com word-api: {e}")
+        print(f"❌ Erro ao conectar com word-api: {e}", flush=True)
         return False
     except Exception as e:
-        print(f"❌ Erro inesperado ao verificar word-api: {e}")
+        print(f"❌ Erro inesperado ao verificar word-api: {e}", flush=True)
         return False
 
 
@@ -278,14 +278,14 @@ def process_base_file(base_file_path: Path) -> bool:
     Returns:
         True se processamento bem-sucedido
     """
-    print(f"🔍 Lendo arquivo: {base_file_path.name}")
+    print(f"🔍 Lendo arquivo: {base_file_path.name}", flush=True)
 
     try:
         # Lê todas as linhas do arquivo
         with open(base_file_path, 'r', encoding='utf-8') as f:
             lines = f.readlines()
 
-        print(f"📊 Encontradas {len(lines)} linhas")
+        print(f"📊 Encontradas {len(lines)} linhas", flush=True)
 
         # Processa cada linha
         processed_lines = []
@@ -374,11 +374,11 @@ def process_base_file(base_file_path: Path) -> bool:
             processed_lines.append('\t'.join(parts))
 
         # Salva o arquivo modificado
-        print(f"💾 Salvando arquivo modificado...")
+        print(f"💾 Salvando arquivo modificado...", flush=True)
         with open(base_file_path, 'w', encoding='utf-8') as f:
             f.write('\n'.join(processed_lines) + '\n')
 
-        print(f"✅ Processamento concluído!")
+        print(f"✅ Processamento concluído!", flush=True)
         print(f"   📝 {modified_count} linhas modificadas")
         print(f"   🗑️  {removed_count} linhas removidas")
         print(f"   💾 Arquivo salvo: {base_file_path}")
@@ -427,7 +427,7 @@ Funcionamento:
             base_file = file_path
             break
 
-    print("🧹 Sanitize Base - Limpeza de caracteres especiais")
+    print("🧹 Sanitize Base - Limpeza de caracteres especiais", flush=True)
     print("=" * 55)
     print(f"📁 Diretório: {source_dir}")
 
@@ -441,7 +441,7 @@ Funcionamento:
         print(f"❌ Erro: Arquivo base.txt ou *_zht_secs_base.txt não encontrado em {source_dir}")
         return 1
 
-    print(f"📄 Arquivo base encontrado: {base_file.name}")
+    print(f"📄 Arquivo base encontrado: {base_file.name}", flush=True)
 
     # Verifica se a word-api está funcionando antes de processar
     if not check_word_api_health():

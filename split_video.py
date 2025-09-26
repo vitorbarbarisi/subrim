@@ -43,7 +43,7 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
     Returns:
         True se conversão bem-sucedida
     """
-    print("📱 Convertendo para formato Chromecast...")
+    print("📱 Convertendo para formato Chromecast...", flush=True)
     print(f"   📁 Entrada: {input_video.name}")
     print(f"   📁 Saída: {output_video.name}")
 
@@ -82,7 +82,7 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
     ]
 
     try:
-        print("   🔄 Processando...")
+        print("   🔄 Processando...", flush=True)
 
         process = subprocess.Popen(
             cmd,
@@ -109,7 +109,7 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
             print(f"   {stderr_output}")
             return False
 
-        print("✅ Vídeo convertido para Chromecast com sucesso!")
+        print("✅ Vídeo convertido para Chromecast com sucesso!", flush=True)
 
         # Mostrar informações de tamanho
         if output_video.exists():
@@ -135,8 +135,8 @@ def split_video(video_path: Path) -> None:
     Args:
         video_path: Caminho para o vídeo processado e compatível com Chromecast
     """
-    print("🎬 Função split_video chamada!")
-    print(f"   📁 Vídeo para split: {video_path}")
+    print("🎬 Função split_video chamada!", flush=True)
+    print(f"   📁 Vídeo para split: {video_path}", flush=True)
 
     # Verificar se o vídeo existe
     if not video_path.exists():

@@ -106,8 +106,8 @@ class VideoBurner:
         self.log(f"Executando: {' '.join(cmd)}")
         
         try:
-            # Special handling for process_chunks.py to show real-time output
-            if script == "process_chunks.py":
+            # Special handling for scripts that benefit from real-time output
+            if script in ["processor.py", "adjust_base_times.py", "sanitize_base.py", "split_video.py", "process_chunks.py", "merge_chunks.py"]:
                 return self.run_script_realtime(cmd)
             
             result = subprocess.run(
@@ -157,14 +157,14 @@ class VideoBurner:
             return_code = process.wait()
             
             if return_code == 0:
-                self.log(f"✓ process_chunks.py executado com sucesso")
+                self.log(f"✓ {cmd[2]} executado com sucesso")
                 return True
             else:
-                self.log(f"✗ process_chunks.py falhou com código {return_code}", "ERROR")
+                self.log(f"✗ {cmd[2]} falhou com código {return_code}", "ERROR")
                 return False
                 
         except Exception as e:
-            self.log(f"✗ Erro ao executar process_chunks.py: {e}", "ERROR")
+            self.log(f"✗ Erro ao executar {cmd[2]}: {e}", "ERROR")
             return False
     
     def process_directory(self, directory: Path, force: bool = False) -> bool:

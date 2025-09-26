@@ -78,7 +78,7 @@ def process_chunk(chunk_path: Path, base_path: Path, chunk_number: int, total_ch
     Returns:
         True se processamento bem-sucedido
     """
-    print(f"   🔄 Processando chunk {chunk_number:03d}/{total_chunks:03d}")
+    print(f"   🔄 Processando chunk {chunk_number:03d}/{total_chunks:03d}", flush=True)
     print(f"   📁 Vídeo: {chunk_path.name}")
     print(f"   📄 Base: {base_path.name}")
 
@@ -94,7 +94,7 @@ def process_chunk(chunk_path: Path, base_path: Path, chunk_number: int, total_ch
 
     try:
         # Parse do arquivo base para obter as legendas
-        print("   📖 Lendo arquivo base...")
+        print("   📖 Lendo arquivo base...", flush=True)
         subtitles = parse_base_file(base_path)
 
         if not subtitles:
@@ -113,13 +113,13 @@ def process_chunk(chunk_path: Path, base_path: Path, chunk_number: int, total_ch
                 print(f"   ❌ Erro ao copiar chunk: {e}")
                 return False
 
-        print(f"   📝 Encontradas {len(subtitles)} legendas para o chunk")
+        print(f"   📝 Encontradas {len(subtitles)} legendas para o chunk", flush=True)
 
         # Criar arquivo temporário para o resultado
         temp_output = chunk_path.parent / f"{chunk_path.stem}_temp.mp4"
 
         # Aplicar legendas ao chunk
-        print("   🎬 Aplicando legendas ao chunk...")
+        print("   🎬 Aplicando legendas ao chunk...", flush=True)
         success = apply_subtitles_to_chunk(chunk_path, subtitles, temp_output)
 
         if not success:
@@ -152,7 +152,7 @@ def process_chunk(chunk_path: Path, base_path: Path, chunk_number: int, total_ch
                 print(f"   ⚠️  Não foi possível remover arquivo temporário: {cleanup_error}")
             return False
 
-        print("   ✅ Processamento concluído com sucesso")
+        print("   ✅ Processamento concluído com sucesso", flush=True)
         return True
 
     except Exception as e:
