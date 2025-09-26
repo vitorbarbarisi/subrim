@@ -195,7 +195,7 @@ def split_video(video_path: Path) -> None:
 
     # Processar cada chunk
     for i, chunk in enumerate(chunks, 1):
-        print(f"\n   🔄 Processando chunk {i:03d}/{len(chunks):03d}")
+        print(f"\n   🔄 Gerando chunk {i:03d}/{len(chunks):03d}")
         print(f"   ⏱️  Tempo: {chunk['start_time']:.1f}s - {chunk['end_time']:.1f}s")
 
         # Criar arquivo de vídeo do chunk
@@ -506,24 +506,88 @@ def create_chunk_base_file(base_file_path: Path, chunk_subtitles: Dict[float, Tu
 
 
 def get_video_info(video_path: Path) -> Tuple[int, int, float]:
-    """Get video dimensions and duration using ffprobe."""
+    """Get video dimensions and duration using ffmpeg."""
     try:
+        # Use ffmpeg to get video info (more reliable than ffprobe for some files)
         cmd = [
-            'ffprobe',
-            '-v', 'quiet',
-            '-print_format', 'csv=p=0',
-            '-select_streams', 'v:0',
-            '-show_entries', 'stream=width,height,duration',
-            str(video_path)
+            'ffmpeg',
+            '-i', str(video_path),
+            '-f', 'null',
+            '-'
         ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-        parts = result.stdout.strip().split(',')
-        width = int(parts[0])
-        height = int(parts[1])
-        duration = float(parts[2]) if parts[2] and parts[2] != 'N/A' else 0.0
+        
+        result = subprocess.run(cmd, capture_output=True, text=True, check=False)
+        
+        # Parse duration from stderr output
+        duration = 0.0
+        width, height = 1920, 1080
+        
+        for line in result.stderr.split('\n'):
+            if 'Duration:' in line:
+                # Extract duration from line like "Duration: 01:23:45.67, start: 0.000000, bitrate: 1234 kb/s"
+                try:
+                    duration_part = line.split('Duration:')[1].split(',')[0].strip()
+                    # Convert HH:MM:SS.mmm to seconds
+                    time_parts = duration_part.split(':')
+                    if len(time_parts) == 3:
+                        hours = float(time_parts[0])
+                        minutes = float(time_parts[1])
+                        seconds = float(time_parts[2])
+                        duration = hours * 3600 + minutes * 60 + seconds
+                except:
+                    pass
+            elif 'Stream #0:0' in line and 'Video:' in line:
+                # Extract resolution from line like "Stream #0:0(und): Video: h264, yuv420p, 1920x1080"
+                try:
+                    if 'x' in line:
+                        res_part = line.split('Video:')[1].split(',')[1].strip()
+                        if 'x' in res_part:
+                            w, h = res_part.split('x')
+                            width = int(w.strip())
+                            height = int(h.strip())
+                except:
+                    pass
+        
+        if duration == 0.0:
+            print(f"   ⚠️  Não foi possível obter duração do vídeo convertido, tentando arquivo original...")
+            # Try to get duration from original file
+            original_path = video_path.parent.parent / video_path.name.replace('_chromecast', '')
+            if original_path.exists():
+                try:
+                    orig_cmd = [
+                        'ffmpeg',
+                        '-i', str(original_path),
+                        '-f', 'null',
+                        '-'
+                    ]
+                    orig_result = subprocess.run(orig_cmd, capture_output=True, text=True, check=False)
+                    for line in orig_result.stderr.split('\n'):
+                        if 'Duration:' in line:
+                            try:
+                                duration_part = line.split('Duration:')[1].split(',')[0].strip()
+                                time_parts = duration_part.split(':')
+                                if len(time_parts) == 3:
+                                    hours = float(time_parts[0])
+                                    minutes = float(time_parts[1])
+                                    seconds = float(time_parts[2])
+                                    duration = hours * 3600 + minutes * 60 + seconds
+                                    print(f"   ✅ Duração obtida do arquivo original: {duration:.1f}s")
+                                    break
+                            except:
+                                pass
+                except:
+                    pass
+            
+            if duration == 0.0:
+                print(f"   ⚠️  Usando duração estimada baseada no tamanho do arquivo")
+                # Try to estimate duration from file size (very rough estimate)
+                file_size = video_path.stat().st_size
+                # Assume ~1MB per second (very rough)
+                duration = max(3600, file_size / (1024 * 1024))  # At least 1 hour
+            
         return width, height, duration
-    except:
+    except Exception as e:
+        print(f"   ⚠️  Erro ao obter informações do vídeo: {e}")
         # Default values if detection fails
         return 1920, 1080, 0.0
 
