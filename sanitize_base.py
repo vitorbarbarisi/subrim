@@ -13,6 +13,9 @@ O script:
 
 Linhas removidas:
 - "Infelizmente, não há uma frase em chinês fornecida para eu extrair e traduzir..."
+- "A frase fornecida é muito curta e não contém palavras chinesas para extrair..."
+- "A frase fornecida está vazia, portanto, não há palavras para extrair e traduzir."
+- Linhas onde a coluna chinesa contém apenas "♪" (sem conteúdo chinês)
 
 Caracteres removidos da coluna chinesa:
 - ♪ (notas musicais)
@@ -28,8 +31,12 @@ import argparse
 import os
 from pathlib import Path
 
-# Frase específica que indica erro de tradução e deve ser removida (apenas a parte chinesa)
-ERROR_TRANSLATION_TEXT = "♪	Infelizmente, não há uma frase em chinês fornecida para eu extrair e traduzir. Por favor, envie a frase em chinês tradicional para que eu possa ajudá-lo.	♪"
+# Frases específicas que indicam erro de tradução e devem ser removidas
+ERROR_TRANSLATION_TEXTS = [
+    "Infelizmente, não há uma frase em chinês fornecida para eu extrair e traduzir. Por favor, envie a frase em chinês tradicional para que eu possa ajudá-lo.",
+    "A frase fornecida é muito curta e não contém palavras chinesas para extrair. Por favor, forneça uma frase em chinês tradicional para que eu possa realizar a extração conforme solicitado.",
+    "A frase fornecida está vazia, portanto, não há palavras para extrair e traduzir."
+]
 
 
 def sanitize_chinese_text(text: str) -> str:
@@ -97,11 +104,25 @@ def process_base_file(base_file_path: Path) -> bool:
             # Divide a linha por tabs
             parts = line.split('\t')
 
-            # Verifica se a coluna de traduções contém exatamente a frase de erro de tradução
-            if len(parts) >= 5 and parts[4].strip() == ERROR_TRANSLATION_TEXT.strip():
-                print(f"   🗑️  Linha {line_num}: removida (erro de tradução)")
+            # Verifica se a coluna chinesa (índice 2) contém apenas "♪"
+            if len(parts) >= 3 and parts[2].strip() == "♪":
+                print(f"   🗑️  Linha {line_num}: removida (coluna chinesa vazia - apenas ♪)")
                 removed_count += 1
                 continue
+            
+            # Verifica se a coluna de traduções (índice 4) contém alguma das frases de erro de tradução
+            if len(parts) >= 5:
+                translation_text = parts[4].strip()
+                found_error = False
+                for error_text in ERROR_TRANSLATION_TEXTS:
+                    if translation_text == error_text.strip():
+                        print(f"   🗑️  Linha {line_num}: removida (erro de tradução)")
+                        removed_count += 1
+                        found_error = True
+                        break
+                
+                if found_error:
+                    continue
 
             if len(parts) < 4:
                 processed_lines.append(line)
@@ -169,8 +190,8 @@ Funcionamento:
     if (source_dir / 'base.txt').exists():
         base_file = source_dir / 'base.txt'
     else:
-        # Procura por arquivos *_zht_secs_base.txt
-        for file_path in source_dir.glob('*_zht_secs_base.txt'):
+        # Procura por arquivos *_zht*_secs_base.txt (com hífen ou underscore)
+        for file_path in source_dir.glob('*zht*_secs_base.txt'):
             base_file = file_path
             break
 
