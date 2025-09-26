@@ -324,37 +324,326 @@ def sanitize_base_with_word_api(base_path: Path) -> bool:
         return False
 
 
-def generate_pdf_with_translations(pdf_path: Path, base_path: Path, output_path: Path) -> bool:
+def generate_docx_with_translations(pdf_path: Path, base_path: Path, output_path: Path) -> bool:
     """
-    Gera novo PDF com pinyin e traduções sobrepostas.
+    Gera novo DOCX com pinyin e traduções em formato de torre.
     
     Args:
         pdf_path: Caminho para o PDF original
         base_path: Caminho para o arquivo base.txt
-        output_path: Caminho para o PDF de saída
+        output_path: Caminho para o DOCX de saída
         
     Returns:
         bool: True se sucesso
     """
-    print(f"📄 Gerando PDF com traduções...")
+    print(f"📄 Gerando DOCX com traduções...")
     
     try:
-        # Tenta usar reportlab primeiro
+        # Tenta usar python-docx primeiro
         try:
-            from reportlab.pdfgen import canvas
-            from reportlab.lib.pagesizes import letter
-            from reportlab.pdfbase import pdfmetrics
-            from reportlab.pdfbase.ttfonts import TTFont
-            
-            return _generate_pdf_with_reportlab(pdf_path, base_path, output_path)
+            from docx import Document
+            from docx.shared import Inches, Pt
+            from docx.enum.text import WD_ALIGN_PARAGRAPH
+            from docx.oxml.shared import OxmlElement, qn
+            return _generate_docx_with_python_docx(pdf_path, base_path, output_path)
             
         except ImportError:
-            print("⚠️  ReportLab não encontrado, gerando arquivo de texto...")
-            return _generate_text_with_translations(pdf_path, base_path, output_path)
+            print("⚠️  python-docx não encontrado, tentando PyMuPDF...")
+            
+            # Fallback para PyMuPDF
+            try:
+                import fitz  # PyMuPDF
+                return _generate_pdf_with_pymupdf(pdf_path, base_path, output_path)
+                
+            except ImportError:
+                print("⚠️  PyMuPDF não encontrado, gerando arquivo de texto...")
+                return _generate_text_with_translations(pdf_path, base_path, output_path)
             
     except Exception as e:
-        print(f"❌ Erro ao gerar PDF com traduções: {e}")
+        print(f"❌ Erro ao gerar DOCX com traduções: {e}")
         return False
+
+
+def _generate_docx_with_python_docx(pdf_path: Path, base_path: Path, output_path: Path) -> bool:
+    """Gera DOCX usando python-docx com torre pinyin | caracter | tradução."""
+    from docx import Document
+    from docx.shared import Inches, Pt, RGBColor
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+    from docx.oxml.shared import OxmlElement, qn
+    
+    # Lê o arquivo base
+    with open(base_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    # Cria mapeamento de texto original para traduções
+    text_to_translations = {}
+    for line in lines:
+        line = line.strip()
+        if not line or '\t' not in line:
+            continue
+        
+        parts = line.split('\t', 1)
+        if len(parts) == 2:
+            text = parts[0]
+            pairs_str = parts[1]
+            
+            # Extrai pares de tradução
+            pairs = extract_pairs_from_translation(pairs_str)
+            if pairs:
+                text_to_translations[text] = pairs
+    
+    # Cria novo documento DOCX
+    doc = Document()
+    
+    # Configuração da página
+    section = doc.sections[0]
+    section.page_width = Inches(8.5)
+    section.page_height = Inches(11)
+    section.left_margin = Inches(1)
+    section.right_margin = Inches(1)
+    section.top_margin = Inches(1)
+    section.bottom_margin = Inches(1)
+    
+    # Processa cada linha do PDF original
+    pdf_text = extract_text_from_pdf(pdf_path)
+    
+    for line in pdf_text:
+        line = line.strip()
+        if not line:
+            continue
+        
+        # Verifica se contém caracteres chineses
+        if contains_chinese_characters(line):
+            # Procura traduções para esta linha
+            if line in text_to_translations:
+                pairs = text_to_translations[line]
+                
+                # Cria parágrafo para a torre
+                p = doc.add_paragraph()
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                
+                # Adiciona cada palavra da torre
+                for i, pair in enumerate(pairs):
+                    chinese = pair["word"]
+                    pinyin = pair["pinyin"]
+                    translation = pair["translation"]
+                    
+                    if chinese:
+                        # Cria tabela de 3 linhas para cada palavra
+                        table = doc.add_table(rows=3, cols=1)
+                        table.style = 'Table Grid'
+                        table.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        
+                        # Pinyin (linha superior)
+                        if pinyin:
+                            pinyin_cell = table.cell(0, 0)
+                            pinyin_cell.text = pinyin
+                            pinyin_para = pinyin_cell.paragraphs[0]
+                            pinyin_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            pinyin_run = pinyin_para.runs[0]
+                            pinyin_run.font.size = Pt(10)
+                            pinyin_run.font.color.rgb = RGBColor(147, 112, 219)  # Roxo
+                            pinyin_run.font.bold = True
+                        
+                        # Chinês (linha do meio)
+                        chinese_cell = table.cell(1, 0)
+                        chinese_cell.text = chinese
+                        chinese_para = chinese_cell.paragraphs[0]
+                        chinese_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                        chinese_run = chinese_para.runs[0]
+                        chinese_run.font.size = Pt(12)
+                        chinese_run.font.bold = True
+                        
+                        # Tradução (linha inferior)
+                        if translation:
+                            translation_cell = table.cell(2, 0)
+                            translation_cell.text = translation
+                            translation_para = translation_cell.paragraphs[0]
+                            translation_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            translation_run = translation_para.runs[0]
+                            translation_run.font.size = Pt(9)
+                            translation_run.font.color.rgb = RGBColor(255, 140, 0)  # Laranja
+                        
+                        # Espaço entre palavras
+                        if i < len(pairs) - 1:
+                            doc.add_paragraph(" ")  # Espaço entre palavras
+                
+                # Linha em branco após cada frase
+                doc.add_paragraph()
+            else:
+                # Linha sem tradução - mantém original
+                p = doc.add_paragraph(line)
+                p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+        else:
+            # Linha sem caracteres chineses - mantém original
+            p = doc.add_paragraph(line)
+            p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    
+    # Salva o documento
+    doc.save(output_path)
+    
+    print(f"✅ DOCX com torres gerado: {output_path.name}")
+    return True
+
+
+def _generate_pdf_with_pymupdf(pdf_path: Path, base_path: Path, output_path: Path) -> bool:
+    """Gera PDF usando PyMuPDF com torre pinyin | caracter | tradução."""
+    import fitz  # PyMuPDF
+    
+    # Lê o arquivo base
+    with open(base_path, 'r', encoding='utf-8') as f:
+        lines = f.readlines()
+    
+    # Cria mapeamento de texto original para traduções
+    text_to_translations = {}
+    for line in lines:
+        line = line.strip()
+        if not line or '\t' not in line:
+            continue
+        
+        parts = line.split('\t', 1)
+        if len(parts) == 2:
+            text = parts[0]
+            pairs_str = parts[1]
+            
+            # Extrai pares de tradução
+            pairs = extract_pairs_from_translation(pairs_str)
+            if pairs:
+                text_to_translations[text] = pairs
+    
+    # Abre o PDF original
+    doc = fitz.open(pdf_path)
+    
+    # Processa cada página
+    for page_num in range(len(doc)):
+        page = doc[page_num]
+        
+        # Extrai texto da página para encontrar posições
+        text_dict = page.get_text("dict")
+        
+        # Encontra e substitui texto chinês por torres
+        for block in text_dict["blocks"]:
+            if "lines" in block:
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        text = span["text"]
+                        
+                        # Verifica se contém caracteres chineses
+                        if contains_chinese_characters(text):
+                            # Procura traduções para este texto
+                            if text in text_to_translations:
+                                pairs = text_to_translations[text]
+                                
+                                # Cria a torre pinyin | caracter | tradução
+                                tower_text = _create_tower_text(pairs)
+                                
+                                if tower_text:
+                                    # Obtém a posição do texto original
+                                    bbox = span["bbox"]  # (x0, y0, x1, y1)
+                                    
+                                    # Remove o texto original
+                                    page.add_redact_annot(bbox, fill=(1, 1, 1))  # Fundo branco
+                                    page.apply_redactions()
+                                    
+                                    # Adiciona a torre na mesma posição
+                                    _add_tower_to_page(page, tower_text, bbox, pairs)
+    
+    # Salva o PDF modificado
+    doc.save(output_path)
+    doc.close()
+    
+    print(f"✅ PDF com torres gerado: {output_path.name}")
+    return True
+
+
+def _create_tower_text(pairs: list) -> str:
+    """Cria texto da torre pinyin | caracter | tradução."""
+    if not pairs:
+        return ""
+    
+    # Agrupa caracteres em palavras e cria torres
+    tower_lines = []
+    
+    for pair in pairs:
+        chinese = pair["word"]
+        pinyin = pair["pinyin"]
+        translation = pair["translation"]
+        
+        if chinese:
+            # Cria linha da torre: pinyin | caracter | tradução
+            tower_line = f"{pinyin} | {chinese} | {translation}"
+            tower_lines.append(tower_line)
+    
+    return "\n".join(tower_lines)
+
+
+def _add_tower_to_page(page, tower_text: str, bbox: tuple, pairs: list):
+    """Adiciona torre de texto à página do PDF."""
+    import fitz
+    
+    # Configurações de fonte
+    font_size = 12
+    line_height = font_size * 1.3
+    word_spacing = font_size * 1.5  # Espaçamento entre palavras
+    
+    # Posição inicial (canto superior esquerdo do bbox original)
+    x0, y0, x1, y1 = bbox
+    start_x = x0
+    start_y = y0
+    
+    # Cores (similar ao process_chunks.py)
+    pinyin_color = (0.58, 0.44, 0.86)  # #9370DB (roxo)
+    chinese_color = (0, 0, 0)  # preto (melhor visibilidade)
+    translation_color = (0.8, 0.4, 0)  # laranja (melhor que amarelo)
+    
+    # Calcula altura total da torre para centralizar verticalmente
+    tower_height = (font_size * 0.8) + line_height + (font_size * 0.7) + (line_height * 0.5)
+    center_y = y0 + (y1 - y0) / 2
+    tower_start_y = center_y - tower_height / 2
+    
+    # Adiciona cada palavra da torre horizontalmente
+    current_x = start_x
+    for i, pair in enumerate(pairs):
+        chinese = pair["word"]
+        pinyin = pair["pinyin"]
+        translation = pair["translation"]
+        
+        if chinese:
+            # Calcula largura da palavra para centralizar
+            word_width = max(len(chinese) * font_size * 0.6, len(pinyin) * font_size * 0.5, len(translation) * font_size * 0.4)
+            word_center_x = current_x + word_width / 2
+            
+            # Pinyin (linha superior) - centralizado
+            if pinyin:
+                pinyin_x = word_center_x - (len(pinyin) * font_size * 0.25)
+                page.insert_text(
+                    (pinyin_x, tower_start_y),
+                    pinyin,
+                    fontsize=font_size * 0.8,
+                    color=pinyin_color
+                )
+            
+            # Chinês (linha do meio) - centralizado
+            chinese_x = word_center_x - (len(chinese) * font_size * 0.3)
+            page.insert_text(
+                (chinese_x, tower_start_y + line_height),
+                chinese,
+                fontsize=font_size,
+                color=chinese_color
+            )
+            
+            # Tradução (linha inferior) - centralizado
+            if translation:
+                translation_x = word_center_x - (len(translation) * font_size * 0.2)
+                page.insert_text(
+                    (translation_x, tower_start_y + line_height * 2),
+                    translation,
+                    fontsize=font_size * 0.7,
+                    color=translation_color
+                )
+            
+            # Move para próxima palavra
+            current_x += word_width + word_spacing
 
 
 def _generate_pdf_with_reportlab(pdf_path: Path, base_path: Path, output_path: Path) -> bool:
@@ -533,7 +822,7 @@ Funcionamento:
     
     pdf_path = pdf_files[0]
     base_path = source_dir / "base.txt"
-    output_path = source_dir / f"{pdf_path.stem}_with_translations.pdf"
+    output_path = source_dir / f"{pdf_path.stem}_with_translations.docx"
     
     print(f"📄 PDF encontrado: {pdf_path.name}")
     
@@ -555,13 +844,13 @@ Funcionamento:
         if not sanitize_base_with_word_api(base_path):
             return 1
     
-    # 4. Gera PDF com traduções
-    print("\n📄 Passo 4: Gerando PDF com traduções...")
-    if not generate_pdf_with_translations(pdf_path, base_path, output_path):
+    # 4. Gera DOCX com traduções
+    print("\n📄 Passo 4: Gerando DOCX com traduções...")
+    if not generate_docx_with_translations(pdf_path, base_path, output_path):
         return 1
     
     print("\n🎉 Processamento concluído com sucesso!")
-    print(f"📄 PDF com traduções: {output_path.name}")
+    print(f"📄 DOCX com traduções: {output_path.name}")
     print(f"📝 Arquivo base: {base_path.name}")
     
     return 0
