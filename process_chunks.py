@@ -372,24 +372,28 @@ def get_best_latin_font() -> str:
 
 
 def escape_ffmpeg_text(text: str) -> str:
-    """Remove problematic characters for FFmpeg drawtext filter."""
+    """Escape text for FFmpeg drawtext filter using double quotes."""
     if not text or not isinstance(text, str):
         return ""
-
+    
     # Remove any null bytes that could cause issues
     text = text.replace('\x00', '')
-
+    
     # Strip whitespace and check if empty
     text = text.strip()
     if not text:
         return ""
-
-    # Remove problematic characters that can cause FFmpeg parsing issues
-    problematic_chars = ['\\', '"', ':', '[', ']', '%', ';', ',']
-
-    for char in problematic_chars:
-        text = text.replace(char, '')
-
+    
+    # Escape special characters for FFmpeg (using double quotes strategy)
+    text = text.replace('\\', '\\\\')  # Backslash
+    text = text.replace('"', '\\"')    # Double quote (since we'll use double quotes)
+    text = text.replace('[', '\\[')    # Left bracket
+    text = text.replace(']', '\\]')    # Right bracket
+    text = text.replace('%', '\\%')    # Percent sign
+    text = text.replace(';', '\\;')    # Semicolon
+    text = text.replace(',', '\\,')    # Comma (critical for FFmpeg parsing)
+    # NOTE: Single quotes, colons, and parentheses don't need escaping when using double quotes
+    
     return text
 
 
@@ -533,6 +537,18 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         # Skip empty or invalid subtitles
         if chinese_text and chinese_text.strip() and chinese_text != 'N/A':
             valid_subtitles[begin_time] = subtitle_data
+    
+    # Limit number of subtitles to prevent FFmpeg filter complexity issues
+    MAX_SUBTITLES = 1  # Process only first 1 subtitle to avoid timeouts and parsing errors
+    if len(valid_subtitles) > MAX_SUBTITLES:
+        print(f"   ⚠️  Limiting to first {MAX_SUBTITLES} subtitle to prevent FFmpeg timeout (total: {len(valid_subtitles)})")
+        # Keep only the first MAX_SUBTITLES by time
+        limited_subtitles = {}
+        for i, (begin_time, subtitle_data) in enumerate(sorted(valid_subtitles.items())):
+            if i >= MAX_SUBTITLES:
+                break
+            limited_subtitles[begin_time] = subtitle_data
+        valid_subtitles = limited_subtitles
 
     if not valid_subtitles:
         print("   ⚠️  Nenhuma legenda válida encontrada, usando filtro de cópia")
@@ -562,7 +578,7 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         word_data = parse_pinyin_translations(translations_json) if translations_json else []
 
         # Clean Chinese text
-        clean_chinese = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '')
+        clean_chinese = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '').replace('"', '').replace('"', '')
 
         # Group characters into words and build display data
         display_items = []
@@ -654,7 +670,7 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         word_data = parse_pinyin_translations(translations_json) if translations_json else []
 
         # Clean Chinese text
-        clean_chinese = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '')
+        clean_chinese = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '').replace('"', '').replace('"', '')
 
         # Group characters into words and build display data
         display_items = []
@@ -821,6 +837,14 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
             chinese_escaped = escape_ffmpeg_text(chinese_word)
             pinyin_escaped = escape_ffmpeg_text(word_pinyin) if word_pinyin else ""
 
+            # Debug: Log first few words of the first subtitle to trace unexpected quotes rendered
+            if begin_time == sorted(valid_subtitles.keys())[0] and i < 5:
+                try:
+                    print(f"   🔎 RAW[{i}] zh='{chinese_word}' | py='{word_pinyin}' | pt='{word_portuguese}'")
+                    print(f"   🔎 ESC[{i}] zh='{chinese_escaped}' | py='{pinyin_escaped}'")
+                except Exception:
+                    pass
+
             # Skip if Chinese text is empty after escaping
             if not chinese_escaped or chinese_escaped.strip() == '':
                 current_x += word_width
@@ -830,29 +854,34 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
             word_center_x = current_x + word_width // 2
 
             # Chinese text (centered within word width) - using adaptive font size
-            chinese_filter = f"drawtext=text='{chinese_escaped}':x={word_center_x}-text_w/2:y={chinese_y}:fontfile='{chinese_font_path}':fontsize={base_chinese_font_size}:fontcolor=white:borderw={chinese_border_width}:bordercolor=black:enable='{time_condition}'"
+            chinese_filter = f'drawtext=text="{chinese_escaped}":x={word_center_x}-text_w/2:y={chinese_y}:fontfile=\'{chinese_font_path}\':fontsize={base_chinese_font_size}:fontcolor=white:borderw={chinese_border_width}:bordercolor=black:enable=\'{time_condition}\''
             if chinese_filter:  # Validate filter is not empty
                 filter_parts.append(chinese_filter)
 
             # Pinyin text (centered over the Chinese word) - using adaptive font size
             if pinyin_escaped and pinyin_escaped.strip():
-                pinyin_filter = f"drawtext=text='{pinyin_escaped}':x={word_center_x}-text_w/2:y={pinyin_y}:fontfile='{chinese_font_path}':fontsize={base_pinyin_font_size}:fontcolor=#9370DB:borderw={pinyin_border_width}:bordercolor=black:enable='{time_condition}'"
+                pinyin_filter = f'drawtext=text="{pinyin_escaped}":x={word_center_x}-text_w/2:y={pinyin_y}:fontfile=\'{chinese_font_path}\':fontsize={base_pinyin_font_size}:fontcolor=#9370DB:borderw={pinyin_border_width}:bordercolor=black:enable=\'{time_condition}\''
                 if pinyin_filter:  # Validate filter is not empty
                     filter_parts.append(pinyin_filter)
 
-            # Portuguese text (centered below each Chinese word, with line breaks if needed) - using adaptive font size
-            if word_portuguese and word_portuguese.strip():
-                portuguese_lines = wrap_portuguese_to_chinese_width(word_portuguese, latin_font_path, word_width, base_portuguese_font_size)
-                portuguese_line_height = int(base_portuguese_font_size * 1.2)  # Adaptive line height (120% of font size)
+        # Portuguese text (centered below each Chinese word, with line breaks if needed) - using adaptive font size
+        if word_portuguese and word_portuguese.strip():
+            portuguese_lines = wrap_portuguese_to_chinese_width(word_portuguese, latin_font_path, word_width, base_portuguese_font_size)
+            portuguese_line_height = int(base_portuguese_font_size * 1.2)  # Adaptive line height (120% of font size)
 
-                for line_idx, portuguese_line in enumerate(portuguese_lines):
-                    if portuguese_line and portuguese_line.strip():  # Only add non-empty lines
-                        portuguese_escaped = escape_ffmpeg_text(portuguese_line)
-                        if portuguese_escaped and portuguese_escaped.strip():  # Validate escaped text
-                            portuguese_line_y = portuguese_y + (line_idx * portuguese_line_height)
-                            portuguese_filter = f"drawtext=text='{portuguese_escaped}':x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile='{latin_font_path}':fontsize={base_portuguese_font_size}:fontcolor=yellow:borderw={portuguese_border_width}:bordercolor=black:enable='{time_condition}'"
-                            if portuguese_filter:  # Validate filter is not empty
-                                filter_parts.append(portuguese_filter)
+            for line_idx, portuguese_line in enumerate(portuguese_lines):
+                if portuguese_line and portuguese_line.strip():  # Only add non-empty lines
+                    portuguese_escaped = escape_ffmpeg_text(portuguese_line)
+                    if begin_time == sorted(valid_subtitles.keys())[0] and i < 5 and line_idx == 0:
+                        try:
+                            print(f"   🔎 PT[{i}] line='{portuguese_line}' | esc='{portuguese_escaped}'")
+                        except Exception:
+                            pass
+                    if portuguese_escaped and portuguese_escaped.strip():  # Validate escaped text
+                        portuguese_line_y = portuguese_y + (line_idx * portuguese_line_height)
+                        portuguese_filter = f'drawtext=text="{portuguese_escaped}":x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile=\'{latin_font_path}\':fontsize={base_portuguese_font_size}:fontcolor=yellow:borderw={portuguese_border_width}:bordercolor=black:enable=\'{time_condition}\''
+                        if portuguese_filter:  # Validate filter is not empty
+                            filter_parts.append(portuguese_filter)
 
             current_x += word_width
 

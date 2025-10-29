@@ -1,6 +1,6 @@
 # Integração com Maritaca AI
 
-O processor agora suporta o modelo **sabia-3** da [Maritaca AI](https://plataforma.maritaca.ai/modelos) como alternativa ao DeepSeek API.
+O processor agora suporta o modelo **sabiazinho-3** da [Maritaca AI](https://plataforma.maritaca.ai/modelos) como alternativa ao DeepSeek API.
 
 ## Configuração
 
@@ -18,7 +18,7 @@ Crie um arquivo `.env` na raiz do projeto com:
 ```bash
 # Maritaca AI Configuration (Priority)
 MARITACA_API_KEY=sua_chave_da_maritaca_aqui
-MARITACA_MODEL=sabia-3
+MARITACA_MODEL=sabiazinho-3
 
 # DeepSeek API Configuration (Fallback)
 DEEPSEEK_API_KEY=sua_chave_do_deepseek_aqui
@@ -34,7 +34,7 @@ O processor escolhe automaticamente qual API usar:
 2. **DeepSeek API** - Se apenas `DEEPSEEK_API_KEY` estiver configurada
 3. **Erro** - Se nenhuma API key estiver configurada
 
-## Vantagens do sabia-3
+## Vantagens do sabiazinho-3
 
 - **Custo-benefício**: Modelo mais econômico para processamento em grande escala
 - **Performance**: Otimizado para tarefas de tradução e extração de pares
@@ -50,7 +50,7 @@ python3 processor.py amor100
 
 ## Modelos Disponíveis
 
-- `sabia-3` (padrão) - Modelo principal da Maritaca AI
+- `sabiazinho-3` (padrão) - Modelo principal da Maritaca AI
 - `sabia-2-small` - Modelo menor para tarefas mais simples
 - Outros modelos podem ser configurados via `MARITACA_MODEL`
 

@@ -56,6 +56,39 @@ load_dotenv()
 WORD_API_BASE_URL = "http://localhost:7998/word-api"
 
 
+def extract_text_from_document(doc_path: Path) -> list[str]:
+    """
+    Extrai texto de um arquivo PDF ou DOCX.
+    
+    Args:
+        doc_path: Caminho para o arquivo PDF ou DOCX
+        
+    Returns:
+        list: Lista de linhas do texto extraído
+    """
+    # Tenta DOCX primeiro (melhor para preservar formatação)
+    if doc_path.suffix.lower() == '.docx':
+        try:
+            from docx import Document
+            doc = Document(doc_path)
+            lines = []
+            
+            for paragraph in doc.paragraphs:
+                text = paragraph.text.strip()
+                if text:
+                    lines.append(text)
+            
+            return lines
+            
+        except ImportError:
+            print("⚠️  python-docx não encontrado para DOCX, tentando PDF...")
+        except Exception as e:
+            print(f"⚠️  Erro ao ler DOCX: {e}, tentando PDF...")
+    
+    # Fallback para PDF
+    return extract_text_from_pdf(doc_path)
+
+
 def extract_text_from_pdf(pdf_path: Path) -> list[str]:
     """
     Extrai texto de um arquivo PDF.
@@ -77,9 +110,14 @@ def extract_text_from_pdf(pdf_path: Path) -> list[str]:
             for page_num, page in enumerate(pdf_reader.pages):
                 text = page.extract_text()
                 if text:
-                    page_lines = text.split('\n')
+                    # Limpa quebras de linha desnecessárias e junta linhas que foram quebradas incorretamente
+                    text = re.sub(r'\n+', ' ', text)  # Substitui múltiplas quebras por espaço
+                    text = re.sub(r'\s+', ' ', text)  # Substitui múltiplos espaços por um só
+                    page_lines = text.split('. ')  # Divide por pontos seguidos de espaço
                     for line in page_lines:
                         line = line.strip()
+                        if line and not line.endswith('.'):
+                            line += '.'  # Adiciona ponto se não tiver
                         if line:
                             lines.append(line)
         return lines
@@ -92,7 +130,12 @@ def extract_text_from_pdf(pdf_path: Path) -> list[str]:
             import subprocess
             result = subprocess.run(['pdftotext', str(pdf_path), '-'], 
                                  capture_output=True, text=True, check=True)
-            lines = [line.strip() for line in result.stdout.split('\n') if line.strip()]
+            # Limpa quebras de linha desnecessárias
+            text = result.stdout
+            text = re.sub(r'\n+', ' ', text)  # Substitui múltiplas quebras por espaço
+            text = re.sub(r'\s+', ' ', text)  # Substitui múltiplos espaços por um só
+            lines = text.split('. ')  # Divide por pontos seguidos de espaço
+            lines = [line.strip() + '.' for line in lines if line.strip() and not line.strip().endswith('.')]
             return lines
         except (subprocess.CalledProcessError, FileNotFoundError):
             print("❌ Nem PyPDF2 nem pdftotext disponíveis.")
@@ -119,22 +162,22 @@ def contains_chinese_characters(text: str) -> bool:
     return bool(chinese_pattern.search(text))
 
 
-def create_base_file(pdf_path: Path, base_path: Path, resume: bool = False) -> bool:
+def create_base_file(doc_path: Path, base_path: Path, resume: bool = False) -> bool:
     """
     Cria o arquivo base.txt com linhas contendo caracteres chineses.
     
     Args:
-        pdf_path: Caminho para o arquivo PDF
+        doc_path: Caminho para o arquivo PDF ou DOCX
         base_path: Caminho para o arquivo base.txt
         resume: Se True, continua de onde parou se base.txt já existir
         
     Returns:
         bool: True se sucesso
     """
-    print(f"📖 Extraindo texto do PDF: {pdf_path.name}")
+    print(f"📖 Extraindo texto do documento: {doc_path.name}")
     
-    # Extrai texto do PDF
-    all_lines = extract_text_from_pdf(pdf_path)
+    # Extrai texto do documento
+    all_lines = extract_text_from_document(doc_path)
     print(f"📊 Total de linhas extraídas: {len(all_lines)}")
     
     # Filtra linhas com caracteres chineses
@@ -404,10 +447,10 @@ def _generate_docx_with_python_docx(pdf_path: Path, base_path: Path, output_path
     section.top_margin = Inches(1)
     section.bottom_margin = Inches(1)
     
-    # Processa cada linha do PDF original
-    pdf_text = extract_text_from_pdf(pdf_path)
+    # Processa cada linha do documento original
+    doc_text = extract_text_from_document(pdf_path)
     
-    for line in pdf_text:
+    for line in doc_text:
         line = line.strip()
         if not line:
             continue
@@ -418,55 +461,58 @@ def _generate_docx_with_python_docx(pdf_path: Path, base_path: Path, output_path
             if line in text_to_translations:
                 pairs = text_to_translations[line]
                 
-                # Cria parágrafo para a torre
-                p = doc.add_paragraph()
-                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                # Cria tabela com múltiplas colunas para a frase
+                words_per_row = 8  # Número de palavras por linha (ajustável)
+                word_groups = [pairs[i:i + words_per_row] for i in range(0, len(pairs), words_per_row)]
                 
-                # Adiciona cada palavra da torre
-                for i, pair in enumerate(pairs):
-                    chinese = pair["word"]
-                    pinyin = pair["pinyin"]
-                    translation = pair["translation"]
+                for group in word_groups:
+                    # Cria tabela para este grupo (3 linhas: pinyin, chinês, tradução)
+                    table = doc.add_table(rows=3, cols=len(group))
+                    table.alignment = WD_ALIGN_PARAGRAPH.CENTER
                     
-                    if chinese:
-                        # Cria tabela de 3 linhas para cada palavra
-                        table = doc.add_table(rows=3, cols=1)
-                        table.style = 'Table Grid'
-                        table.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                    # Remove bordas da tabela
+                    for row in table.rows:
+                        for cell in row.cells:
+                            cell._tc.get_or_add_tcPr().append(
+                                OxmlElement('w:tcBorders')
+                            )
+                    
+                    # Adiciona cada palavra na tabela
+                    for i, pair in enumerate(group):
+                        chinese = pair["word"]
+                        pinyin = pair["pinyin"]
+                        translation = pair["translation"]
                         
-                        # Pinyin (linha superior)
-                        if pinyin:
-                            pinyin_cell = table.cell(0, 0)
-                            pinyin_cell.text = pinyin
-                            pinyin_para = pinyin_cell.paragraphs[0]
-                            pinyin_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            pinyin_run = pinyin_para.runs[0]
-                            pinyin_run.font.size = Pt(10)
-                            pinyin_run.font.color.rgb = RGBColor(147, 112, 219)  # Roxo
-                            pinyin_run.font.bold = True
-                        
-                        # Chinês (linha do meio)
-                        chinese_cell = table.cell(1, 0)
-                        chinese_cell.text = chinese
-                        chinese_para = chinese_cell.paragraphs[0]
-                        chinese_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                        chinese_run = chinese_para.runs[0]
-                        chinese_run.font.size = Pt(12)
-                        chinese_run.font.bold = True
-                        
-                        # Tradução (linha inferior)
-                        if translation:
-                            translation_cell = table.cell(2, 0)
-                            translation_cell.text = translation
-                            translation_para = translation_cell.paragraphs[0]
-                            translation_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                            translation_run = translation_para.runs[0]
-                            translation_run.font.size = Pt(9)
-                            translation_run.font.color.rgb = RGBColor(255, 140, 0)  # Laranja
-                        
-                        # Espaço entre palavras
-                        if i < len(pairs) - 1:
-                            doc.add_paragraph(" ")  # Espaço entre palavras
+                        if chinese:
+                            # Pinyin (linha superior)
+                            if pinyin:
+                                pinyin_cell = table.cell(0, i)
+                                pinyin_cell.text = pinyin
+                                pinyin_para = pinyin_cell.paragraphs[0]
+                                pinyin_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                pinyin_run = pinyin_para.runs[0]
+                                pinyin_run.font.size = Pt(10)
+                                pinyin_run.font.color.rgb = RGBColor(147, 112, 219)  # Roxo
+                                pinyin_run.font.bold = True
+                            
+                            # Chinês (linha do meio)
+                            chinese_cell = table.cell(1, i)
+                            chinese_cell.text = chinese
+                            chinese_para = chinese_cell.paragraphs[0]
+                            chinese_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                            chinese_run = chinese_para.runs[0]
+                            chinese_run.font.size = Pt(12)
+                            chinese_run.font.bold = True
+                            
+                            # Tradução (linha inferior)
+                            if translation:
+                                translation_cell = table.cell(2, i)
+                                translation_cell.text = translation
+                                translation_para = translation_cell.paragraphs[0]
+                                translation_para.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                                translation_run = translation_para.runs[0]
+                                translation_run.font.size = Pt(9)
+                                translation_run.font.color.rgb = RGBColor(255, 140, 0)  # Laranja
                 
                 # Linha em branco após cada frase
                 doc.add_paragraph()
@@ -757,20 +803,21 @@ def _generate_text_with_translations(pdf_path: Path, base_path: Path, output_pat
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Processa PDFs com texto chinês e gera versão com pinyin e traduções",
+        description="Processa PDFs/DOCX com texto chinês e gera versão com pinyin e traduções",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Exemplos:
   python3 text_burner.py texto    # Processa assets/texto/
 
 Funcionamento:
-  - Procura por arquivo PDF no diretório assets/<directory_name>
+  - Procura por arquivo PDF ou DOCX no diretório assets/<directory_name>
   - Extrai linhas contendo caracteres chineses
   - Cria base.txt com essas linhas
   - Chama LLM para gerar pares de tradução
   - Sanitiza usando word-api
-  - Gera novo PDF com pinyin e traduções sobrepostas
+  - Gera novo DOCX com pinyin e traduções em tabelas
   - É idempotente - continua de onde parou se base.txt já existir
+  - DOCX como entrada preserva melhor a formatação original
         """
     )
     
@@ -811,24 +858,24 @@ Funcionamento:
         print(f"❌ Erro: Diretório {source_dir} não encontrado")
         return 1
     
-    # Procura por arquivo PDF
-    pdf_files = list(source_dir.glob("*.pdf"))
-    if not pdf_files:
-        print(f"❌ Erro: Nenhum arquivo PDF encontrado em {source_dir}")
+    # Procura por arquivo PDF ou DOCX
+    doc_files = list(source_dir.glob("*.pdf")) + list(source_dir.glob("*.docx"))
+    if not doc_files:
+        print(f"❌ Erro: Nenhum arquivo PDF ou DOCX encontrado em {source_dir}")
         return 1
     
-    if len(pdf_files) > 1:
-        print(f"⚠️  Múltiplos PDFs encontrados, usando: {pdf_files[0].name}")
+    if len(doc_files) > 1:
+        print(f"⚠️  Múltiplos documentos encontrados, usando: {doc_files[0].name}")
     
-    pdf_path = pdf_files[0]
+    doc_path = doc_files[0]
     base_path = source_dir / "base.txt"
-    output_path = source_dir / f"{pdf_path.stem}_with_translations.docx"
+    output_path = source_dir / f"{doc_path.stem}_with_translations.docx"
     
-    print(f"📄 PDF encontrado: {pdf_path.name}")
+    print(f"📄 Documento encontrado: {doc_path.name}")
     
     # 1. Cria arquivo base.txt
     print("\n📝 Passo 1: Criando base.txt...")
-    if not create_base_file(pdf_path, base_path, resume=True):
+    if not create_base_file(doc_path, base_path, resume=True):
         return 1
     
     # 2. Processa com LLM
@@ -846,7 +893,7 @@ Funcionamento:
     
     # 4. Gera DOCX com traduções
     print("\n📄 Passo 4: Gerando DOCX com traduções...")
-    if not generate_docx_with_translations(pdf_path, base_path, output_path):
+    if not generate_docx_with_translations(doc_path, base_path, output_path):
         return 1
     
     print("\n🎉 Processamento concluído com sucesso!")
