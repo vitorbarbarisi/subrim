@@ -94,6 +94,39 @@ def capture_video_frame(video_path, timestamp_seconds, output_path, translation_
         return False
 
 
+def normalize_pinyin(pinyin):
+    """
+    Remove caracteres especiais (acentos/tons) do pinyin para uso em nomes de arquivo.
+    
+    Args:
+        pinyin (str): String com pinyin contendo acentos
+        
+    Returns:
+        str: Pinyin sem acentos/tons, apenas letras básicas
+    """
+    # Mapeamento de caracteres especiais para versões básicas
+    char_replacements = {
+        'ā': 'a', 'á': 'a', 'ǎ': 'a', 'à': 'a',
+        'ē': 'e', 'é': 'e', 'ě': 'e', 'è': 'e',
+        'ī': 'i', 'í': 'i', 'ǐ': 'i', 'ì': 'i',
+        'ō': 'o', 'ó': 'o', 'ǒ': 'o', 'ò': 'o',
+        'ū': 'u', 'ú': 'u', 'ǔ': 'u', 'ù': 'u',
+        'ǖ': 'ü', 'ǘ': 'ü', 'ǚ': 'ü', 'ǜ': 'ü',
+        'Ā': 'A', 'Á': 'A', 'Ǎ': 'A', 'À': 'A',
+        'Ē': 'E', 'É': 'E', 'Ě': 'E', 'È': 'E',
+        'Ī': 'I', 'Í': 'I', 'Ǐ': 'I', 'Ì': 'I',
+        'Ō': 'O', 'Ó': 'O', 'Ǒ': 'O', 'Ò': 'O',
+        'Ū': 'U', 'Ú': 'U', 'Ǔ': 'U', 'Ù': 'U',
+        'Ǖ': 'Ü', 'Ǘ': 'Ü', 'Ǚ': 'Ü', 'Ǜ': 'Ü'
+    }
+    
+    normalized = pinyin
+    for old_char, new_char in char_replacements.items():
+        normalized = normalized.replace(old_char, new_char)
+    
+    return normalized
+
+
 def extract_pinyin(word, pairs_column):
     """
     Extrai o pinyin de uma palavra chinesa da coluna pairs.
@@ -227,14 +260,19 @@ def find_corresponding_video(base_file_path):
     Returns:
         Path: Caminho do arquivo de vídeo correspondente, ou None se não encontrado
     """
-    # Remove o sufixo '_base.txt' e adiciona '.mp4'
-    video_name = base_file_path.stem.replace('_base', '') + '.mp4'
-    video_path = base_file_path.parent / video_name
+    # Remove o sufixo '_base.txt' para obter o nome base
+    base_name = base_file_path.stem.replace('_base', '')
+    parent_dir = base_file_path.parent
     
-    if video_path.exists():
-        return video_path
+    # Procura por arquivos .mp4 que começam com o nome base
+    # Exemplo: amor100_base.txt -> amor100*.mp4 (encontra amor100_chromecast_merged.mp4)
+    video_matches = list(parent_dir.glob(f"{base_name}*.mp4"))
+    
+    if video_matches:
+        # Retorna o primeiro match encontrado
+        return video_matches[0]
     else:
-        print(f"Vídeo correspondente não encontrado: {video_path}")
+        print(f"Vídeo correspondente não encontrado para: {base_name}")
         return None
 
 
@@ -359,8 +397,9 @@ def main():
                         
                         # Captura screenshot
                         asset_name = base_file.stem.replace('_base', '')
-                        # Inclui o pinyin no nome do arquivo
-                        pinyin_clean = match['pinyin'].replace(' ', '_').replace(':', '').replace('(', '').replace(')', '')
+                        # Inclui o pinyin no nome do arquivo (sem caracteres especiais)
+                        pinyin_normalized = normalize_pinyin(match['pinyin'])
+                        pinyin_clean = pinyin_normalized.replace(' ', '_').replace(':', '').replace('(', '').replace(')', '')
                         screenshot_name = f"{match['word_index'] + 1}_{pinyin_clean}_line{match['line_num']:04d}_{asset_name}.png"
                         screenshot_path = screenshots_dir / screenshot_name
                         
