@@ -61,6 +61,13 @@ class VideoBurner:
             "process_chunks.py",
             "merge_chunks.py"
         ]
+        # Try to use venv Python if available
+        self.python_executable = self._get_python_executable()
+    
+    def _get_python_executable(self) -> str:
+        """Get Python executable, using system Python (venv will be added to PYTHONPATH)"""
+        # Always use system Python, we'll add venv to PYTHONPATH in run_script
+        return sys.executable
         
     def log(self, message: str, level: str = "INFO"):
         """Log message with timestamp"""
@@ -102,19 +109,36 @@ class VideoBurner:
         if args is None:
             args = []
         
-        cmd = [sys.executable, script, directory] + args
+        cmd = [self.python_executable, script, directory] + args
         self.log(f"Executando: {' '.join(cmd)}")
+        
+        # Add venv to PYTHONPATH if it exists
+        env = os.environ.copy()
+        venv_site_packages = Path("venv/lib")
+        if venv_site_packages.exists():
+            # Find the python version directory
+            for py_dir in venv_site_packages.iterdir():
+                if py_dir.is_dir() and py_dir.name.startswith("python"):
+                    site_packages = py_dir / "site-packages"
+                    if site_packages.exists():
+                        current_path = env.get("PYTHONPATH", "")
+                        if current_path:
+                            env["PYTHONPATH"] = f"{site_packages.absolute()}:{current_path}"
+                        else:
+                            env["PYTHONPATH"] = str(site_packages.absolute())
+                        break
         
         try:
             # Special handling for scripts that benefit from real-time output
             if script in ["processor.py", "adjust_base_times.py", "sanitize_base.py", "split_video.py", "process_chunks.py", "merge_chunks.py"]:
-                return self.run_script_realtime(cmd)
+                return self.run_script_realtime(cmd, env)
             
             result = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
-                cwd=Path.cwd()
+                cwd=Path.cwd(),
+                env=env
             )
             
             if result.returncode == 0:
@@ -132,8 +156,10 @@ class VideoBurner:
             self.log(f"✗ Erro ao executar {script}: {e}", "ERROR")
             return False
     
-    def run_script_realtime(self, cmd: List[str]) -> bool:
+    def run_script_realtime(self, cmd: List[str], env: dict = None) -> bool:
         """Run a script with real-time output display"""
+        if env is None:
+            env = os.environ.copy()
         try:
             process = subprocess.Popen(
                 cmd,
@@ -142,7 +168,8 @@ class VideoBurner:
                 text=True,
                 bufsize=1,
                 universal_newlines=True,
-                cwd=Path.cwd()
+                cwd=Path.cwd(),
+                env=env
             )
             
             # Read output line by line and display in real-time
