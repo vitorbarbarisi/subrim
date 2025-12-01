@@ -65,6 +65,11 @@ def capture_video_frame(video_path, timestamp_seconds, output_path, translation_
             return False
         
         # Calcula o número do frame correspondente ao timestamp
+        erro_margin = int(round(0.001749577141105422 * timestamp_seconds + 0.18668641727612567)) if timestamp_seconds > 250 else 0
+        print(f"Timestamp: {timestamp_seconds}s")
+        print(f"Erro margin: {erro_margin}s")
+        timestamp_seconds += erro_margin
+        print(f"Timestamp com erro: {timestamp_seconds}s")
         frame_number = int(fps * timestamp_seconds)
         
         # Define o frame a ser capturado
