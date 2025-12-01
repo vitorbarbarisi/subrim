@@ -227,6 +227,12 @@ def process_word_api_integration(pairs: list) -> list:
             # Palavra encontrada, verifica confidence_level
             confidence_level = api_response.get("confidence_level", 0)
             
+            # Garante que confidence_level seja int (pode vir como string da API)
+            try:
+                confidence_level = int(confidence_level)
+            except (ValueError, TypeError):
+                confidence_level = 0
+            
             if confidence_level == 3:
                 print(f"   🗑️  Palavra '{word}' removida (confidence_level == 3)")
                 # Não adiciona à lista filtrada
