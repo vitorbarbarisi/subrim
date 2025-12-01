@@ -26,3 +26,8 @@ __pycache__/
 client_secret_*.json
 google_drive_config.json
 warehouse/screenshots/
+
+# Data files
+*.csv
+*.json
+!google_drive_config.json
