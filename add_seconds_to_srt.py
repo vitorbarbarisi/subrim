@@ -12,6 +12,19 @@ import re
 from datetime import datetime, timedelta
 
 
+def detect_encoding(file_path):
+    """Try to detect file encoding."""
+    encodings = ['utf-8', 'latin-1', 'iso-8859-1', 'cp1252', 'utf-8-sig']
+    for encoding in encodings:
+        try:
+            with open(file_path, 'r', encoding=encoding) as f:
+                f.read()
+            return encoding
+        except (UnicodeDecodeError, UnicodeError):
+            continue
+    return 'latin-1'  # Fallback
+
+
 def parse_srt_time(time_str):
     """Parse SRT timestamp to datetime object."""
     # SRT format: HH:MM:SS,mmm
@@ -35,7 +48,11 @@ def add_seconds_to_srt(input_file, output_file, seconds_to_add):
 
     modified_count = 0
 
-    with open(input_file, 'r', encoding='utf-8') as f:
+    # Detect encoding
+    encoding = detect_encoding(input_file)
+    print(f"🔍 Encoding detectado: {encoding}")
+
+    with open(input_file, 'r', encoding=encoding) as f:
         content = f.read()
 
     # Split content into lines
@@ -55,6 +72,13 @@ def add_seconds_to_srt(input_file, output_file, seconds_to_add):
             # Add seconds
             start_dt += timedelta(seconds=seconds_to_add)
             end_dt += timedelta(seconds=seconds_to_add)
+            
+            # Ensure timestamps don't go negative (SRT starts at 00:00:00)
+            base_time = datetime(1900, 1, 1, 0, 0, 0)
+            if start_dt < base_time:
+                start_dt = base_time
+            if end_dt < base_time:
+                end_dt = base_time
 
             # Format back to SRT
             new_start = format_srt_time(start_dt)
@@ -81,7 +105,12 @@ def main():
 
     input_file = sys.argv[1]
     seconds_to_add = float(sys.argv[2])
-    output_file = input_file.replace('.srt', f'_mais_{int(seconds_to_add)}s.srt')
+    
+    # Generate output filename based on whether adding or subtracting
+    if seconds_to_add >= 0:
+        output_file = input_file.replace('.srt', f'_mais_{int(seconds_to_add)}s.srt')
+    else:
+        output_file = input_file.replace('.srt', f'_menos_{int(abs(seconds_to_add))}s.srt')
 
     add_seconds_to_srt(input_file, output_file, seconds_to_add)
 
