@@ -166,20 +166,56 @@ class GloboPlayScraper:
             )
 
             # Encontra todos os links de episódios diretamente
-            episode_containers = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='/v/'][href*='?s=0s']")
+            episode_links = self.driver.find_elements(By.CSS_SELECTOR, "a[href*='/v/'][href*='?s=0s']")
 
-            logger.info(f"Encontrados {len(episode_containers)} episódios para processar")
+            logger.info(f"Encontrados {len(episode_links)} episódios para processar")
 
-            if episode_containers:
+            if episode_links:
                 logger.info("✅ Episódios encontrados com sucesso")
             else:
                 logger.warning("⚠️  Nenhum episódio encontrado na página atual")
                 logger.info("💡 Dica: Certifique-se de fazer scroll suficiente antes de fechar a janela")
 
+            # Para cada link, encontra o container pai que contém todas as informações
+            episode_containers = []
+            for link in episode_links:
+                container_found = False
+                
+                # Estratégia 1: Procura por elemento pai direto (li, div, article, etc) que seja um card
+                try:
+                    direct_parent = link.find_element(By.XPATH, "./..")
+                    direct_parent_text = direct_parent.text.strip()
+                    # Se o pai direto tem texto razoável (entre 20 e 500 caracteres), provavelmente é o card
+                    if 20 < len(direct_parent_text) < 500:
+                        episode_containers.append(direct_parent)
+                        container_found = True
+                except:
+                    pass
+                
+                # Estratégia 2: Se não encontrou, procura por elemento com classes específicas
+                if not container_found:
+                    try:
+                        parent = link.find_element(By.XPATH, "./ancestor::li[1] | ./ancestor::div[contains(@class, 'card') or contains(@class, 'item') or contains(@class, 'episode')][1] | ./ancestor::article[1]")
+                        parent_text = parent.text.strip()
+                        if 20 < len(parent_text) < 500:
+                            episode_containers.append(parent)
+                            container_found = True
+                    except:
+                        pass
+                
+                # Estratégia 3: Se ainda não encontrou, usa o pai direto mesmo que tenha pouco texto
+                if not container_found:
+                    try:
+                        parent = link.find_element(By.XPATH, "./..")
+                        episode_containers.append(parent)
+                    except:
+                        # Último recurso: usa o próprio link
+                        episode_containers.append(link)
+
             for i, container in enumerate(episode_containers):
                 try:
-                    # Extrai informações do container
-                    episode_info = self.extract_episode_info(container)
+                    # Extrai informações do container (i+1 porque o índice começa em 0)
+                    episode_info = self.extract_episode_info(container, episode_index=i+1)
 
                     logger.debug(f"Container {i+1}: extract_episode_info retornou: {episode_info}")
 
@@ -223,14 +259,16 @@ class GloboPlayScraper:
             else:
                 logger.error(f"Erro geral na extração: {e}")
 
-    def extract_episode_info(self, container):
+    def extract_episode_info(self, container, episode_index=None):
         """Extrai informações detalhadas de um container de episódio"""
         try:
+            import re
             logger.debug("🔍 Iniciando extração de info do container")
 
             # Extrai URL
             if container.tag_name == 'a':
                 href = container.get_attribute("href")
+                link_element = container
                 logger.debug(f"URL direta do link: {href}")
             else:
                 link_element = container.find_element(By.CSS_SELECTOR, "a[href*='/v/']")
@@ -248,34 +286,178 @@ class GloboPlayScraper:
             # Tenta extrair número do episódio e data do capítulo
             episode_number = ""
             chapter_date = ""
+            
+            # Estratégia 1: Extrai do atributo title do link (mais confiável)
+            try:
+                title_attr = link_element.get_attribute("title")
+                if title_attr:
+                    logger.debug(f"Atributo title encontrado: '{title_attr}'")
+                    # Procura por padrão "Capítulo de DD/MM/YYYY"
+                    date_match = re.search(r'Capítulo de\s+(\d{2}/\d{2}/\d{4})', title_attr, re.IGNORECASE)
+                    if date_match:
+                        chapter_date = date_match.group(1)
+                        logger.debug(f"Data extraída do title: {chapter_date}")
+            except:
+                pass
 
-            # Tenta extrair diretamente do texto do link
-            if hasattr(container, 'text') and container.text:
-                full_text = container.text.strip()
-                logger.debug(f"Texto completo do container: '{full_text}'")
-
-                # Procura por padrão "Episódio X"
-                if "Episódio" in full_text or "Episodio" in full_text:
+            # Tenta encontrar o elemento pai que contém mais informações
+            full_text = ""
+            parent_element = None
+            
+            # Estratégia 1: Procura por elemento pai com classes específicas
+            try:
+                parent_element = link_element.find_element(By.XPATH, "./ancestor::*[contains(@class, 'episode') or contains(@class, 'card') or contains(@class, 'item') or contains(@class, 'chapter') or contains(@class, 'video') or contains(@class, 'content')][1]")
+                full_text = parent_element.text.strip()
+                logger.debug(f"Texto extraído do elemento pai (estratégia 1): '{full_text[:200]}...'")
+            except:
+                pass
+            
+            # Estratégia 2: Se não encontrou, tenta pegar o elemento pai direto (div, article, etc)
+            if not full_text:
+                try:
+                    parent_element = link_element.find_element(By.XPATH, "./..")
+                    full_text = parent_element.text.strip()
+                    logger.debug(f"Texto extraído do pai direto (estratégia 2): '{full_text[:200]}...'")
+                except:
+                    pass
+            
+            # Estratégia 3: Se ainda não encontrou, tenta pegar do container
+            if not full_text:
+                try:
+                    full_text = container.text.strip()
+                    logger.debug(f"Texto extraído do container (estratégia 3): '{full_text[:200]}...'")
+                except:
+                    pass
+            
+            # Estratégia 4: Último recurso - pega do próprio link
+            if not full_text:
+                try:
+                    full_text = link_element.text.strip()
+                    logger.debug(f"Texto extraído do link (estratégia 4): '{full_text[:200]}...'")
+                except:
+                    full_text = ""
+            
+            # Se ainda não tem texto, tenta pegar o innerHTML para análise
+            if not full_text or len(full_text) < 10:
+                try:
+                    if parent_element:
+                        html_content = parent_element.get_attribute('innerHTML')
+                    else:
+                        html_content = container.get_attribute('innerHTML')
+                    # Extrai texto do HTML removendo tags
                     import re
-                    match = re.search(r'(?:Episódio|Episodio)\s*(\d+)', full_text, re.IGNORECASE)
-                    if match:
-                        episode_number = match.group(1)
-                        logger.debug(f"Número do episódio encontrado: {episode_number}")
+                    text_from_html = re.sub(r'<[^>]+>', ' ', html_content)
+                    text_from_html = ' '.join(text_from_html.split())
+                    if text_from_html and len(text_from_html) > len(full_text):
+                        full_text = text_from_html
+                        logger.debug(f"Texto extraído do HTML (estratégia 5): '{full_text[:200]}...'")
+                except:
+                    pass
 
-                # Procura por padrão "Capítulo de DD/MM/YYYY"
-                if "Capítulo de" in full_text:
-                    chapter_date = full_text.split("Capítulo de")[1].split("\n")[0].strip()
-                    logger.debug(f"Data do capítulo encontrada: {chapter_date}")
+            logger.debug(f"Texto final extraído: '{full_text[:300]}...'")
 
-            # Fallback se não conseguiu extrair
+            # Procura por padrão "X. Capítulo X" ou "Episódio X"
+            episode_match = re.search(r'(?:^|\s)(\d+)\.\s*(?:Capítulo|Episódio)', full_text, re.IGNORECASE | re.MULTILINE)
+            if episode_match:
+                episode_number = episode_match.group(1)
+                logger.debug(f"Número do episódio encontrado (padrão X.): {episode_number}")
+            else:
+                # Tenta padrão "Episódio X"
+                episode_match = re.search(r'(?:Episódio|Episodio)\s*(\d+)', full_text, re.IGNORECASE)
+                if episode_match:
+                    episode_number = episode_match.group(1)
+                    logger.debug(f"Número do episódio encontrado (padrão Episódio): {episode_number}")
+
+            # Procura por padrão "Capítulo de DD/MM/YYYY"
+            date_match = re.search(r'Capítulo de\s+(\d{2}/\d{2}/\d{4})', full_text, re.IGNORECASE)
+            if date_match:
+                chapter_date = date_match.group(1)
+                logger.debug(f"Data do capítulo encontrada: {chapter_date}")
+            else:
+                # Tenta padrão alternativo "DD/MM/YYYY"
+                date_match = re.search(r'(\d{2}/\d{2}/\d{4})', full_text)
+                if date_match:
+                    chapter_date = date_match.group(1)
+                    logger.debug(f"Data encontrada (padrão alternativo): {chapter_date}")
+
+            # Estratégia 2: Usa JavaScript para encontrar elementos que podem conter o número do episódio
             if not episode_number:
-                # Tenta usar o ID para inferir o número (lógica baseada na URL)
-                if video_id.startswith('133'):
-                    # Episódios atuais - pode ser mais complexo
-                    episode_number = "Atual"
+                try:
+                    # Procura por elementos h2, h3, h4 no container usando JavaScript
+                    headings_text = self.driver.execute_script("""
+                        var container = arguments[0];
+                        var headings = container.querySelectorAll('h1, h2, h3, h4, h5, h6');
+                        var texts = [];
+                        for (var i = 0; i < headings.length; i++) {
+                            texts.push(headings[i].textContent.trim());
+                        }
+                        return texts;
+                    """, container)
+                    
+                    for heading_text in headings_text:
+                        # Procura por padrão "X. Capítulo X" ou "X. Episódio X"
+                        episode_match = re.search(r'^(\d+)\.\s*(?:Capítulo|Episódio)', heading_text, re.IGNORECASE)
+                        if episode_match:
+                            episode_number = episode_match.group(1)
+                            logger.debug(f"Número do episódio encontrado em heading: {episode_number}")
+                            break
+                except:
+                    pass
+            
+            # Estratégia 3: Procura por número do episódio no texto completo
+            if not episode_number and full_text:
+                # Procura por padrão "X. Capítulo" no início do texto
+                episode_match = re.search(r'^(\d+)\.\s*(?:Capítulo|Episódio)', full_text, re.IGNORECASE | re.MULTILINE)
+                if episode_match:
+                    episode_number = episode_match.group(1)
+                    logger.debug(f"Número do episódio encontrado no texto (padrão X.): {episode_number}")
+                else:
+                    # Procura por padrão "Capítulo X" ou "Episódio X"
+                    episode_match = re.search(r'(?:Capítulo|Episódio)\s+(\d+)', full_text, re.IGNORECASE)
+                    if episode_match:
+                        episode_number = episode_match.group(1)
+                        logger.debug(f"Número do episódio encontrado no texto (padrão Capítulo X): {episode_number}")
+            
+            # Estratégia 3: Tenta buscar em elementos filhos específicos (h2, h3, etc)
+            if not episode_number:
+                try:
+                    # Procura por elementos h2, h3, h4 que podem conter o título
+                    for tag in ['h2', 'h3', 'h4', 'h5']:
+                        try:
+                            title_elem = container.find_element(By.CSS_SELECTOR, tag)
+                            title_text = title_elem.text.strip()
+                            
+                            episode_match = re.search(r'(?:^|\s)(\d+)\.\s*(?:Capítulo|Episódio)', title_text, re.IGNORECASE)
+                            if episode_match:
+                                episode_number = episode_match.group(1)
+                                logger.debug(f"Número encontrado em {tag}: {episode_number}")
+                                break
+                        except:
+                            continue
+                except:
+                    pass
+            
+            # Estratégia 4: Se ainda não encontrou a data, tenta do atributo alt da imagem
+            if not chapter_date:
+                try:
+                    img_elem = container.find_element(By.CSS_SELECTOR, "img")
+                    alt_text = img_elem.get_attribute("alt")
+                    if alt_text:
+                        date_match = re.search(r'Capítulo de\s+(\d{2}/\d{2}/\d{4})', alt_text, re.IGNORECASE)
+                        if date_match:
+                            chapter_date = date_match.group(1)
+                            logger.debug(f"Data encontrada no alt da imagem: {chapter_date}")
+                except:
+                    pass
+
+            # Fallback se não conseguiu extrair: usa o índice se fornecido
+            if not episode_number:
+                if episode_index is not None:
+                    episode_number = str(episode_index)
+                    logger.debug(f"Usando índice como número do episódio: {episode_number}")
                 else:
                     episode_number = "N/A"
-                logger.debug(f"Fallback usado para episódio: {episode_number}")
+                    logger.debug(f"Fallback usado para episódio: {episode_number}")
 
             if not chapter_date:
                 chapter_date = f"Capítulo {video_id}"
@@ -283,7 +465,10 @@ class GloboPlayScraper:
 
             # Cria título completo
             if episode_number != "N/A" and episode_number != "Atual":
-                full_title = f"Episódio {episode_number}, {chapter_date}"
+                if chapter_date and chapter_date != f"Capítulo {video_id}":
+                    full_title = f"Episódio {episode_number}, {chapter_date}"
+                else:
+                    full_title = f"Episódio {episode_number}"
             else:
                 full_title = chapter_date
 
