@@ -30,4 +30,6 @@ warehouse/screenshots/
 # Data files
 *.csv
 *.json
-!google_drive_config.json
+
+# Archive files
+*.zip
