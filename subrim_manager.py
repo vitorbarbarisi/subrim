@@ -786,7 +786,7 @@ class App(tk.Tk):
         if not self._selected:
             return
         self._launch(
-            [sys.executable, str(REPO / "video_burner.py"), self._selected["name"]],
+            [sys.executable, str(REPO / "video_burner.py"), self._selected["name"], "--exact"],
             label=f"Pipeline: {self._selected['name']}",
         )
 
@@ -796,7 +796,7 @@ class App(tk.Tk):
         name = self._selected["name"]
         if messagebox.askyesno("Confirmar", f"Reprocessar '{name}' do zero?\nIsso irá sobrescrever os arquivos existentes."):
             self._launch(
-                [sys.executable, str(REPO / "video_burner.py"), name, "--force"],
+                [sys.executable, str(REPO / "video_burner.py"), name, "--exact", "--force"],
                 label=f"Pipeline (force): {name}",
             )
 

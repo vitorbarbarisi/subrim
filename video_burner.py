@@ -75,17 +75,28 @@ class VideoBurner:
             timestamp = time.strftime("%H:%M:%S")
             print(f"[{timestamp}] [{level}] {message}")
     
-    def find_directories(self, prefix: str) -> List[Path]:
-        """Find all directories in assets/ that start with the given prefix"""
+    def find_directories(self, prefix: str, exact: bool = False) -> List[Path]:
+        """Find directories in assets/ matching the name.
+
+        - exact=False (padrão): todas as pastas que começam com ``prefix`` (batch).
+        - exact=True: apenas a pasta cujo nome é exatamente ``prefix`` (individual).
+        """
         if not self.assets_dir.exists():
             self.log(f"Diretório assets/ não encontrado!", "ERROR")
             return []
-        
+
+        if exact:
+            target = self.assets_dir / prefix
+            if target.is_dir() and not target.name.endswith("_sub"):
+                return [target]
+            self.log(f"Pasta exata '{prefix}' não encontrada em assets/", "WARNING")
+            return []
+
         directories = []
         for item in self.assets_dir.iterdir():
             if item.is_dir() and item.name.startswith(prefix) and not item.name.endswith("_sub"):
                 directories.append(item)
-        
+
         directories.sort(key=lambda x: x.name)
         return directories
     
@@ -281,14 +292,18 @@ class VideoBurner:
         self.log(f"Upload para Google Drive não implementado ainda", "WARNING")
         return True
     
-    def process_all(self, prefix: str, force: bool = False, cleanup: bool = False, 
-                   upload_drive: bool = False, drive_folder_id: Optional[str] = None) -> None:
-        """Process all directories matching the prefix"""
-        self.log(f"Iniciando processamento para prefixo: {prefix}")
-        
-        directories = self.find_directories(prefix)
+    def process_all(self, prefix: str, force: bool = False, cleanup: bool = False,
+                   upload_drive: bool = False, drive_folder_id: Optional[str] = None,
+                   exact: bool = False) -> None:
+        """Process all directories matching the prefix (ou só a pasta exata se exact=True)."""
+        if exact:
+            self.log(f"Iniciando processamento individual: {prefix}")
+        else:
+            self.log(f"Iniciando processamento para prefixo: {prefix}")
+
+        directories = self.find_directories(prefix, exact=exact)
         if not directories:
-            self.log(f"Nenhuma pasta encontrada com prefixo '{prefix}' em assets/", "WARNING")
+            self.log(f"Nenhuma pasta encontrada para '{prefix}' em assets/", "WARNING")
             return
         
         self.log(f"Encontradas {len(directories)} pastas para processar")
@@ -400,19 +415,26 @@ Requisitos:
         action="store_true",
         help="Modo silencioso (menos output)"
     )
-    
+
+    parser.add_argument(
+        "--exact",
+        action="store_true",
+        help="Processa apenas a pasta com o nome exato (individual), sem casar por prefixo"
+    )
+
     args = parser.parse_args()
-    
+
     # Create burner instance
     burner = VideoBurner(verbose=not args.quiet)
-    
+
     # Process all directories
     burner.process_all(
         prefix=args.directory_prefix,
         force=args.force,
         cleanup=args.cleanup,
         upload_drive=args.upload_drive,
-        drive_folder_id=args.drive_folder_id
+        drive_folder_id=args.drive_folder_id,
+        exact=args.exact,
     )
 
 
