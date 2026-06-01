@@ -46,7 +46,7 @@ except ImportError:
 
 # Importar funções do processor.py
 from processor import (
-    _get_api_provider, _retry_api_call, _call_maritaca_pairs, _call_deepseek_pairs,
+    _retry_api_call, _call_deepseek_pairs,
     _call_deepseek_translate_to_pt, load_dotenv
 )
 
@@ -180,14 +180,13 @@ def create_base_file(txt_path: Path, base_path: Path, resume: bool = False) -> b
     return True
 
 
-def process_base_with_llm(base_path: Path, force_provider: str | None = None) -> bool:
+def process_base_with_llm(base_path: Path) -> bool:
     """
     Processa o arquivo base.txt chamando LLM para gerar pares de tradução.
-    
+
     Args:
         base_path: Caminho para o arquivo base.txt
-        force_provider: Força uso de provider específico ('maritaca' ou 'deepseek')
-        
+
     Returns:
         bool: True se sucesso
     """
@@ -220,12 +219,7 @@ def process_base_with_llm(base_path: Path, force_provider: str | None = None) ->
                     pairs_str = parts[1]
                     # Gera tradução completa
                     try:
-                        provider = force_provider if force_provider else "deepseek"
-                        if provider == "deepseek":
-                            translation = _retry_api_call(_call_deepseek_translate_to_pt, chinese_text)
-                        else:
-                            # Para maritaca, usa deepseek para tradução também (não há função específica)
-                            translation = _retry_api_call(_call_deepseek_translate_to_pt, chinese_text)
+                        translation = _retry_api_call(_call_deepseek_translate_to_pt, chinese_text)
                         processed_lines.append(f"{chinese_text}\t{pairs_str}\t{translation}")
                         time.sleep(0.1)
                     except Exception as e:
@@ -237,21 +231,9 @@ def process_base_with_llm(base_path: Path, force_provider: str | None = None) ->
             
             # Gera pares e tradução usando LLM
             try:
-                # Usa deepseek como padrão, a menos que force_provider seja especificado
-                provider = force_provider if force_provider else "deepseek"
-                if provider == "maritaca":
-                    pairs_str = _retry_api_call(_call_maritaca_pairs, line)
-                else:
-                    # Default é deepseek
-                    pairs_str = _retry_api_call(_call_deepseek_pairs, line)
-                
-                # Gera tradução completa da linha
-                if provider == "deepseek":
-                    translation = _retry_api_call(_call_deepseek_translate_to_pt, line)
-                else:
-                    # Para maritaca, usa deepseek para tradução também
-                    translation = _retry_api_call(_call_deepseek_translate_to_pt, line)
-                
+                pairs_str = _retry_api_call(_call_deepseek_pairs, line)
+                translation = _retry_api_call(_call_deepseek_translate_to_pt, line)
+
                 # Adiciona linha com pares e tradução
                 processed_lines.append(f"{line}\t{pairs_str}\t{translation}")
                 
@@ -974,29 +956,9 @@ Funcionamento:
     )
     
     parser.add_argument('directory', help='Nome do diretório dentro de assets/')
-    
-    # API provider selection
-    api_group = parser.add_mutually_exclusive_group()
-    api_group.add_argument(
-        "-m", "--maritaca",
-        action="store_true",
-        help="Force use of Maritaca AI API (requires MARITACA_API_KEY)"
-    )
-    api_group.add_argument(
-        "-d", "--deepseek",
-        action="store_true",
-        help="Force use of DeepSeek API (requires DEEPSEEK_API_KEY)"
-    )
-    
+
     args = parser.parse_args()
-    
-    # Determina provider forçado
-    force_provider = None
-    if args.maritaca:
-        force_provider = "maritaca"
-    elif args.deepseek:
-        force_provider = "deepseek"
-    
+
     # Constrói caminhos
     assets_root = Path(__file__).resolve().parent / "assets"
     source_dir = assets_root / args.directory
@@ -1032,7 +994,7 @@ Funcionamento:
     
     # 2. Processa com LLM
     print("\n🤖 Passo 2: Processando com LLM...")
-    if not process_base_with_llm(base_path, force_provider):
+    if not process_base_with_llm(base_path):
         return 1
     
     # 3. Verifica word-api e sanitiza
