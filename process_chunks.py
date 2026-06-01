@@ -392,8 +392,9 @@ def escape_ffmpeg_text(text: str) -> str:
     text = text.replace('%', '\\%')    # Percent sign
     text = text.replace(';', '\\;')    # Semicolon
     text = text.replace(',', '\\,')    # Comma (critical for FFmpeg parsing)
-    # NOTE: Single quotes, colons, and parentheses don't need escaping when using double quotes
-    
+    text = text.replace("'", "\\'")    # Single quote (begins a quoted section in the filtergraph)
+    # NOTE: colons and parentheses don't need escaping in the unquoted text= value
+
     return text
 
 
