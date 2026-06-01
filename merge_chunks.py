@@ -19,9 +19,225 @@ import subprocess
 import os
 import shutil
 import re
+import json
 from pathlib import Path
-from typing import List, Tuple, Dict
+from typing import List, Tuple, Dict, Optional
 import glob
+
+import requests
+
+# Config de credenciais do Google Drive (ao lado deste script).
+DRIVE_CONFIG = Path(__file__).parent / "google_drive_config.json"
+# Tamanho de chunk do upload resumável (múltiplo de 256 KiB, exigido pela API).
+DRIVE_UPLOAD_CHUNK = 16 * 1024 * 1024
+
+
+def _drive_access_token(cfg: dict) -> str:
+    """Troca o refresh_token por um access_token válido."""
+    resp = requests.post(
+        "https://oauth2.googleapis.com/token",
+        data={
+            "client_id": cfg["client_id"],
+            "client_secret": cfg["client_secret"],
+            "refresh_token": cfg["refresh_token"],
+            "grant_type": "refresh_token",
+        },
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"❌ Falha ao renovar access_token [status {resp.status_code}]: {resp.text}"
+        )
+    token = resp.json().get("access_token")
+    if not token:
+        raise RuntimeError(f"❌ Resposta de token sem access_token: {resp.text}")
+    return token
+
+
+def _write_drive_marker(file_path: Path, asset_name: str, info: dict) -> None:
+    """Grava um marcador local indicando que o upload ao Drive foi concluído.
+
+    O subrim_manager usa este arquivo para exibir a fase 'Envio para o Drive'.
+    """
+    import datetime
+
+    marker = file_path.parent / f"{asset_name}_drive.json"
+    file_id = info.get("id", "")
+    payload = {
+        "file_id": file_id,
+        "name": info.get("name", file_path.name),
+        "link": f"https://drive.google.com/file/d/{file_id}/view" if file_id else "",
+        "uploaded_at": datetime.datetime.now().isoformat(timespec="seconds"),
+    }
+    try:
+        marker.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+    except Exception as e:  # noqa: BLE001 - marcador é best-effort
+        print(f"⚠️  Não foi possível gravar o marcador de upload: {e}")
+
+
+def _drive_find_or_create_folder(token: str, name: str, parent_id: str) -> str:
+    """Retorna o id da subpasta ``name`` dentro de ``parent_id``, criando-a se preciso."""
+    safe = name.replace("\\", "\\\\").replace("'", "\\'")
+    query = (
+        f"name = '{safe}' and mimeType = 'application/vnd.google-apps.folder' "
+        f"and '{parent_id}' in parents and trashed = false"
+    )
+    resp = requests.get(
+        "https://www.googleapis.com/drive/v3/files",
+        headers={"Authorization": f"Bearer {token}"},
+        params={
+            "q": query,
+            "fields": "files(id,name)",
+            "supportsAllDrives": "true",
+            "includeItemsFromAllDrives": "true",
+        },
+        timeout=30,
+    )
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"❌ Falha ao buscar pasta '{name}' [status {resp.status_code}]: {resp.text}"
+        )
+    files = resp.json().get("files", [])
+    if files:
+        return files[0]["id"]
+
+    created = requests.post(
+        "https://www.googleapis.com/drive/v3/files",
+        headers={
+            "Authorization": f"Bearer {token}",
+            "Content-Type": "application/json; charset=UTF-8",
+        },
+        params={"supportsAllDrives": "true"},
+        data=json.dumps({
+            "name": name,
+            "mimeType": "application/vnd.google-apps.folder",
+            "parents": [parent_id],
+        }),
+        timeout=30,
+    )
+    if created.status_code not in (200, 201):
+        raise RuntimeError(
+            f"❌ Falha ao criar pasta '{name}' [status {created.status_code}]: {created.text}"
+        )
+    folder_id = created.json().get("id")
+    print(f"   📁 Pasta '{name}' criada no Drive (id={folder_id})")
+    return folder_id
+
+
+def upload_to_drive(file_path: Path, asset_name: str) -> bool:
+    """Envia o vídeo final ao Google Drive via upload resumável.
+
+    O arquivo é gravado em ``videos/<prefixo>``, onde ``<prefixo>`` é o nome do
+    asset sem os dígitos finais (ex.: ``clone40`` → ``videos/clone``). As pastas
+    são criadas no Drive se não existirem.
+
+    Usa as credenciais de ``google_drive_config.json`` (refresh_token). Falhas
+    são logadas explicitamente e retornam ``False`` sem interromper o merge —
+    o arquivo local já foi gerado e não deve ser perdido.
+    """
+    if not DRIVE_CONFIG.exists():
+        print(f"⚠️  {DRIVE_CONFIG.name} não encontrado — upload para o Drive ignorado")
+        return False
+
+    try:
+        cfg = json.loads(DRIVE_CONFIG.read_text(encoding="utf-8"))
+    except Exception as e:
+        print(f"❌ Falha ao ler {DRIVE_CONFIG.name}: {e}")
+        return False
+
+    for key in ("client_id", "client_secret", "refresh_token"):
+        if not cfg.get(key):
+            print(f"❌ {DRIVE_CONFIG.name} sem '{key}' — upload abortado")
+            return False
+
+    file_size = file_path.stat().st_size
+    print(f"\n☁️  Enviando para o Google Drive: {file_path.name} ({file_size / 1e9:.2f} GB)")
+
+    try:
+        token = _drive_access_token(cfg)
+    except Exception as e:
+        print(str(e))
+        return False
+
+    # Destino: videos/<prefixo>, onde prefixo = asset sem dígitos finais.
+    prefix = re.sub(r"\d+$", "", asset_name) or asset_name
+    root_id = cfg.get("folder_id") or "root"
+    try:
+        videos_id = _drive_find_or_create_folder(token, "videos", root_id)
+        prefix_id = _drive_find_or_create_folder(token, prefix, videos_id)
+    except Exception as e:
+        print(str(e))
+        return False
+    print(f"   📂 Destino no Drive: videos/{prefix}")
+
+    metadata: dict = {"name": file_path.name, "parents": [prefix_id]}
+
+    # 1) Inicia a sessão resumável e obtém a URI de upload.
+    try:
+        init = requests.post(
+            "https://www.googleapis.com/upload/drive/v3/files"
+            "?uploadType=resumable&supportsAllDrives=true",
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json; charset=UTF-8",
+                "X-Upload-Content-Type": "video/mp4",
+                "X-Upload-Content-Length": str(file_size),
+            },
+            data=json.dumps(metadata),
+            timeout=60,
+        )
+    except Exception as e:
+        print(f"❌ Erro ao iniciar sessão de upload no Drive: {e}")
+        return False
+
+    if init.status_code not in (200, 201):
+        print(f"❌ Falha ao iniciar upload [status {init.status_code}]: {init.text}")
+        return False
+
+    session_uri = init.headers.get("Location")
+    if not session_uri:
+        print("❌ Sessão de upload sem header 'Location' — abortando")
+        return False
+
+    # 2) Envia o arquivo em chunks (resumável), com log de progresso.
+    offset = 0
+    last_pct = -10
+    try:
+        with open(file_path, "rb") as f:
+            while offset < file_size:
+                chunk = f.read(DRIVE_UPLOAD_CHUNK)
+                if not chunk:
+                    break
+                end = offset + len(chunk) - 1
+                resp = requests.put(
+                    session_uri,
+                    headers={
+                        "Content-Length": str(len(chunk)),
+                        "Content-Range": f"bytes {offset}-{end}/{file_size}",
+                    },
+                    data=chunk,
+                    timeout=600,
+                )
+                if resp.status_code in (200, 201):
+                    info = resp.json()
+                    print(f"   ✅ Upload concluído — id={info.get('id')} nome={info.get('name')}")
+                    _write_drive_marker(file_path, asset_name, info)
+                    return True
+                if resp.status_code != 308:
+                    print(f"❌ Falha no upload [status {resp.status_code}]: {resp.text}")
+                    return False
+
+                offset = end + 1
+                pct = int(offset / file_size * 100)
+                if pct >= last_pct + 10:
+                    print(f"   ⏫ {pct}% ({offset / 1e9:.2f}/{file_size / 1e9:.2f} GB)")
+                    last_pct = pct
+    except Exception as e:
+        print(f"❌ Erro durante o upload do arquivo para o Drive: {e}")
+        return False
+
+    print("❌ Upload terminou sem confirmação de sucesso do Drive")
+    return False
 
 
 def find_original_chunks(directory: Path) -> Dict[int, Path]:
@@ -358,6 +574,11 @@ Requisitos:
             print(f"   • Arquivos _processed criados: {len(created_files)}")
             print(f"   • Total de chunks unidos: {len(final_file_list)}")
             print(f"   • Arquivo final: {output_file}")
+
+            # Etapa 4: Envio para o Google Drive
+            print(f"\n📋 ETAPA 4: Upload para o Google Drive")
+            if not upload_to_drive(output_file, args.directory):
+                print("⚠️  Merge concluído, mas o upload para o Drive não foi realizado")
             return 0
         else:
             print("❌ Falha no merge")
