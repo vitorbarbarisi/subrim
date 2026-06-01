@@ -90,20 +90,24 @@ def get_word_from_api(word: str) -> dict:
     Returns:
         dict: Resposta da API ou None se erro
     """
+    url = f"{WORD_API_BASE_URL}/{word}"
     try:
-        url = f"{WORD_API_BASE_URL}/{word}"
         response = requests.get(url, timeout=5)
-        
+
         if response.status_code == 200:
             return response.json()
         elif response.status_code == 404:
             return None  # Palavra não encontrada
         else:
-            print(f"⚠️  Word-api retornou status {response.status_code} para '{word}'")
+            print(
+                f"❌ ERRO hanzi-api [GET {url}] status {response.status_code}: "
+                f"{response.text}",
+                flush=True,
+            )
             return None
-            
+
     except requests.exceptions.RequestException as e:
-        print(f"⚠️  Erro ao consultar word-api para '{word}': {e}")
+        print(f"❌ ERRO hanzi-api [GET {url}]: {e}", flush=True)
         return None
 
 
@@ -120,27 +124,101 @@ def post_word_to_api(word: str, pinyin: str, translation: str, confidence_level:
     Returns:
         bool: True se sucesso, False caso contrário
     """
+    url = f"{WORD_API_BASE_URL}/"
     try:
-        url = f"{WORD_API_BASE_URL}/"
         data = {
             "word": word,
             "pinyin": pinyin,
             "translation": translation,
             "confidence_level": confidence_level
         }
-        
+
         response = requests.post(url, json=data, timeout=5)
-        
+
         if response.status_code in [200, 201]:
             print(f"   ✅ Palavra '{word}' adicionada à word-api")
             return True
         else:
-            print(f"   ⚠️  Erro ao adicionar '{word}' à word-api: status {response.status_code}")
+            print(
+                f"❌ ERRO hanzi-api [POST {url}] palavra '{word}' "
+                f"status {response.status_code}: {response.text}",
+                flush=True,
+            )
             return False
-            
+
     except requests.exceptions.RequestException as e:
-        print(f"   ⚠️  Erro ao adicionar '{word}' à word-api: {e}")
+        print(f"❌ ERRO hanzi-api [POST {url}] palavra '{word}': {e}", flush=True)
         return False
+
+
+def put_word_translation(word: str, translation: str) -> bool:
+    """
+    Faz PUT para a word-api para adicionar uma nova tradução a uma palavra existente.
+
+    Args:
+        word: Palavra em mandarim (deve existir na word-api)
+        translation: Tradução a ser adicionada
+
+    Returns:
+        bool: True se sucesso, False caso contrário
+    """
+    url = f"{WORD_API_BASE_URL}/{word}/translations"
+    try:
+        response = requests.put(url, json={"translation": translation}, timeout=5)
+
+        if response.status_code in [200, 201]:
+            print(f"   ➕ Tradução '{translation}' adicionada à palavra '{word}'")
+            return True
+        elif response.status_code == 404:
+            print(
+                f"❌ ERRO hanzi-api [PUT {url}] palavra '{word}' não encontrada (404): "
+                f"{response.text}",
+                flush=True,
+            )
+            return False
+        else:
+            print(
+                f"❌ ERRO hanzi-api [PUT {url}] palavra '{word}' "
+                f"status {response.status_code}: {response.text}",
+                flush=True,
+            )
+            return False
+
+    except requests.exceptions.RequestException as e:
+        print(f"❌ ERRO hanzi-api [PUT {url}] palavra '{word}': {e}", flush=True)
+        return False
+
+
+def extract_existing_translations(api_response: dict) -> list:
+    """
+    Extrai as traduções existentes da resposta do GET da word-api.
+
+    Lida com diferentes formatos possíveis: campo 'translations' (lista de
+    strings ou de dicts com chave 'translation') e campo 'translation' singular.
+
+    Args:
+        api_response: Resposta JSON do GET da word-api
+
+    Returns:
+        list: Lista de traduções (strings) já cadastradas para a palavra
+    """
+    translations = []
+
+    raw = api_response.get("translations")
+    if isinstance(raw, list):
+        for item in raw:
+            if isinstance(item, str):
+                translations.append(item)
+            elif isinstance(item, dict):
+                value = item.get("translation")
+                if isinstance(value, str):
+                    translations.append(value)
+
+    singular = api_response.get("translation")
+    if isinstance(singular, str):
+        translations.append(singular)
+
+    return translations
 
 
 def extract_pairs_from_translation(translation_text: str) -> list:
@@ -238,6 +316,14 @@ def process_word_api_integration(pairs: list) -> list:
                 # Não adiciona à lista filtrada
             else:
                 print(f"   ✅ Palavra '{word}' mantida (confidence_level == {confidence_level})")
+
+                # Se a tradução da LLM não estiver entre as traduções já
+                # cadastradas, adiciona via PUT.
+                existing = extract_existing_translations(api_response)
+                normalized = {t.strip().lower() for t in existing}
+                if translation.strip().lower() not in normalized:
+                    put_word_translation(word, translation)
+
                 filtered_pairs.append(pair)
     
     return filtered_pairs
