@@ -26,6 +26,7 @@ PHASES = {
     "phase1":   ("Legendas ✓",   "#3498DB"),
     "phase2":   ("Dividido",     "#9B59B6"),
     "phase3":   ("Processando",  "#E74C3C"),
+    "merged":   ("Falta Drive ☁", "#F1C40F"),
     "complete": ("Completo ✓",   "#27AE60"),
 }
 
@@ -51,8 +52,11 @@ def detect_status(path: Path) -> dict:
     denominator = max(n_total, n_done)
     progress = int(n_done / denominator * 100) if denominator > 0 else 0
 
-    if merged:
+    if merged and uploaded:
         phase, progress = "complete", 100
+    elif merged:
+        # Merge pronto, mas o envio ao Drive (Fase 5) ainda não foi confirmado.
+        phase, progress = "merged", 100
     elif proc_chunks:
         phase = "phase3"
     elif chromecasts:
@@ -74,7 +78,8 @@ def detect_status(path: Path) -> dict:
         "has_base":     bool(bases),
         "chunks_total": n_total,
         "chunks_done":  n_done,
-        "complete":     bool(merged),
+        "complete":     bool(merged and uploaded),
+        "merged":       bool(merged),
         "uploaded":     uploaded,
     }
 
@@ -753,7 +758,7 @@ class App(tk.Tk):
         self._detail_text.set("\n".join(lines))
 
         self._run_btn.config(state=tk.NORMAL if s["has_video"] else tk.DISABLED)
-        self._force_btn.config(state=tk.NORMAL if s["complete"] else tk.DISABLED)
+        self._force_btn.config(state=tk.NORMAL if s.get("merged") else tk.DISABLED)
         self._open_btn.config(state=tk.NORMAL)
         # Clean-up só faz sentido após o upload ao Drive estar registrado.
         self._cleanup_btn.config(state=tk.NORMAL if s.get("uploaded") else tk.DISABLED)
@@ -762,24 +767,24 @@ class App(tk.Tk):
         n, tot = s["chunks_done"], s["chunks_total"]
 
         self._phase_marks["processor"].set(
-            "✓" if p in ("phase1","phase2","phase3","complete") else
+            "✓" if p in ("phase1","phase2","phase3","merged","complete") else
             ("⏳" if p == "ready" else "○")
         )
         self._phase_marks["split"].set(
-            "✓" if p in ("phase2","phase3","complete") else
+            "✓" if p in ("phase2","phase3","merged","complete") else
             ("⏳" if p == "phase1" else "○")
         )
         self._phase_marks["process"].set(
-            "✓" if p == "complete" else
+            "✓" if p in ("merged","complete") else
             (f"⏳{n}/{tot}" if p == "phase3" else "○")
         )
         self._phase_marks["merge"].set(
-            "✓" if p == "complete" else
+            "✓" if p in ("merged","complete") else
             ("⏳" if p == "phase3" and n == tot and tot > 0 else "○")
         )
         self._phase_marks["drive"].set(
             "✓" if s.get("uploaded") else
-            ("⏳" if p == "complete" else "○")
+            ("⏳" if p == "merged" else "○")
         )
 
     def _run_selected(self):
