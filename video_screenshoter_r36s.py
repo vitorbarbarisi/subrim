@@ -295,26 +295,30 @@ def split_chinese_into_lines(display_items: List[Tuple[str, str, str]], max_char
     return [line1, line2] if line2 else [line1]
 
 
-def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_json: str, portuguese_text: str) -> bool:
+def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_json: str, portuguese_text: str,
+                           resize: bool = True, base_chinese_font_size: Optional[int] = None) -> bool:
     """
     Add subtitles to a frame image.
-    
+
     Args:
         image_path: Path to the frame image
         chinese_text: Chinese subtitle text
         translations_json: JSON string with word-by-word translations
         portuguese_text: Portuguese translation text
-    
+        resize: If True, letterbox to 640x480 (R36S). If False, keep original resolution.
+        base_chinese_font_size: Override the base Chinese font size. If None, it is chosen
+            automatically (36 for R36S, proportional to height otherwise).
+
     Returns:
         True if successful, False otherwise
     """
     try:
-        # Open and resize image
+        # Open and (optionally) resize image
         with Image.open(image_path) as img:
             if img.mode != 'RGB':
                 img = img.convert('RGB')
-            
-            new_img = resize_image_for_r36s(img)
+
+            new_img = resize_image_for_r36s(img) if resize else img.copy()
             width, height = new_img.size
             draw = ImageDraw.Draw(new_img)
             
@@ -322,10 +326,13 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             chinese_font_path = get_chinese_font_path()
             latin_font_path = get_latin_font_path()
             
-            # Font sizes for R36S (640x480)
-            base_chinese_font_size = 36
+            # Font sizes (R36S uses 36 @ 480px; original resolution scales proportionally)
+            if base_chinese_font_size is None:
+                base_chinese_font_size = 36 if resize else max(24, int(height * 0.045))
             base_pinyin_font_size = int(base_chinese_font_size * 0.65)
             base_portuguese_font_size = int(base_chinese_font_size * 0.45)
+            # Scale absolute spacings relative to the R36S baseline (font 36)
+            _s = base_chinese_font_size / 36
             
             try:
                 chinese_font = ImageFont.truetype(chinese_font_path, base_chinese_font_size)
@@ -365,19 +372,22 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                 new_img.save(image_path, 'PNG')
                 return True
             
-            # Split Chinese into lines (max 2 lines, ~12 chars per line)
-            chinese_lines = split_chinese_into_lines(display_items, max_chars_per_line=12)
+            # Split Chinese into lines (max 2 lines). Chars-per-line scales with width
+            # so wider (original-resolution) frames keep more text on a single line.
+            max_chars_per_line = max(12, int(width / (base_chinese_font_size * 1.5)))
+            chinese_lines = split_chinese_into_lines(display_items, max_chars_per_line=max_chars_per_line)
             num_chinese_lines = len(chinese_lines)
             
-            # Calculate spacing and positioning
-            vertical_spacing = 12  # Increased from 8 for better readability
-            bottom_margin = 30
-            available_width = width - 40  # 20px padding on each side
-            
+            # Calculate spacing and positioning (proportional to font scale)
+            vertical_spacing = max(6, int(12 * _s))  # Increased from 8 for better readability
+            bottom_margin = max(15, int(30 * _s))
+            side_padding = max(20, int(20 * _s))
+            available_width = width - side_padding * 2
+
             # Calculate word widths for each line
             chinese_char_width = int(base_chinese_font_size * 0.95)
             pinyin_char_width = int(base_pinyin_font_size * 0.65)
-            min_word_spacing = 60
+            min_word_spacing = max(30, int(60 * _s))
             
             all_line_widths = []
             all_word_widths_per_line = []
@@ -425,8 +435,8 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             chinese_bottom_y = portuguese_y - vertical_spacing - base_chinese_font_size
             
             # Calculate background box dimensions
-            bg_width = max_line_width + 40  # Add padding
-            bg_height = total_subtitle_height + 20  # Add padding
+            bg_width = max_line_width + int(40 * _s)  # Add padding
+            bg_height = total_subtitle_height + int(20 * _s)  # Add padding
             bg_x = (width - bg_width) // 2
             bg_y = height - bottom_margin - bg_height
             
