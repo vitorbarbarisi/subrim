@@ -676,13 +676,32 @@ class App(tk.Tk):
         if inc:
             assets = [a for a in assets if a["phase"] != "complete"]
 
+        # Preserva seleção/foco/scroll para o refresh periódico não "deselecionar".
+        prev_sel = set(self._tree.selection())
+        prev_focus = self._tree.focus()
+        try:
+            prev_scroll = self._tree.yview()[0]
+        except Exception:
+            prev_scroll = None
+
         self._tree.delete(*self._tree.get_children())
+        names = set()
         for a in assets:
             lbl, _ = PHASES[a["phase"]]
             prog   = f"{a['progress']}%" if a["phase"] not in ("empty", "ready") else "—"
             chunks = self._format_chunks(a)
             self._tree.insert("", tk.END, iid=a["name"],
                               values=(a["name"], lbl, prog, chunks), tags=(a["phase"],))
+            names.add(a["name"])
+
+        # Restaura o estado se os itens ainda existirem após o refresh.
+        keep = [n for n in prev_sel if n in names]
+        if keep:
+            self._tree.selection_set(keep)
+        if prev_focus in names:
+            self._tree.focus(prev_focus)
+        if prev_scroll is not None:
+            self._tree.yview_moveto(prev_scroll)
 
         total    = len(assets)
         complete = sum(1 for a in assets if a["phase"] == "complete")
