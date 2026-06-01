@@ -45,39 +45,50 @@ def create_directory(base_path, dirname):
 
 
 def download_video(url, directory):
-    """Executa o comando yt-dlp para baixar vídeo e legendas."""
+    """Executa o comando yt-dlp para baixar vídeo e legendas.
+
+    Salva os arquivos com o prefixo igual ao nome da pasta (ex.: na pasta
+    ``clone40`` gera ``clone40.mp4`` e ``clone40.pt-BR.srt``).
+    """
+    prefix = Path(directory).name
     command = [
         'yt-dlp',
         '--cookies-from-browser', 'chrome',
         '--write-subs',
         '--sub-langs', 'pt,pt-BR,pt-PT,all',
+        '--convert-subs', 'srt',
+        '-o', f'{prefix}.%(ext)s',
         url
     ]
 
-    print(f"Executando: {' '.join(command)}")
-    print(f"No diretório: {directory}")
+    print(f"Executando: {' '.join(command)}", flush=True)
+    print(f"No diretório: {directory}", flush=True)
 
     try:
         # Muda para o diretório antes de executar
         os.chdir(directory)
-        result = subprocess.run(command, capture_output=True, text=True)
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+        )
+        # Transmite a saída do yt-dlp linha a linha em tempo real
+        for line in process.stdout:
+            print(line.rstrip(), flush=True)
+        return_code = process.wait()
 
-        if result.returncode == 0:
-            print(f"SUCCESS: Download concluído para {url}")
-            if result.stdout:
-                print("Output:", result.stdout.strip())
+        if return_code == 0:
+            print(f"SUCCESS: Download concluído para {url}", flush=True)
         else:
-            print(f"ERROR: Falha no download de {url}")
-            if result.stderr:
-                print("Stderr:", result.stderr.strip())
-            if result.stdout:
-                print("Stdout:", result.stdout.strip())
+            print(f"ERROR: Falha no download de {url} (código {return_code})", flush=True)
 
     except FileNotFoundError:
-        print("ERRO: yt-dlp não encontrado. Verifique se está instalado.")
+        print("ERRO: yt-dlp não encontrado. Verifique se está instalado.", flush=True)
         sys.exit(1)
     except Exception as e:
-        print(f"ERRO inesperado: {e}")
+        print(f"ERRO inesperado: {e}", flush=True)
         sys.exit(1)
 
 
