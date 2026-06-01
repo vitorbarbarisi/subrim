@@ -41,14 +41,20 @@ SUB_LANGS = "pt-BR,pt,pt-PT,en,en-US,en-GB"
 
 
 def _check_yt_dlp() -> str:
-    """Retorna o caminho do executável yt-dlp ou aborta."""
-    try:
-        r = subprocess.run(["yt-dlp", "--version"], capture_output=True, text=True)
-        if r.returncode == 0:
-            print(f"✅ yt-dlp {r.stdout.strip()}")
-            return "yt-dlp"
-    except FileNotFoundError:
-        pass
+    """Retorna o caminho do yt-dlp, preferindo o mais novo (com plugin de PO token).
+
+    O plugin bgutil de PO token (necessário para o YouTube em 2025+) exige um
+    yt-dlp recente. O do Homebrew costuma ser mais novo que um pip antigo, então
+    é preferido quando existe.
+    """
+    for candidate in ("/opt/homebrew/bin/yt-dlp", "yt-dlp"):
+        try:
+            r = subprocess.run([candidate, "--version"], capture_output=True, text=True)
+            if r.returncode == 0:
+                print(f"✅ yt-dlp {r.stdout.strip()}  ({candidate})")
+                return candidate
+        except FileNotFoundError:
+            continue
     print("❌ yt-dlp não encontrado. Instale com: brew install yt-dlp")
     sys.exit(1)
 
@@ -148,9 +154,15 @@ def _run(cmd: list, label: str) -> bool:
 
 def _print_tips():
     print("\n💡 Dicas de solução:")
-    print("  • Certifique-se de estar logado no YouTube no Chrome/Firefox")
-    print("  • Tente --browser firefox se o Chrome não funcionar")
-    print("  • Verifique se o vídeo não é privado ou restrito por região")
+    print("  • 403 em TODOS os fragmentos = provável proxy corporativo (Netskope).")
+    print("    As URLs de mídia do YouTube são travadas por IP; se o proxy sai por")
+    print("    um IP diferente do visto na extração, todo download dá 403.")
+    print("    → Baixe fora da rede corporativa (ex.: hotspot) ou exclua")
+    print("      *.googlevideo.com da interceptação do Netskope.")
+    print("  • Confirme que está logado no YouTube no Chrome/Firefox.")
+    print("  • Tente --browser firefox se o Chrome não funcionar.")
+    print("  • Para PO token: container 'bgutil-provider' deve estar rodando")
+    print("    (docker ps) e o yt-dlp precisa ser recente (brew).")
     print("  • Atualize o yt-dlp: brew upgrade yt-dlp")
 
 
