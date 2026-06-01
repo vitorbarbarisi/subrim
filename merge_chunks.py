@@ -240,6 +240,84 @@ def upload_to_drive(file_path: Path, asset_name: str) -> bool:
     return False
 
 
+def _drive_file_info(token: str, file_id: str) -> Optional[dict]:
+    """Consulta metadados de um arquivo no Drive. Retorna None em 404."""
+    resp = requests.get(
+        f"https://www.googleapis.com/drive/v3/files/{file_id}",
+        headers={"Authorization": f"Bearer {token}"},
+        params={"fields": "id,name,size,trashed", "supportsAllDrives": "true"},
+        timeout=30,
+    )
+    if resp.status_code == 404:
+        return None
+    if resp.status_code != 200:
+        raise RuntimeError(
+            f"Falha ao consultar arquivo no Drive [status {resp.status_code}]: {resp.text}"
+        )
+    return resp.json()
+
+
+def find_merged_file(directory: str) -> Optional[Path]:
+    """Localiza o vídeo merged do asset dentro de assets/<directory>_sub."""
+    sub = Path("assets") / f"{directory}_sub"
+    candidate = sub / f"{directory}_chromecast_merged.mp4"
+    if candidate.exists():
+        return candidate
+    if sub.exists():
+        for m in sorted(sub.glob("*_merged.mp4")):
+            return m
+    return None
+
+
+def is_drive_upload_verified(directory: str, merged: Path) -> bool:
+    """True se o marcador existe e o arquivo está mesmo no Drive (tamanho confere)."""
+    marker = merged.parent / f"{directory}_drive.json"
+    if not marker.exists():
+        return False
+    try:
+        info = json.loads(marker.read_text(encoding="utf-8"))
+    except Exception:
+        return False
+    file_id = info.get("file_id")
+    if not file_id:
+        return False
+    if not DRIVE_CONFIG.exists():
+        print("⚠️  Sem google_drive_config.json — não é possível verificar o upload.")
+        return False
+    try:
+        cfg = json.loads(DRIVE_CONFIG.read_text(encoding="utf-8"))
+        token = _drive_access_token(cfg)
+        drive_info = _drive_file_info(token, file_id)
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  Falha ao verificar o upload no Drive: {e}")
+        return False
+    if drive_info is None or drive_info.get("trashed"):
+        return False
+    drive_size = int(drive_info.get("size", 0))
+    if drive_size and drive_size != merged.stat().st_size:
+        print(f"⚠️  Upload incompleto no Drive (Drive={drive_size} vs local={merged.stat().st_size}).")
+        return False
+    return True
+
+
+def ensure_drive_upload(directory: str) -> bool:
+    """Etapa final OBRIGATÓRIA: garante que o merged está no Drive (idempotente).
+
+    - Se já existe um marcador válido e o arquivo confere no Drive, não reenvia.
+    - Caso contrário, (re)envia. Retorna False se não conseguir confirmar o upload.
+    """
+    print("\n☁️  Garantindo o envio ao Google Drive (etapa final obrigatória)")
+    merged = find_merged_file(directory)
+    if merged is None:
+        print(f"❌ Arquivo merged não encontrado para '{directory}'. Rode o merge antes.")
+        return False
+    if is_drive_upload_verified(directory, merged):
+        print(f"✅ Upload já realizado e verificado no Drive: {merged.name}")
+        return True
+    print("↻ Upload ausente ou incompleto — (re)enviando ao Drive...")
+    return upload_to_drive(merged, directory)
+
+
 def find_original_chunks(directory: Path) -> Dict[int, Path]:
     """
     Encontra todos os chunks originais no diretório e retorna um dicionário
@@ -512,8 +590,16 @@ Requisitos:
     )
 
     parser.add_argument('directory', help='Nome do diretório (sem _sub)')
+    parser.add_argument('--ensure-upload', action='store_true',
+                        help='Não faz merge: apenas verifica/garante o upload do merged ao Drive (idempotente).')
+    parser.add_argument('-y', '--yes', action='store_true',
+                        help='Sobrescreve o merged existente sem perguntar (modo não-interativo).')
 
     args = parser.parse_args()
+
+    # Modo "garantir upload": pula todo o merge e só confirma/reenvia ao Drive.
+    if args.ensure_upload:
+        return 0 if ensure_drive_upload(args.directory) else 1
 
     # Construir caminhos
     source_dir = Path('assets') / f"{args.directory}_sub"
@@ -561,10 +647,13 @@ Requisitos:
         # Verificar se arquivo de saída já existe
         if output_file.exists():
             print(f"\n⚠️  Arquivo {output_file.name} já existe")
-            response = input("   Deseja sobrescrever? (y/N): ").strip().lower()
-            if response not in ['y', 'yes']:
-                print("❌ Operação cancelada pelo usuário")
-                return 0
+            if args.yes:
+                print("   Sobrescrevendo (--yes).")
+            else:
+                response = input("   Deseja sobrescrever? (y/N): ").strip().lower()
+                if response not in ['y', 'yes']:
+                    print("❌ Operação cancelada pelo usuário")
+                    return 0
 
         # Etapa 3: Executar merge
         print(f"\n📋 ETAPA 3: Merge final")

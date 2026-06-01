@@ -199,48 +199,59 @@ class VideoBurner:
         dir_name = directory.name
         self.log(f"Processando diretório: {dir_name}")
         
-        # Check if already processed
+        # Retomada: se o merge já existe, NÃO pular o diretório. O envio ao Drive
+        # é etapa obrigatória — verifica se o upload foi feito e, se não, retenta.
         if not force and self.is_processed(directory):
-            self.log(f"Diretório {dir_name} já foi processado (encontrado _merged.mp4)")
+            self.log(f"Diretório {dir_name}: merge já existe — verificando envio ao Drive")
+            if not self.run_script("merge_chunks.py", dir_name, ["--ensure-upload"]):
+                self.log(f"Falha ao garantir o envio ao Drive para {dir_name}", "ERROR")
+                return False
+            self.log(f"✓ {dir_name} já processado e enviado ao Drive")
             return True
-        
+
         # Phase 1: Subtitle processing
         self.log(f"Fase 1: Processamento de legendas para {dir_name}")
-        
+
         if not self.run_script("processor.py", dir_name):
             self.log(f"Falha no processor.py para {dir_name}", "ERROR")
             return False
-        
+
         if not self.run_script("adjust_base_times.py", dir_name):
             self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
             return False
-        
+
         if not self.run_script("sanitize_base.py", dir_name):
             self.log(f"Falha no sanitize_base.py para {dir_name}", "ERROR")
             return False
-        
+
         # Phase 2: Video processing
         self.log(f"Fase 2: Processamento de vídeo para {dir_name}")
-        
+
         if not self.run_script("split_video.py", dir_name):
             self.log(f"Falha no split_video.py para {dir_name}", "ERROR")
             return False
-        
+
         if not self.run_script("process_chunks.py", dir_name):
             self.log(f"Falha no process_chunks.py para {dir_name}", "ERROR")
             return False
-        
-        if not self.run_script("merge_chunks.py", dir_name):
+
+        if not self.run_script("merge_chunks.py", dir_name, ["--yes"]):
             self.log(f"Falha no merge_chunks.py para {dir_name}", "ERROR")
             return False
-        
-        # Verify final result
-        if self.is_processed(directory):
-            self.log(f"✓ {dir_name} processado com sucesso!")
-            return True
-        else:
+
+        # Verificar se o merge gerou o arquivo final.
+        if not self.is_processed(directory):
             self.log(f"✗ {dir_name} processamento incompleto - _merged.mp4 não encontrado", "ERROR")
             return False
+
+        # Phase 3: Envio ao Google Drive (etapa final OBRIGATÓRIA, com verificação e retry).
+        self.log(f"Fase 3: Envio ao Google Drive para {dir_name}")
+        if not self.run_script("merge_chunks.py", dir_name, ["--ensure-upload"]):
+            self.log(f"Falha no envio ao Drive para {dir_name}", "ERROR")
+            return False
+
+        self.log(f"✓ {dir_name} processado e enviado ao Drive com sucesso!")
+        return True
     
     def cleanup_directory(self, directory: Path) -> None:
         """Clean up temporary files in a directory"""
