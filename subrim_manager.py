@@ -323,18 +323,20 @@ class App(tk.Tk):
         self._yt_url = tk.StringVar()
         ttk.Entry(yt, textvariable=self._yt_url).grid(row=0, column=1, columnspan=2, sticky=tk.EW, pady=3)
 
-        ttk.Label(yt, text="Destino:").grid(row=1, column=0, sticky=tk.W, pady=3)
-        self._yt_dest = tk.StringVar(value=str(ASSETS))
-        ttk.Entry(yt, textvariable=self._yt_dest).grid(row=1, column=1, sticky=tk.EW, pady=3)
-        ttk.Button(yt, text="…", width=3,
-                   command=lambda: self._yt_dest.set(
-                       filedialog.askdirectory(initialdir=str(ASSETS)) or self._yt_dest.get()
-                   )).grid(row=1, column=2, padx=(4, 0))
+        ttk.Label(yt, text="Nome:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        self._yt_name = tk.StringVar()
+        ttk.Entry(yt, textvariable=self._yt_name, width=18).grid(row=1, column=1, sticky=tk.EW, pady=3)
+
+        ttk.Label(yt, text="Browser:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        self._yt_browser = tk.StringVar(value="chrome")
+        browser_cb = ttk.Combobox(yt, textvariable=self._yt_browser, width=10, state="readonly",
+                                  values=["chrome", "firefox", "safari", "chromium", "edge", "brave"])
+        browser_cb.grid(row=2, column=1, sticky=tk.W, pady=3)
 
         self._yt_subs = tk.BooleanVar()
         self._yt_vid  = tk.BooleanVar()
-        ttk.Checkbutton(yt, text="Só legendas", variable=self._yt_subs).grid(row=2, column=0, sticky=tk.W, pady=2)
-        ttk.Checkbutton(yt, text="Só vídeo",    variable=self._yt_vid ).grid(row=2, column=1, sticky=tk.W, pady=2)
+        ttk.Checkbutton(yt, text="Só legendas", variable=self._yt_subs).grid(row=3, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(yt, text="Só vídeo",    variable=self._yt_vid ).grid(row=3, column=1, sticky=tk.W, pady=2)
         ttk.Button(yt, text="▶ Baixar", command=self._run_yt).grid(row=3, column=2, sticky=tk.E, pady=(6, 0))
         yt.columnconfigure(1, weight=1)
 
@@ -866,17 +868,22 @@ class App(tk.Tk):
         SourceViewerDialog(self, SOURCE / f"{sel[0]}.json")
 
     def _run_yt(self):
-        url = self._yt_url.get().strip()
+        url  = self._yt_url.get().strip()
+        name = self._yt_name.get().strip()
         if not url:
             messagebox.showwarning("Aviso", "Informe a URL do YouTube")
             return
+        if not name:
+            messagebox.showwarning("Aviso", "Informe o Nome do asset (ex.: clone45)")
+            return
         cmd = [sys.executable, str(REPO / "youtube_downloader.py"), url,
-               "--output-dir", self._yt_dest.get()]
+               "--name", name,
+               "--browser", self._yt_browser.get()]
         if self._yt_subs.get():
-            cmd.append("--subtitles-only")
+            cmd.append("--subs-only")
         elif self._yt_vid.get():
             cmd.append("--video-only")
-        self._launch(cmd, label=f"YouTube: {url[:60]}")
+        self._launch(cmd, label=f"YouTube → {name}")
 
     def _run_gp(self):
         url  = self._gp_url.get().strip()
