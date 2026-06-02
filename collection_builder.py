@@ -86,23 +86,39 @@ def _find_video(base_file: Path) -> Optional[Path]:
     return None
 
 
-def search(word: str) -> List[dict]:
+def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[dict]:
     """Varre o warehouse e retorna as frases cujo array de palavras contém ``word``.
 
     Match exato: a palavra precisa ser uma das entradas (hanzi) do array, não
     apenas uma substring.
+
+    ``log_cb`` (opcional) recebe mensagens de diagnóstico: bases ignoradas por
+    falta de vídeo e bases varridas que não contêm a palavra. Sem callback, as
+    mensagens vão para o stdout.
     """
+    def _log(msg: str) -> None:
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg, flush=True)
+
     word = word.strip()
     results: List[dict] = []
     if not word or not WAREHOUSE.exists():
         return results
 
+    skipped_no_video: List[str] = []   # base sem vídeo original → não dá pra extrair frame
+    scanned_no_match: List[str] = []   # base varrida, mas a palavra não aparece nela
+    bases_with_match = 0
+
     for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
+        asset = base_file.stem.replace("_base", "")
         video_path = _find_video(base_file)
         if not video_path:
+            skipped_no_video.append(asset)
             continue
-        asset = base_file.stem.replace("_base", "")
 
+        hits_before = len(results)
         try:
             with open(base_file, "r", encoding="utf-8") as f:
                 for line_num, line in enumerate(f, 1):
@@ -137,7 +153,22 @@ def search(word: str) -> List[dict]:
                         "word": word,
                     })
         except Exception as e:  # noqa: BLE001 - varredura tolerante a arquivos ruins
-            print(f"⚠️  Erro ao ler {base_file.name}: {e}", flush=True)
+            _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
+            continue
+
+        if len(results) > hits_before:
+            bases_with_match += 1
+        else:
+            scanned_no_match.append(asset)
+
+    # ── Diagnóstico ─────────────────────────────────────────────────────────
+    if skipped_no_video:
+        _log(f"⚠️  {len(skipped_no_video)} base(s) IGNORADA(s) por falta de vídeo original: "
+             + ", ".join(skipped_no_video))
+    if scanned_no_match:
+        _log(f"🔎 {len(scanned_no_match)} base(s) varrida(s) SEM '{word}': "
+             + ", ".join(scanned_no_match))
+    _log(f"✓ '{word}': {len(results)} ocorrência(s) em {bases_with_match} base(s) com vídeo.")
 
     return results
 

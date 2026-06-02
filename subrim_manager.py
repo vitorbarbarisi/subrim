@@ -451,9 +451,14 @@ class App(tk.Tk):
         self._col_status.set("Buscando…")
         self._col_tree.delete(*self._col_tree.get_children())
         self._col_matches = []
+        self._log_line(f"🔎 Buscando coleção: '{word}'", "cmd")
+
+        def _search_log(msg: str):
+            tag = "warning" if msg.startswith("⚠️") else "info"
+            self._log_q.put((msg, tag))
 
         def _work():
-            matches = cb.search(word)
+            matches = cb.search(word, log_cb=_search_log)
             self.after(0, lambda: self._col_show_results(matches))
 
         threading.Thread(target=_work, daemon=True).start()
