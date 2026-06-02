@@ -8,6 +8,7 @@ Exemplo: python3 video_fetcher.py onibus 138
 import json
 import os
 import sys
+import time
 import subprocess
 from pathlib import Path
 
@@ -44,11 +45,14 @@ def create_directory(base_path, dirname):
     return full_path
 
 
-def download_video(url, directory):
-    """Executa o comando yt-dlp para baixar vídeo e legendas.
+def download_video(url, directory, retries=3, delay=8):
+    """Executa o comando yt-dlp para baixar vídeo e legendas. Retorna True em sucesso.
 
     Salva os arquivos com o prefixo igual ao nome da pasta (ex.: na pasta
     ``clone40`` gera ``clone40.mp4`` e ``clone40.pt-BR.srt``).
+
+    A Globo às vezes devolve 401 transitório (token de sessão expira/renova);
+    por isso tentamos novamente algumas vezes com uma pausa entre tentativas.
     """
     prefix = Path(directory).name
     command = [
@@ -61,35 +65,47 @@ def download_video(url, directory):
         url
     ]
 
-    print(f"Executando: {' '.join(command)}", flush=True)
-    print(f"No diretório: {directory}", flush=True)
+    # Muda para o diretório antes de executar (uma vez)
+    os.chdir(directory)
 
-    try:
-        # Muda para o diretório antes de executar
-        os.chdir(directory)
-        process = subprocess.Popen(
-            command,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            bufsize=1,
-        )
-        # Transmite a saída do yt-dlp linha a linha em tempo real
-        for line in process.stdout:
-            print(line.rstrip(), flush=True)
-        return_code = process.wait()
+    for attempt in range(1, retries + 1):
+        print(f"Executando (tentativa {attempt}/{retries}): {' '.join(command)}", flush=True)
+        print(f"No diretório: {directory}", flush=True)
+
+        saw_401 = False
+        try:
+            process = subprocess.Popen(
+                command,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            # Transmite a saída do yt-dlp linha a linha em tempo real
+            for line in process.stdout:
+                line = line.rstrip()
+                print(line, flush=True)
+                if "401" in line or "Unauthorized" in line:
+                    saw_401 = True
+            return_code = process.wait()
+        except FileNotFoundError:
+            print("ERRO: yt-dlp não encontrado. Verifique se está instalado.", flush=True)
+            sys.exit(1)
+        except Exception as e:
+            print(f"ERRO inesperado: {e}", flush=True)
+            return False
 
         if return_code == 0:
             print(f"SUCCESS: Download concluído para {url}", flush=True)
-        else:
-            print(f"ERROR: Falha no download de {url} (código {return_code})", flush=True)
+            return True
 
-    except FileNotFoundError:
-        print("ERRO: yt-dlp não encontrado. Verifique se está instalado.", flush=True)
-        sys.exit(1)
-    except Exception as e:
-        print(f"ERRO inesperado: {e}", flush=True)
-        sys.exit(1)
+        print(f"ERROR: Falha no download de {url} (código {return_code})", flush=True)
+        if attempt < retries:
+            hint = " (401 da Globo — token de sessão transitório)" if saw_401 else ""
+            print(f"⏳ Nova tentativa em {delay}s{hint}…", flush=True)
+            time.sleep(delay)
+
+    return False
 
 
 def main():
@@ -127,12 +143,14 @@ def main():
         sys.exit(0)
 
     # Processa cada episódio
+    total = len(episodes_to_process)
+    ok, fail = [], []
     for i, episode in enumerate(episodes_to_process, 1):
         episode_num = episode['episode_number']
         url = episode['url']
         dirname = f"{series_name}{episode_num}"
 
-        print(f"\n--- Episódio {i}/6: {episode_num} ---")
+        print(f"\n--- Episódio {i}/{total}: {episode_num} ---")
         print(f"URL: {url}")
 
         # Cria diretório
@@ -140,12 +158,20 @@ def main():
         print(f"Diretório criado: {episode_dir}")
 
         # Baixa vídeo
-        download_video(url, episode_dir)
+        if download_video(url, episode_dir):
+            ok.append(str(episode_num))
+        else:
+            fail.append(str(episode_num))
 
         # Volta para o diretório original
         os.chdir(base_dir)
 
-    print(f"\nProcessamento concluído! {len(episodes_to_process)} episódios processados.")
+    print(f"\nProcessamento concluído! {len(ok)} ok / {len(fail)} falha(s) de {total}.")
+    if fail:
+        print("Episódios que falharam: " + ", ".join(fail))
+        print("💡 401 da Globo costuma ser sessão expirada — abra o globoplay.globo.com "
+              "logado no Chrome e rode de novo.")
+        sys.exit(1)
 
 
 if __name__ == "__main__":
