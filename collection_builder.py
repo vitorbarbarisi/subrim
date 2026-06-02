@@ -14,6 +14,8 @@ A coleção é salva em ``warehouse/collections/<palavra>/`` com duas resoluçõ
 import re
 import shutil
 import tempfile
+import unicodedata
+from collections import Counter
 from pathlib import Path
 from typing import Callable, List, Optional
 
@@ -24,6 +26,33 @@ from video_screenshoter_r36s import add_subtitles_to_frame, parse_pinyin_transla
 REPO = Path(__file__).parent
 WAREHOUSE = REPO / "warehouse"
 COLLECTIONS = WAREHOUSE / "collections"
+
+
+def pinyin_to_ascii(pinyin: str) -> str:
+    """Converte um pinyin com tons em letras simples sem acento (ex.: 'dāng' → 'dang').
+
+    Remove marcas de tom (acentos), trata ü→u, descarta dígitos de tom e espaços.
+    """
+    if not pinyin:
+        return ""
+    decomposed = unicodedata.normalize("NFD", pinyin)
+    no_accents = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
+    return re.sub(r"[^a-z]", "", no_accents.lower())
+
+
+def collection_folder_name(word: str, matches: List[dict]) -> str:
+    """Nome da pasta da coleção: ``<palavra>_<pinyin_sem_acento>`` (ex.: ``當_dang``).
+
+    O sufixo é o pinyin (sem acento) mais frequente entre as frases encontradas.
+    Se nenhum pinyin estiver disponível, usa apenas a palavra.
+    """
+    safe_word = word.strip().replace("/", "_").replace("\\", "_")
+    suffixes = [pinyin_to_ascii(m.get("pinyin", "")) for m in matches]
+    suffixes = [s for s in suffixes if s]
+    if not suffixes:
+        return safe_word
+    most_common = Counter(suffixes).most_common(1)[0][0]
+    return f"{safe_word}_{most_common}"
 
 
 def _corrected_timestamp(timestamp_seconds: float) -> float:
@@ -162,13 +191,13 @@ def render_preview(match: dict, mode: str = "r36s"):
 
 def save_collection(word: str, matches: List[dict],
                     progress_cb: Optional[Callable[[int, int, str], None]] = None) -> Path:
-    """Persiste a coleção em ``warehouse/collections/<word>/`` nas 2 resoluções.
+    """Persiste a coleção em ``warehouse/collections/<word>_<pinyin>/`` nas 2 resoluções.
 
+    A pasta recebe o pinyin (sem acento) como sufixo (ex.: ``當_dang``).
     Cada frase vira uma imagem em ``original/`` e outra em ``r36s/``.
     Retorna o diretório da coleção.
     """
-    safe_word = word.strip().replace("/", "_").replace("\\", "_")
-    out_dir = COLLECTIONS / safe_word
+    out_dir = COLLECTIONS / collection_folder_name(word, matches)
     orig_dir = out_dir / "original"
     r36s_dir = out_dir / "r36s"
     orig_dir.mkdir(parents=True, exist_ok=True)

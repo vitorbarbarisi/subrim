@@ -534,9 +534,10 @@ class App(tk.Tk):
             return
         word = self._col_word.get().strip()
         n = len(self._col_matches)
+        folder = cb.collection_folder_name(word, self._col_matches)
         if not messagebox.askyesno("Salvar coleção",
                                    f"Gerar {n} imagem(ns) em 2 resoluções para '{word}'?\n"
-                                   "→ warehouse/collections/" + word + "/"):
+                                   "→ warehouse/collections/" + folder + "/"):
             return
 
         self._col_saving = True
