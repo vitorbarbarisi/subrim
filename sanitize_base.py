@@ -243,27 +243,37 @@ def extract_pairs_from_translation(translation_text: str) -> list:
         
         if isinstance(translation_list, list):
             for item in translation_list:
-                if isinstance(item, str) and ":" in item:
+                if not isinstance(item, str):
+                    continue
+                item = item.strip()
+                if not item:
+                    continue
+
+                if ":" in item:
                     # Formato: "palavra (pinyin): tradução"
                     parts = item.split(":", 1)
-                    if len(parts) == 2:
-                        word_part = parts[0].strip()
-                        translation = parts[1].strip()
-                        
-                        # Extrai palavra e pinyin
-                        pinyin_match = re.search(r'\(([^)]+)\)', word_part)
-                        if pinyin_match:
-                            pinyin = pinyin_match.group(1)
-                            word = word_part.replace(f"({pinyin})", "").strip()
-                        else:
-                            word = word_part
-                            pinyin = ""
-                        
-                        pairs.append({
-                            "word": word,
-                            "pinyin": pinyin,
-                            "translation": translation
-                        })
+                    word_part = parts[0].strip()
+                    translation = parts[1].strip()
+                else:
+                    # Entrada só com a palavra (ex.: palavra dominada — sem pinyin/tradução).
+                    # Mantemos para que continue buscável e renderize só o caractere.
+                    word_part = item
+                    translation = ""
+
+                # Extrai palavra e pinyin
+                pinyin_match = re.search(r'\(([^)]+)\)', word_part)
+                if pinyin_match:
+                    pinyin = pinyin_match.group(1)
+                    word = word_part.replace(f"({pinyin})", "").strip()
+                else:
+                    word = word_part
+                    pinyin = ""
+
+                pairs.append({
+                    "word": word,
+                    "pinyin": pinyin,
+                    "translation": translation,
+                })
     except Exception as e:
         print(f"   ⚠️  Erro ao extrair pares de '{translation_text}': {e}")
     
@@ -312,8 +322,11 @@ def process_word_api_integration(pairs: list) -> list:
                 confidence_level = 0
             
             if confidence_level == 3:
-                print(f"   🗑️  Palavra '{word}' removida (confidence_level == 3)")
-                # Não adiciona à lista filtrada
+                print(f"   ⭐ Palavra '{word}' dominada (confidence_level == 3) — "
+                      "mantida no array sem pinyin/tradução")
+                # Mantém a palavra (buscável e posicionada na queima), mas sem
+                # pinyin nem tradução — o aprendiz já domina, então não recebe ajuda.
+                filtered_pairs.append({"word": word, "pinyin": "", "translation": ""})
             else:
                 print(f"   ✅ Palavra '{word}' mantida (confidence_level == {confidence_level})")
 
@@ -446,8 +459,12 @@ def process_base_file(base_file_path: Path) -> bool:
                             for pair in filtered_pairs:
                                 if pair["pinyin"]:
                                     new_translation_parts.append(f'"{pair["word"]} ({pair["pinyin"]}): {pair["translation"]}"')
-                                else:
+                                elif pair["translation"]:
                                     new_translation_parts.append(f'"{pair["word"]}: {pair["translation"]}"')
+                                else:
+                                    # Palavra dominada: só o caractere (sem ':' para não
+                                    # grudar no parser; renderiza sem pinyin/tradução).
+                                    new_translation_parts.append(f'"{pair["word"]}"')
                             
                             new_translation_text = "[" + ", ".join(new_translation_parts) + "]"
                             parts[4] = new_translation_text
