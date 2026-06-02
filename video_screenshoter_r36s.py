@@ -440,6 +440,33 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             bg_x = (width - bg_width) // 2
             bg_y = height - bottom_margin - bg_height
             
+            # ── Legenda original (frase completa) no TOPO, centralizada ──
+            top_lines = []
+            top_box = None
+            top_bg_y = 0
+            top_line_height = 0
+            original_font = None
+            if portuguese_text and portuguese_text.strip():
+                original_font_size = max(18, int(base_chinese_font_size * 0.6))
+                try:
+                    original_font = ImageFont.truetype(latin_font_path, original_font_size)
+                except Exception:
+                    original_font = ImageFont.load_default()
+                top_lines = wrap_portuguese_to_width(
+                    portuguese_text.strip(), original_font, width - side_padding * 2)
+                if top_lines:
+                    top_margin = max(12, int(18 * _s))
+                    top_line_gap = max(2, int(4 * _s))
+                    top_line_height = original_font_size + top_line_gap
+                    top_text_w = max(
+                        original_font.getbbox(l)[2] - original_font.getbbox(l)[0]
+                        for l in top_lines)
+                    top_bg_w = top_text_w + int(40 * _s)
+                    top_bg_h = top_line_height * len(top_lines) + int(16 * _s)
+                    top_bg_x = (width - top_bg_w) // 2
+                    top_bg_y = top_margin
+                    top_box = (top_bg_x, top_bg_y, top_bg_x + top_bg_w, top_bg_y + top_bg_h)
+
             # Draw semi-transparent background box
             # Create a temporary image with alpha channel for the box
             new_img_rgba = new_img.convert('RGBA')
@@ -447,6 +474,8 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             box_draw = ImageDraw.Draw(box_overlay)
             # Draw semi-transparent black box (50% opacity = 128/255)
             box_draw.rectangle([bg_x, bg_y, bg_x + bg_width, bg_y + bg_height], fill=(0, 0, 0, 128))
+            if top_box:
+                box_draw.rectangle(list(top_box), fill=(0, 0, 0, 128))
             # Composite the overlay onto the main image
             new_img_rgba = Image.alpha_composite(new_img_rgba, box_overlay)
             new_img = new_img_rgba.convert('RGB')
@@ -527,7 +556,18 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                                 draw.text((line_x, line_y), line, font=portuguese_font, fill=(255, 255, 0))
                     
                     current_x += word_width
-            
+
+            # Desenhar a legenda original (frase completa) no topo, em amarelo escuro
+            if top_lines and original_font is not None:
+                dark_yellow = (204, 153, 0)
+                ty = top_bg_y + int(8 * _s)
+                for line in top_lines:
+                    line_bbox = original_font.getbbox(line)
+                    line_w = line_bbox[2] - line_bbox[0]
+                    lx = (width - line_w) // 2
+                    draw.text((lx, ty), line, font=original_font, fill=dark_yellow)
+                    ty += top_line_height
+
             # Save the image
             new_img.save(image_path, 'PNG')
             return True
