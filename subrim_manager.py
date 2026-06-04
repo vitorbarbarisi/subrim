@@ -19,6 +19,12 @@ REPO   = Path(__file__).parent
 ASSETS = REPO / "assets"
 SOURCE = ASSETS / "source"
 
+
+def _scraper_python() -> str:
+    """Python da venv do scraper (selenium está instalado lá, não no Python do sistema)."""
+    cand = REPO / "globoplay_scraper_env" / "bin" / "python3"
+    return str(cand) if cand.exists() else sys.executable
+
 # ─── Pipeline phase metadata ───────────────────────────────────────────────────
 PHASES = {
     "empty":    ("Vazio",        "#9E9E9E"),
@@ -898,7 +904,7 @@ class App(tk.Tk):
             messagebox.showwarning("Aviso", "Preencha URL e Nome base")
             return
         SOURCE.mkdir(exist_ok=True)
-        cmd = [sys.executable, str(REPO / "scrape_globoplay_episodes.py"),
+        cmd = [_scraper_python(), str(REPO / "scrape_globoplay_episodes.py"),
                "--url", url, "--output", str(SOURCE / name),
                "--interaction-time", self._gp_time.get()]
         if self._gp_headless.get():
@@ -1062,7 +1068,7 @@ class NewScrapingDialog(tk.Toplevel):
             messagebox.showwarning("Campos obrigatórios", "Preencha URL e Nome base.", parent=self)
             return
         SOURCE.mkdir(exist_ok=True)
-        cmd = [sys.executable, str(REPO / "scrape_globoplay_episodes.py"),
+        cmd = [_scraper_python(), str(REPO / "scrape_globoplay_episodes.py"),
                "--url", url, "--output", str(SOURCE / name),
                "--interaction-time", self._time.get()]
         if self._headless.get():
