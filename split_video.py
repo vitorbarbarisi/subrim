@@ -47,83 +47,71 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
     print(f"   📁 Entrada: {input_video.name}")
     print(f"   📁 Saída: {output_video.name}")
 
-    # Configurações testadas e aprovadas para Chromecast
-    cmd = [
+    # Filtro de escala (≤1080p) comum às duas variantes de encode.
+    scale_vf = 'scale=min(1920\\,iw):min(1080\\,ih):force_original_aspect_ratio=decrease'
+
+    audio_args = ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000']
+    common_tail = ['-pix_fmt', 'yuv420p', '-movflags', '+faststart',
+                   '-progress', 'pipe:1', '-nostats', '-y', str(output_video)]
+
+    # Este arquivo é INTERMEDIÁRIO (re-encodado de novo na queima), então usamos
+    # o encoder de hardware (VideoToolbox): ~2.7× mais rápido no decode+encode 4K,
+    # e a leve perda de qualidade do HW não chega ao resultado final. Fallback
+    # para libx264 (software) caso o VideoToolbox falhe ou não exista.
+    vt_quality = os.environ.get("CHROMECAST_VT_QUALITY", "65").strip() or "65"
+    cmd_hw = [
+        'ffmpeg',
+        '-hwaccel', 'videotoolbox',          # decode por hardware (4K rápido)
+        '-i', str(input_video),
+        '-vf', scale_vf,
+        '-c:v', 'h264_videotoolbox',         # encode por hardware
+        '-q:v', vt_quality,
+        '-profile:v', 'high',
+        *audio_args,
+        *common_tail,
+    ]
+    cmd_sw = [
         'ffmpeg',
         '-i', str(input_video),
-
-        # Codec de vídeo: H.264 software (máxima compatibilidade)
+        '-vf', scale_vf,
         '-c:v', 'libx264',
-        '-profile:v', 'high',
-        '-level', '4.1',
-
-        # Qualidade otimizada para streaming.
-        # preset veryfast: este arquivo é INTERMEDIÁRIO (re-encodado de novo na
-        # queima), então a eficiência de compressão do 'medium' seria desperdiçada.
-        # SSIM ~idêntico (0.988 vs 0.987) com encode mais rápido.
-        '-crf', '20',              # Alta qualidade
-        '-preset', 'veryfast',     # Intermediário — prioriza velocidade
-
-        # Codec de áudio: AAC (padrão Chromecast)
-        '-c:a', 'aac',
-        '-b:a', '128k',           # Bitrate áudio adequado
-        '-ar', '48000',           # Sample rate padrão
-
-        # Configurações de compatibilidade
-        '-pix_fmt', 'yuv420p',    # Formato pixel compatível
-        '-movflags', '+faststart', # Otimização streaming
-
-        # Resolução máxima suportada pelo Chromecast
-        '-vf', 'scale=min(1920\\,iw):min(1080\\,ih):force_original_aspect_ratio=decrease',
-
-        # Progresso e otimizações
-        '-progress', 'pipe:1',
-        '-nostats',
-        '-y',                     # Sobrescrever arquivo se existir
-
-        str(output_video)
+        '-profile:v', 'high', '-level', '4.1',
+        '-crf', '20', '-preset', 'veryfast',
+        *audio_args,
+        *common_tail,
     ]
 
-    try:
-        print("   🔄 Processando...", flush=True)
-
+    def _run(cmd) -> int:
         process = subprocess.Popen(
-            cmd,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            text=True,
-            universal_newlines=True
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            text=True, universal_newlines=True,
         )
-
-        # Mostrar progresso básico
         for line in process.stdout:
-            if line.startswith('frame='):
-                parts = line.strip().split()
-                for part in parts:
-                    if part.startswith('time='):
-                        time_str = part.split('=')[1]
-                        print(f"   ⏱️  Progresso: {time_str}", end='\r')
+            if line.startswith('frame=') or line.startswith('out_time='):
+                pass  # progresso silencioso (pipe:1 com -progress)
+            if 'time=' in line:
+                t = line.strip().split('time=')[-1].split()[0]
+                print(f"   ⏱️  Progresso: {t}", end='\r')
+        rc = process.wait()
+        if rc != 0:
+            print(f"\n   ⚠️  ffmpeg saiu com código {rc}: {process.stderr.read()[:300]}")
+        return rc
 
-        return_code = process.wait()
-
-        if return_code != 0:
-            stderr_output = process.stderr.read()
-            print(f"\n❌ Erro na conversão:")
-            print(f"   {stderr_output}")
+    try:
+        print("   🔄 Processando (VideoToolbox/HW)...", flush=True)
+        rc = _run(cmd_hw)
+        if rc != 0:
+            print("\n   ↩️  Fallback para libx264 (software)...", flush=True)
+            rc = _run(cmd_sw)
+        if rc != 0:
+            print("\n❌ Erro na conversão (HW e software falharam)")
             return False
 
-        print("✅ Vídeo convertido para Chromecast com sucesso!", flush=True)
-
-        # Mostrar informações de tamanho
+        print("\n✅ Vídeo convertido para Chromecast com sucesso!", flush=True)
         if output_video.exists():
-            original_size = input_video.stat().st_size / (1024*1024)
-            converted_size = output_video.stat().st_size / (1024*1024)
-            reduction = ((original_size - converted_size) / original_size) * 100
-
-            print(".1f")
-            print(".1f")
-            print(".1f")
-
+            original_size = input_video.stat().st_size / (1024 * 1024)
+            converted_size = output_video.stat().st_size / (1024 * 1024)
+            print(f"   📦 {original_size:.1f} MB → {converted_size:.1f} MB", flush=True)
         return True
 
     except Exception as e:
