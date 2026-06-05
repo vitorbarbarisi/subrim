@@ -57,9 +57,12 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
         '-profile:v', 'high',
         '-level', '4.1',
 
-        # Qualidade otimizada para streaming
+        # Qualidade otimizada para streaming.
+        # preset veryfast: este arquivo é INTERMEDIÁRIO (re-encodado de novo na
+        # queima), então a eficiência de compressão do 'medium' seria desperdiçada.
+        # SSIM ~idêntico (0.988 vs 0.987) com encode mais rápido.
         '-crf', '20',              # Alta qualidade
-        '-preset', 'medium',       # Equilíbrio qualidade/velocidade
+        '-preset', 'veryfast',     # Intermediário — prioriza velocidade
 
         # Codec de áudio: AAC (padrão Chromecast)
         '-c:a', 'aac',
