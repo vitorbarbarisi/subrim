@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import os
 import re
+import json
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -184,26 +185,38 @@ def split_video(video_path: Path) -> None:
 
     print(f"   🎬 Criados {len(chunks)} chunks")
 
-    # Processar cada chunk
+    # Fusão corte+queima: NÃO cortamos o vídeo aqui (isso eliminaria uma geração
+    # de re-encode). Apenas escrevemos o base.txt de cada chunk e um manifesto com
+    # as fronteiras (start/dur). O process_chunks corta+queima em UM único passe.
+    manifest = {"source": video_path.name, "chunks": []}
     for i, chunk in enumerate(chunks, 1):
-        print(f"\n   🔄 Gerando chunk {i:03d}/{len(chunks):03d}")
-        print(f"   ⏱️  Tempo: {chunk['start_time']:.1f}s - {chunk['end_time']:.1f}s")
+        start_time = chunk['start_time']
+        end_time = chunk['end_time']
 
-        # Criar arquivo de vídeo do chunk
-        chunk_video_path = video_path.parent / f"{video_path.stem}_chunk_{i:03d}{video_path.suffix}"
+        # Pula chunks degenerados (duração ~0): o create_video_chunks pode gerar
+        # um chunk final [fim, fim]; re-encodado vira um arquivo com timestamps
+        # quebrados que estoura o concat do merge.
+        if (end_time - start_time) < 0.5:
+            print(f"\n   ⏭️  Pulando chunk {i:03d} degenerado ({start_time:.2f}s - {end_time:.2f}s)")
+            continue
 
-        # Cortar vídeo usando FFmpeg
-        if cut_video_chunk(video_path, chunk_video_path, chunk['start_time'], chunk['end_time']):
-            print(f"   ✅ Chunk de vídeo criado: {chunk_video_path.name}")
+        print(f"\n   🔪 Gerando chunk {i:03d}/{len(chunks):03d}  ({start_time:.1f}s - {end_time:.1f}s)")
 
-            # Criar arquivo base.txt para o chunk
-            chunk_base_path = video_path.parent / f"{video_path.stem}_chunk_{i:03d}_base.txt"
-            create_chunk_base_file(chunk_base_path, chunk['subtitles'], chunk['start_time'])
-            print(f"   📝 Arquivo base criado: {chunk_base_path.name}")
-        else:
-            print(f"   ❌ Falha ao criar chunk de vídeo {i:03d}")
+        chunk_base_path = video_path.parent / f"{video_path.stem}_chunk_{i:03d}_base.txt"
+        create_chunk_base_file(chunk_base_path, chunk['subtitles'], start_time)
+        print(f"   📝 Base do chunk criado: {chunk_base_path.name}")
 
-    print(f"\n🎉 Split concluído! {len(chunks)} chunks criados.")
+        manifest["chunks"].append({
+            "n": i,
+            "start": round(start_time, 3),
+            "dur": round(end_time - start_time, 3),
+            "base": chunk_base_path.name,
+            "processed": f"{video_path.stem}_chunk_{i:03d}_processed.mp4",
+        })
+
+    manifest_path = video_path.parent / "chunk_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2, ensure_ascii=False), encoding="utf-8")
+    print(f"\n🎉 Split concluído! {len(chunks)} chunks definidos no manifesto ({manifest_path.name}).")
 
 
 def parse_base_file(base_file_path: Path) -> Dict[float, Tuple[str, str, str, str, float]]:

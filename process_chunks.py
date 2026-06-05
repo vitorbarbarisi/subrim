@@ -24,6 +24,7 @@ import shutil
 import subprocess
 import os
 import io
+import json
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
@@ -77,6 +78,142 @@ def _process_chunk_worker(task: Tuple[str, int, int]) -> Tuple[str, bool, str]:
                 print(f"   ❌ Falha ao criar cópia idêntica: {copy_error}")
 
     return (chunk_file.name, ok, buf.getvalue())
+
+
+# ─── Fusão corte+queima (4a): corta do chromecast e queima num único passe ──────
+def _cut_only(source: Path, start: float, dur: float, out: Path) -> bool:
+    """Corta o segmento (sem legenda) — fallback quando não há/falha o drawtext.
+
+    -ss ANTES de -i = accurate seek (rápido + frame-accurate com re-encode).
+    """
+    cmd = [
+        'ffmpeg', '-ss', str(start), '-i', str(source), '-t', str(dur),
+        '-c:v', 'libx264', '-crf', '20', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-movflags', '+faststart', '-y', str(out),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"   ❌ Corte falhou: {r.stderr[-300:]}")
+        return False
+    return out.exists() and out.stat().st_size > 0
+
+
+def _cut_and_burn(source: Path, start: float, dur: float,
+                  subtitles: dict, width: int, height: int, out: Path) -> bool:
+    """Corta o segmento E queima as legendas num ÚNICO passe de ffmpeg.
+
+    Os tempos do base do chunk são relativos ao início do chunk (0-based) e o
+    -ss antes de -i faz o stream começar em t=0, então o enable=between(t,...)
+    do drawtext fica alinhado.
+    """
+    if not subtitles:
+        return _cut_only(source, start, dur, out)
+
+    drawtext_filters = create_ffmpeg_drawtext_filters(subtitles, width, height)
+    if not drawtext_filters:
+        return _cut_only(source, start, dur, out)
+
+    cmd = [
+        'ffmpeg', '-ss', str(start), '-i', str(source), '-t', str(dur),
+        '-filter_complex', drawtext_filters,
+        '-map', '[v]', '-map', '0:a',
+        '-c:v', 'libx264', '-crf', '20', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+        '-c:a', 'aac', '-movflags', '+faststart', '-y', str(out),
+    ]
+    r = subprocess.run(cmd, capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"   ❌ Corte+queima falhou: {r.stderr[-300:]}")
+        return False
+    return out.exists() and out.stat().st_size > 0
+
+
+def _fused_chunk_worker(task: tuple) -> Tuple[str, bool, str]:
+    """Worker de processo: corta+queima um chunk a partir do manifesto."""
+    source_str, start, dur, base_str, out_str, total, index, width, height = task
+    source, base, out = Path(source_str), Path(base_str), Path(out_str)
+    buf = io.StringIO()
+    ok = False
+    with redirect_stdout(buf):
+        print(f"   🔪🎬 Chunk {index:03d}/{total:03d} (corte+queima): {out.name}")
+        subtitles = parse_base_file(base) if base.exists() else {}
+        if not base.exists():
+            print(f"   ⚠️  Base não encontrado: {base.name} — corte sem legenda")
+        try:
+            ok = _cut_and_burn(source, float(start), float(dur), subtitles, width, height, out)
+        except Exception as e:  # noqa: BLE001
+            print(f"   ❌ Erro inesperado: {e}")
+            ok = False
+        if not ok:
+            print("   ↩️  Fallback: corte sem legenda (para não deixar buraco no merge)")
+            ok = _cut_only(source, float(start), float(dur), out)
+    return (out.name, ok, buf.getvalue())
+
+
+def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
+    """Caminho fundido (4a): corta+queima cada chunk direto do chromecast."""
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except Exception as e:  # noqa: BLE001
+        print(f"❌ Falha ao ler manifesto {manifest_path.name}: {e}")
+        return 1
+
+    source = source_dir / manifest.get("source", "")
+    if not source.exists():
+        print(f"❌ Fonte do manifesto não encontrada: {source}")
+        return 1
+
+    entries = manifest.get("chunks", [])
+    if not entries:
+        print("❌ Manifesto sem chunks")
+        return 1
+
+    width, height, _ = get_video_info(source)
+    print(f"📐 Fonte: {source.name} ({width}x{height})")
+
+    pending = [e for e in entries if not (source_dir / e["processed"]).exists()]
+    done_already = len(entries) - len(pending)
+    print(f"📊 Total de chunks: {len(entries)}")
+    print(f"⏭️  Já processados (pulados): {done_already}")
+    print(f"🎯 A processar: {len(pending)}")
+
+    if not pending:
+        print("\n✅ Todos os chunks já foram processados!")
+        return 0
+
+    total = len(entries)
+    tasks = [
+        (str(source), e["start"], e["dur"], str(source_dir / e["base"]),
+         str(source_dir / e["processed"]), total, e["n"], width, height)
+        for e in pending
+    ]
+    workers = min(_worker_count(), len(tasks))
+    print(f"\n🎬 Corte+queima de {len(tasks)} chunk(s) com {workers} worker(s) em paralelo...")
+    print("-" * 60)
+
+    processed_count = 0
+    error_count = 0
+    with ProcessPoolExecutor(max_workers=workers) as executor:
+        futures = [executor.submit(_fused_chunk_worker, t) for t in tasks]
+        done = 0
+        for future in as_completed(futures):
+            name, ok, output = future.result()
+            done += 1
+            print("\n" + "─" * 60)
+            print(f"[{done}/{len(tasks)}] {name} — {'✅ ok' if ok else '❌ falha'}")
+            if output.strip():
+                print(output.rstrip())
+            if ok:
+                processed_count += 1
+            else:
+                error_count += 1
+
+    print("\n" + "=" * 60)
+    print("RESUMO DO PROCESSAMENTO (corte+queima fundido)")
+    print("=" * 60)
+    print(f"🎯 Processados agora: {processed_count}")
+    print(f"✅ Sucesso: {processed_count}")
+    print(f"❌ Erros: {error_count}")
+    return 0 if error_count == 0 else 1
 
 
 def find_chunk_files(directory: Path) -> Tuple[List[Path], List[Path]]:
@@ -1164,6 +1301,14 @@ Para reprocessar:
         return 1
 
     try:
+        # Caminho fundido (4a): se existe manifesto, corta+queima direto do
+        # chromecast (sem chunks .mp4 intermediários). Senão, usa o caminho
+        # antigo (chunks já cortados) — mantém compat. com assets antigos.
+        manifest_path = source_dir / "chunk_manifest.json"
+        if manifest_path.exists():
+            print("\n🧩 Manifesto encontrado — usando corte+queima fundido (4a)")
+            return run_fused_from_manifest(source_dir, manifest_path)
+
         # Find chunk files
         print("\n🔍 Procurando chunks...")
         all_chunk_files, unprocessed_chunk_files = find_chunk_files(source_dir)
