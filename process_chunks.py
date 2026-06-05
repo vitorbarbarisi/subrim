@@ -23,10 +23,60 @@ import argparse
 import shutil
 import subprocess
 import os
+import io
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Tuple, Optional
 import re
+from contextlib import redirect_stdout
+from concurrent.futures import ProcessPoolExecutor, as_completed
+
+# Chunk especial que recebe tratamento de cópia idêntica em caso de falha.
+_SPECIAL_COPY_CHUNK = "Death.Becomes.Her.1992.1080p.BluRay.H264.AAC_chromecast_chunk_115.mp4"
+
+
+def _worker_count() -> int:
+    """Nº de chunks a queimar em paralelo. Override via PROCESS_CHUNKS_WORKERS."""
+    env = os.environ.get("PROCESS_CHUNKS_WORKERS", "").strip()
+    if env.isdigit() and int(env) > 0:
+        return int(env)
+    cpu = os.cpu_count() or 4
+    return max(2, min(6, cpu // 2))
+
+
+def _process_chunk_worker(task: Tuple[str, int, int]) -> Tuple[str, bool, str]:
+    """Worker de processo: queima um chunk e retorna (nome, sucesso, log_capturado).
+
+    Roda em processo separado (single-thread), então captura o stdout do
+    ``process_chunk`` com segurança para o log não embaralhar com os demais.
+    """
+    chunk_str, total, index = task
+    chunk_file = Path(chunk_str)
+    buf = io.StringIO()
+    ok = False
+    with redirect_stdout(buf):
+        base_file = chunk_file.parent / chunk_file.name.replace(".mp4", "_base.txt")
+        if not base_file.exists():
+            print(f"   ⚠️  Arquivo base não encontrado: {base_file.name}")
+            base_file = None
+        try:
+            ok = process_chunk(chunk_file, base_file, index, total)
+        except Exception as e:  # noqa: BLE001
+            print(f"   ❌ Erro inesperado em {chunk_file.name}: {e}")
+            ok = False
+
+        # Tratamento especial: cópia idêntica para um chunk problemático conhecido.
+        if not ok and _SPECIAL_COPY_CHUNK in chunk_file.name:
+            print(f"   🔄 Aplicando tratamento especial para {chunk_file.name}")
+            processed_copy = chunk_file.parent / f"{chunk_file.stem}_processed.mp4"
+            try:
+                shutil.copy2(chunk_file, processed_copy)
+                print(f"   ✅ Cópia idêntica criada: {processed_copy.name}")
+                ok = True
+            except Exception as copy_error:  # noqa: BLE001
+                print(f"   ❌ Falha ao criar cópia idêntica: {copy_error}")
+
+    return (chunk_file.name, ok, buf.getvalue())
 
 
 def find_chunk_files(directory: Path) -> Tuple[List[Path], List[Path]]:
@@ -1149,70 +1199,31 @@ Para reprocessar:
             print("💡 Para reprocessar, remova os arquivos *_processed.mp4")
             return 0
 
-        # Process only unprocessed chunks
+        # Process only unprocessed chunks — em paralelo (cada ffmpeg é um processo).
         processed_count = 0
         error_count = 0
 
-        print("\n🎬 Iniciando processamento dos chunks não processados...")
+        total = len(unprocessed_chunk_files)
+        workers = min(_worker_count(), total)
+        print(f"\n🎬 Iniciando processamento de {total} chunk(s) com {workers} worker(s) em paralelo...")
         print("-" * 60)
 
-        for i, chunk_file in enumerate(unprocessed_chunk_files, 1):
-            # Find corresponding base file
-            base_file = chunk_file.parent / chunk_file.name.replace('.mp4', '_base.txt')
+        tasks = [(str(cf), total, i) for i, cf in enumerate(unprocessed_chunk_files, 1)]
 
-            if not base_file.exists():
-                print(f"   ⚠️  Arquivo base não encontrado: {base_file.name}")
-                base_file = None
-
-            # Process the chunk
-            try:
-                if process_chunk(chunk_file, base_file, i, len(unprocessed_chunk_files)):
+        with ProcessPoolExecutor(max_workers=workers) as executor:
+            futures = [executor.submit(_process_chunk_worker, t) for t in tasks]
+            done = 0
+            for future in as_completed(futures):
+                name, ok, output = future.result()
+                done += 1
+                print("\n" + "─" * 60)
+                print(f"[{done}/{total}] {name} — {'✅ ok' if ok else '❌ falha'}")
+                if output.strip():
+                    print(output.rstrip())
+                if ok:
                     processed_count += 1
                 else:
                     error_count += 1
-                    print(f"   ❌ Erro ao processar {chunk_file.name}")
-
-                    # Lógica especial para Death.Becomes.Her.1992.1080p.BluRay.H264.AAC_chromecast_chunk_115.mp4
-                    if "Death.Becomes.Her.1992.1080p.BluRay.H264.AAC_chromecast_chunk_115.mp4" in chunk_file.name:
-                        print(f"   🔄 Aplicando tratamento especial para {chunk_file.name}")
-                        print(f"   📋 Fazendo cópia idêntica do chunk original...")
-
-                        # Criar cópia idêntica do chunk original
-                        processed_copy = chunk_file.parent / f"{chunk_file.stem}_processed.mp4"
-
-                        try:
-                            shutil.copy2(chunk_file, processed_copy)
-                            print(f"   ✅ Cópia idêntica criada: {processed_copy.name}")
-                            print(f"   📊 Tamanho: {processed_copy.stat().st_size} bytes")
-                            processed_count += 1
-                            error_count -= 1  # Corrige a contagem pois agora foi "processado"
-                        except Exception as copy_error:
-                            print(f"   ❌ Falha ao criar cópia idêntica: {copy_error}")
-
-            except Exception as e:
-                error_count += 1
-                print(f"   ❌ Erro inesperado em {chunk_file.name}: {e}")
-
-                # Lógica especial para Death.Becomes.Her.1992.1080p.BluRay.H264.AAC_chromecast_chunk_115.mp4
-                if "Death.Becomes.Her.1992.1080p.BluRay.H264.AAC_chromecast_chunk_115.mp4" in chunk_file.name:
-                    print(f"   🔄 Aplicando tratamento especial para {chunk_file.name}")
-                    print(f"   📋 Fazendo cópia idêntica do chunk original...")
-
-                    # Criar cópia idêntica do chunk original
-                    processed_copy = chunk_file.parent / f"{chunk_file.stem}_processed.mp4"
-
-                    try:
-                        shutil.copy2(chunk_file, processed_copy)
-                        print(f"   ✅ Cópia idêntica criada: {processed_copy.name}")
-                        print(f"   📊 Tamanho: {processed_copy.stat().st_size} bytes")
-                        processed_count += 1
-                        error_count -= 1  # Corrige a contagem pois agora foi "processado"
-                    except Exception as copy_error:
-                        print(f"   ❌ Falha ao criar cópia idêntica: {copy_error}")
-
-            # Add small delay between chunks for better readability
-            if i < len(unprocessed_chunk_files):
-                print()
 
         # Summary
         print("\n" + "=" * 60)
