@@ -88,6 +88,23 @@ def load_dotenv():
 load_dotenv()
 
 
+def read_text_robust(path) -> str:
+    """Lê texto tolerando encodings comuns de legenda.
+
+    Legendas baixadas vêm às vezes em ISO-8859-1/CP1252 (ex.: 'ç' = 0xE7), não
+    em UTF-8, e a leitura estrita quebrava o processor. Tenta UTF-8 (com/sem BOM)
+    e cai para Latin-1/CP1252 antes de desistir.
+    """
+    from pathlib import Path as _Path
+    data = _Path(path).read_bytes()
+    for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    return data.decode("utf-8", errors="replace")
+
+
 # TTML/IMSC namespaces used in the input file
 NS_TTML = "http://www.w3.org/ns/ttml"
 NS_TTP = "http://www.w3.org/ns/ttml#parameter"
@@ -248,7 +265,7 @@ def parse_srt_timestamp(timestamp: str) -> Decimal:
 def parse_srt_file(srt_path: Path) -> list[SRTEntry]:
     """Parse an SRT file and return a list of SRTEntry objects."""
     entries = []
-    content = srt_path.read_text(encoding='utf-8').strip()
+    content = read_text_robust(srt_path).strip()
     
     # Split by double newlines to get individual entries
     raw_entries = re.split(r'\n\n+', content)
@@ -1275,9 +1292,8 @@ def create_portuguese_srt_from_chinese(chinese_srt_path: Path, portuguese_srt_pa
         True if successful, False otherwise
     """
     try:
-        with open(chinese_srt_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
+        content = read_text_robust(chinese_srt_path)
+
         # Split by double newlines to get subtitle blocks
         blocks = content.split('\n\n')
         
@@ -1352,9 +1368,8 @@ def main(argv: list[str]) -> int:
                 print(f"🔄 Convertendo chinês simplificado para tradicional...")
                 
                 # Read and convert the zht file
-                with open(zht_file, 'r', encoding='utf-8') as f:
-                    content = f.read()
-                
+                content = read_text_robust(zht_file)
+
                 # Split by double newlines to get subtitle blocks
                 blocks = content.split('\n\n')
                 srt_content = []
