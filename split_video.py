@@ -410,12 +410,16 @@ def cut_video_chunk(input_video: Path, output_video: Path, start_time: float, en
     """
     duration = end_time - start_time
 
-    # Método 1: Re-encoding preciso para evitar qualquer sobreposição (mais confiável)
+    # Método 1: Re-encoding preciso para evitar qualquer sobreposição (mais confiável).
+    # IMPORTANTE: -ss vem ANTES de -i (input seek). Com re-encode, o ffmpeg faz
+    # "accurate seek" — pula direto para o keyframe anterior ao start e decodifica
+    # só até o ponto exato, em vez de decodificar o vídeo inteiro desde 0 a cada
+    # chunk (que tornava o corte O(n²): ~100× mais lento em chunks tardios).
     cmd_precise = [
         'ffmpeg',
+        '-ss', str(start_time),  # Start time exato (input seek, rápido + preciso)
         '-i', str(input_video),
-        '-ss', str(start_time),  # Start time exato
-        '-t', str(duration),     # Duration exata
+        '-t', str(duration),     # Duration exata (output)
         '-c:v', 'libx264',      # Re-encode video para precisão
         '-c:a', 'aac',          # Re-encode audio para sincronização
         '-preset', 'ultrafast',  # Encoding rápido
