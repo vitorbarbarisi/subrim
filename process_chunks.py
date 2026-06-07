@@ -137,10 +137,16 @@ def _count_cjk_chars(text: str) -> int:
                or "豈" <= ch <= "﫿")
 
 
+_MIN_PAUSE_CHARS = 6   # falas com menos de 6 caracteres não pausam
+
+
 def _pause_boundaries(subtitles: dict, duration: float, rate: float, eps: float = 0.06):
     """Calcula [(end_sec, pausa_seg)] válidos para inserir freezes.
 
     end = begin + duração da fala; pausa = rate * nº de caracteres CJK.
+    Não pausa em:
+      - músicas (legenda com o caractere ♪),
+      - falas com menos de _MIN_PAUSE_CHARS caracteres.
     Mantém só ends dentro de (0, duration-eps), ordenados, mesclando ends
     próximos (soma caracteres).
     """
@@ -150,7 +156,11 @@ def _pause_boundaries(subtitles: dict, duration: float, rate: float, eps: float 
         sub_dur = float(val[4]) if isinstance(val, (list, tuple)) and len(val) > 4 else 0.0
         end = float(begin) + sub_dur
         chars = _count_cjk_chars(chinese)
-        if chars > 0 and 0 < end < duration - eps:
+        if "♪" in chinese:
+            continue  # música: não pausa
+        if chars < _MIN_PAUSE_CHARS:
+            continue  # fala curta: não pausa
+        if 0 < end < duration - eps:
             items.append((end, chars))
     items.sort()
     merged = []
