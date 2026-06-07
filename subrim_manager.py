@@ -253,7 +253,7 @@ class App(tk.Tk):
 
         # Opção "queimar com pausas" (default: sem pausas)
         self._burn_pause_on = tk.BooleanVar(value=False)
-        self._burn_pause_rate = tk.StringVar(value="1.40")
+        self._burn_pause_rate = tk.StringVar(value="0.3")
         prow = ttk.Frame(detail)
         prow.pack(fill=tk.X, pady=(2, 2))
         ttk.Checkbutton(prow, text="Queimar com pausas", variable=self._burn_pause_on,
