@@ -211,6 +211,11 @@ def process_file(input_file: Path, output_file: Path) -> None:
     for elem in root.iter():
         convert_timing_attributes(elem, config)
 
+    # Limpa rótulos [..] e descarta cues de música antes de gravar.
+    removed = clean_secs_tree(root)
+    if removed:
+        print(f"   🧹 {removed} legenda(s) de música/vazia removida(s) do _secs")
+
     # Write output preserving XML declaration and UTF-8 encoding
     tree.write(output_file, encoding="utf-8", xml_declaration=True)
 
@@ -235,6 +240,77 @@ def _extract_text_content(element: ET.Element) -> str:
     # Normalize whitespace: strip ends and collapse internal runs
     normalized = " ".join(raw_text.split())
     return normalized
+
+
+def _local_name(tag) -> str:
+    """Nome local da tag, ignorando o namespace ({ns}p -> p)."""
+    return tag.split("}", 1)[1] if isinstance(tag, str) and "}" in tag else tag
+
+
+def _strip_speaker_labels(text: str) -> str:
+    """Remove rótulos entre colchetes do texto da legenda (ex.: '[ROMÃO] FALA' -> 'FALA').
+
+    Preserva as quebras de linha; só remove os grupos [..] e o espaço que sobra.
+    """
+    if not text:
+        return text
+    out = re.sub(r"\[[^\]]*\]", "", text)
+    out = re.sub(r"[ \t]{2,}", " ", out)              # colapsa espaços duplicados
+    out = "\n".join(line.lstrip() for line in out.split("\n"))  # tira espaço no início de cada linha
+    return out
+
+
+def _is_droppable_music_cue(text: str) -> bool:
+    """True se a legenda é APENAS nota(s) ♪ ou '♪MÚSICA DE TENSÃO♪'.
+
+    Legendas com ♪ + letra de música (ex.: '♪SOBRE AS NOSSAS MÃOS♪') são mantidas.
+    """
+    if not text or "♪" not in text:
+        return False
+    rest = text.replace("♪", "").strip()
+    if rest == "":
+        return True
+    normalized = re.sub(r"\s+", " ", rest).strip().upper()
+    return normalized == "MÚSICA DE TENSÃO"
+
+
+def clean_secs_tree(root: ET.Element) -> int:
+    """Limpa as legendas de um _secs.xml antes de gravar.
+
+    - Descarta entradas que são só nota musical ou '♪MÚSICA DE TENSÃO♪'.
+    - Remove rótulos de personagem entre colchetes do texto restante.
+    - Descarta entradas que ficaram vazias após a limpeza.
+
+    Retorna o número de entradas (<p>) removidas.
+    """
+    removed = 0
+    for parent in list(root.iter()):
+        for p in list(parent):
+            if _local_name(p.tag) != "p":
+                continue
+
+            full_text = _extract_text_content(p)
+            if _is_droppable_music_cue(full_text):
+                parent.remove(p)
+                removed += 1
+                continue
+
+            # Remove rótulos [..] no texto do próprio <p> e de eventuais filhos.
+            if p.text:
+                p.text = _strip_speaker_labels(p.text)
+            for child in p.iter():
+                if child is p:
+                    continue
+                if child.text:
+                    child.text = _strip_speaker_labels(child.text)
+                if child.tail:
+                    child.tail = _strip_speaker_labels(child.tail)
+
+            if not _extract_text_content(p).strip():
+                parent.remove(p)
+                removed += 1
+
+    return removed
 
 
 def _parse_seconds_value(seconds_text: str) -> Decimal:
@@ -319,7 +395,12 @@ def srt_to_xml_seconds(srt_path: Path, output_path: Path) -> None:
         p.set("begin", f"{entry.start_time:.3f}s")
         p.set("end", f"{entry.end_time:.3f}s")
         p.text = entry.text
-    
+
+    # Limpa rótulos [..] e descarta cues de música antes de gravar.
+    removed = clean_secs_tree(root)
+    if removed:
+        print(f"   🧹 {removed} legenda(s) de música/vazia removida(s) do _secs")
+
     # Write to file
     tree = ET.ElementTree(root)
     tree.write(output_path, encoding="utf-8", xml_declaration=True)
