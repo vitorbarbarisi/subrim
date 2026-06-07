@@ -251,6 +251,18 @@ class App(tk.Tk):
         ttk.Separator(detail, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
         ttk.Label(detail, text="Pipeline", font=("", 10, "bold")).pack(anchor=tk.W)
 
+        # Opção "queimar com pausas" (default: sem pausas)
+        self._burn_pause_on = tk.BooleanVar(value=False)
+        self._burn_pause_rate = tk.StringVar(value="1.40")
+        prow = ttk.Frame(detail)
+        prow.pack(fill=tk.X, pady=(2, 2))
+        ttk.Checkbutton(prow, text="Queimar com pausas", variable=self._burn_pause_on,
+                        command=self._on_pause_toggle).pack(side=tk.LEFT)
+        self._burn_pause_entry = ttk.Entry(prow, textvariable=self._burn_pause_rate,
+                                           width=6, state=tk.DISABLED)
+        self._burn_pause_entry.pack(side=tk.LEFT, padx=(6, 2))
+        ttk.Label(prow, text="s/caractere", foreground="#888").pack(side=tk.LEFT)
+
         self._run_btn = ttk.Button(detail, text="▶  Iniciar / Retomar",
                                    command=self._run_selected, state=tk.DISABLED)
         self._run_btn.pack(fill=tk.X, pady=(3, 1))
@@ -1050,6 +1062,21 @@ class App(tk.Tk):
             cmd.append("--headless")
         self._launch(cmd, label=f"Scraping: {name}")
 
+    # ── Queimar com pausas ──────────────────────────────────────────────────────
+    def _on_pause_toggle(self):
+        self._burn_pause_entry.config(
+            state=tk.NORMAL if self._burn_pause_on.get() else tk.DISABLED)
+
+    def _pause_rate_value(self) -> float:
+        """Tempo (s) por caractere se 'com pausas' estiver ligado; senão 0."""
+        if not self._burn_pause_on.get():
+            return 0.0
+        try:
+            rate = float(self._burn_pause_rate.get().replace(",", "."))
+        except (ValueError, AttributeError):
+            return 0.0
+        return rate if rate > 0 else 0.0
+
     # ── Process management ─────────────────────────────────────────────────────
     def _launch(self, cmd: list, label: str = ""):
         with self._proc_lock:
@@ -1064,8 +1091,14 @@ class App(tk.Tk):
         self._stop_btn.config(state=tk.NORMAL)
         self._log_label.set(label)
 
+        pause_rate = self._pause_rate_value()  # 0 se desligado/ inválido
+
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+            if pause_rate > 0:
+                env["BURN_PAUSE_RATE"] = f"{pause_rate}"
+            else:
+                env.pop("BURN_PAUSE_RATE", None)
             p = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=str(REPO), env=env,

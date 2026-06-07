@@ -127,19 +127,178 @@ def _cut_and_burn(source: Path, start: float, dur: float,
     return out.exists() and out.stat().st_size > 0
 
 
+# ─── Modo "queimar com pausas" (congela no fim de cada fala) ────────────────────
+def _count_cjk_chars(text: str) -> int:
+    """Conta ideogramas CJK (o que define o tempo de leitura da fala)."""
+    if not text:
+        return 0
+    return sum(1 for ch in text
+               if "一" <= ch <= "鿿" or "㐀" <= ch <= "䶿"
+               or "豈" <= ch <= "﫿")
+
+
+def _pause_boundaries(subtitles: dict, duration: float, rate: float, eps: float = 0.06):
+    """Calcula [(end_sec, pausa_seg)] válidos para inserir freezes.
+
+    end = begin + duração da fala; pausa = rate * nº de caracteres CJK.
+    Mantém só ends dentro de (0, duration-eps), ordenados, mesclando ends
+    próximos (soma caracteres).
+    """
+    items = []
+    for begin, val in subtitles.items():
+        chinese = val[0] if isinstance(val, (list, tuple)) else ""
+        sub_dur = float(val[4]) if isinstance(val, (list, tuple)) and len(val) > 4 else 0.0
+        end = float(begin) + sub_dur
+        chars = _count_cjk_chars(chinese)
+        if chars > 0 and 0 < end < duration - eps:
+            items.append((end, chars))
+    items.sort()
+    merged = []
+    for end, chars in items:
+        if merged and end - merged[-1][0] < eps:
+            merged[-1] = (merged[-1][0], merged[-1][1] + chars)
+        else:
+            merged.append((end, chars))
+    return [(end, rate * chars) for end, chars in merged]
+
+
+def _probe_fps(path: Path) -> str:
+    """Retorna o r_frame_rate (ex.: '24000/1001') para igualar o fps dos freezes."""
+    try:
+        r = subprocess.run(
+            ['ffprobe', '-v', 'error', '-select_streams', 'v:0',
+             '-show_entries', 'stream=r_frame_rate', '-of', 'csv=p=0', str(path)],
+            capture_output=True, text=True, check=True)
+        val = r.stdout.strip()
+        return val if val and val != "0/0" else "25"
+    except Exception:  # noqa: BLE001
+        return "25"
+
+
+def _build_pause_filtergraph(boundaries, duration: float, width: int, height: int,
+                             fps: str, sample_rate: int = 48000) -> str:
+    """Filtergraph que insere, após cada fala, um freeze (imagem em loop) por X
+    segundos no vídeo e o silêncio correspondente no áudio, mantendo A/V em sync.
+
+    As imagens de freeze são inputs 1..N (uma por boundary), já dadas com -loop/-t.
+    """
+    cuts = [0.0] + [e for e, _ in boundaries] + [float(duration)]
+    nseg = len(cuts) - 1            # n+1 segmentos
+    nfreeze = len(boundaries)       # n freezes
+    total = nseg + nfreeze
+    af = f"aformat=sample_rates={sample_rate}:channel_layouts=stereo"
+
+    parts = []
+    out_v = []
+    # [0:v] só pode ser consumido uma vez → split em nseg cópias para os segmentos.
+    vsp = [f"vsp{i}" for i in range(nseg)]
+    parts.append("[0:v]split=%d%s" % (nseg, "".join(f"[{l}]" for l in vsp)))
+    for k in range(nseg):
+        s, e = cuts[k], cuts[k + 1]
+        parts.append(f"[{vsp[k]}]trim={s:.3f}:{e:.3f},setpts=PTS-STARTPTS[vs{k}]")
+        out_v.append(f"vs{k}")
+        if k < nfreeze:
+            # input (k+1) é a imagem do freeze k (dada com -loop 1 -t Xk)
+            parts.append(
+                f"[{k + 1}:v]scale={width}:{height},setsar=1,fps={fps},"
+                f"format=yuv420p[vf{k}]")
+            out_v.append(f"vf{k}")
+    parts.append("".join(f"[{l}]" for l in out_v) + f"concat=n={total}:v=1:a=0[v]")
+
+    ain = [f"ai{i}" for i in range(nseg)]
+    parts.append("[0:a]asplit=%d%s" % (nseg, "".join(f"[{l}]" for l in ain)))
+    out_a = []
+    for k in range(nseg):
+        s, e = cuts[k], cuts[k + 1]
+        parts.append(f"[{ain[k]}]atrim={s:.3f}:{e:.3f},asetpts=PTS-STARTPTS,{af}[as{k}]")
+        out_a.append(f"as{k}")
+        if k < nfreeze:
+            xk = boundaries[k][1]
+            parts.append(f"aevalsrc=0|0:d={xk:.3f}:s={sample_rate},{af}[asil{k}]")
+            out_a.append(f"asil{k}")
+    parts.append("".join(f"[{l}]" for l in out_a) + f"concat=n={total}:v=0:a=1[a]")
+    return ";".join(parts)
+
+
+def _cut_burn_with_pauses(source: Path, start: float, dur: float, subtitles: dict,
+                          width: int, height: int, rate: float, out: Path) -> bool:
+    """Corta+queima e depois insere os freezes de leitura no fim de cada fala.
+
+    O freeze é uma IMAGEM extraída do frame final da fala, dada em loop (estático
+    garantido), evitando o comportamento não-confiável do tpad nesta versão.
+    """
+    tmp = out.with_name(out.stem + "_subbed.mp4")
+    pngs: List[Path] = []
+    try:
+        if not _cut_and_burn(source, start, dur, subtitles, width, height, tmp):
+            return False
+        sub_dur = get_video_info(tmp)[2] or dur
+        boundaries = _pause_boundaries(subtitles, sub_dur, rate)
+        if not boundaries:
+            print("   ⏸️  Sem falas para pausar — usando o chunk queimado direto")
+            shutil.move(str(tmp), str(out))
+            return out.exists()
+
+        fps = _probe_fps(tmp)
+        total_pause = sum(x for _, x in boundaries)
+        print(f"   ⏸️  Inserindo {len(boundaries)} pausa(s) (+{total_pause:.1f}s) @ {rate:.2f}s/caractere")
+
+        # Extrai o frame de freeze (logo antes do fim da fala, legenda visível).
+        inputs = ['-i', str(tmp)]
+        for k, (ek, xk) in enumerate(boundaries):
+            png = out.with_name(f"{out.stem}_fz{k:03d}.png")
+            grab = max(0.0, ek - 0.05)
+            ex = subprocess.run(
+                ['ffmpeg', '-v', 'error', '-ss', f"{grab:.3f}", '-i', str(tmp),
+                 '-frames:v', '1', '-y', str(png)],
+                capture_output=True, text=True)
+            if ex.returncode != 0 or not png.exists():
+                print(f"   ❌ Falha ao extrair frame de freeze {k}: {ex.stderr[-200:]}")
+                return False
+            pngs.append(png)
+            inputs += ['-loop', '1', '-t', f"{xk:.3f}", '-i', str(png)]
+
+        fg = _build_pause_filtergraph(boundaries, sub_dur, width, height, fps)
+        cmd = (['ffmpeg'] + inputs +
+               ['-filter_complex', fg, '-map', '[v]', '-map', '[a]',
+                '-c:v', 'libx264', '-crf', '20', '-preset', 'fast', '-pix_fmt', 'yuv420p',
+                '-c:a', 'aac', '-movflags', '+faststart', '-y', str(out)])
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(f"   ❌ Inserção de pausas falhou: {r.stderr[-300:]}")
+            return False
+        return out.exists() and out.stat().st_size > 0
+    finally:
+        for p in pngs + [tmp]:
+            if p.exists():
+                try:
+                    p.unlink()
+                except OSError:
+                    pass
+
+
 def _fused_chunk_worker(task: tuple) -> Tuple[str, bool, str]:
-    """Worker de processo: corta+queima um chunk a partir do manifesto."""
-    source_str, start, dur, base_str, out_str, total, index, width, height = task
+    """Worker de processo: corta+queima um chunk a partir do manifesto.
+
+    Se ``rate`` > 0, aplica o modo 'queimar com pausas' (freeze no fim de cada fala).
+    """
+    source_str, start, dur, base_str, out_str, total, index, width, height, rate = task
     source, base, out = Path(source_str), Path(base_str), Path(out_str)
+    rate = float(rate or 0)
     buf = io.StringIO()
     ok = False
     with redirect_stdout(buf):
-        print(f"   🔪🎬 Chunk {index:03d}/{total:03d} (corte+queima): {out.name}")
+        mode = f"corte+queima+pausas({rate:.2f}s/car)" if rate > 0 else "corte+queima"
+        print(f"   🔪🎬 Chunk {index:03d}/{total:03d} ({mode}): {out.name}")
         subtitles = parse_base_file(base) if base.exists() else {}
         if not base.exists():
             print(f"   ⚠️  Base não encontrado: {base.name} — corte sem legenda")
         try:
-            ok = _cut_and_burn(source, float(start), float(dur), subtitles, width, height, out)
+            if rate > 0 and subtitles:
+                ok = _cut_burn_with_pauses(source, float(start), float(dur), subtitles,
+                                           width, height, rate, out)
+            else:
+                ok = _cut_and_burn(source, float(start), float(dur), subtitles, width, height, out)
         except Exception as e:  # noqa: BLE001
             print(f"   ❌ Erro inesperado: {e}")
             ok = False
@@ -170,6 +329,14 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
     width, height, _ = get_video_info(source)
     print(f"📐 Fonte: {source.name} ({width}x{height})")
 
+    # Modo "queimar com pausas": tempo (s) por caractere via BURN_PAUSE_RATE.
+    try:
+        rate = float(os.environ.get("BURN_PAUSE_RATE", "0") or "0")
+    except ValueError:
+        rate = 0.0
+    if rate > 0:
+        print(f"⏸️  Modo COM PAUSAS ativo: {rate:.2f}s por caractere")
+
     pending = [e for e in entries if not (source_dir / e["processed"]).exists()]
     done_already = len(entries) - len(pending)
     print(f"📊 Total de chunks: {len(entries)}")
@@ -183,7 +350,7 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
     total = len(entries)
     tasks = [
         (str(source), e["start"], e["dur"], str(source_dir / e["base"]),
-         str(source_dir / e["processed"]), total, e["n"], width, height)
+         str(source_dir / e["processed"]), total, e["n"], width, height, rate)
         for e in pending
     ]
     workers = min(_worker_count(), len(tasks))
