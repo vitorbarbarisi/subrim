@@ -375,13 +375,13 @@ class App(tk.Tk):
         # Search bar
         top = ttk.Frame(outer)
         top.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(top, text="Palavra (mandarim):").pack(side=tk.LEFT)
+        ttk.Label(top, text="Palavra(s) (vírgula):").pack(side=tk.LEFT)
         self._col_word = tk.StringVar()
-        e = ttk.Entry(top, textvariable=self._col_word, width=18, font=("", 14))
+        e = ttk.Entry(top, textvariable=self._col_word, width=30, font=("", 14))
         e.pack(side=tk.LEFT, padx=6)
         e.bind("<Return>", lambda _: self._col_do_search())
         ttk.Button(top, text="🔍 Buscar", command=self._col_do_search).pack(side=tk.LEFT)
-        self._col_status = tk.StringVar(value="Digite uma palavra e busque no warehouse")
+        self._col_status = tk.StringVar(value="Digite uma ou mais palavras (ex.: 著,當,與) e busque no warehouse")
         ttk.Label(top, textvariable=self._col_status, foreground="#888").pack(side=tk.LEFT, padx=12)
 
         pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
@@ -390,14 +390,16 @@ class App(tk.Tk):
         # Left: matches list
         left = ttk.Frame(pw)
         pw.add(left, weight=2)
-        cols = ("asset", "time", "frase")
+        cols = ("palavra", "asset", "time", "frase")
         t = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        t.heading("palavra", text="Palavra", anchor=tk.W)
         t.heading("asset", text="Asset",  anchor=tk.W)
         t.heading("time",  text="Tempo",  anchor=tk.CENTER)
         t.heading("frase", text="Frase",  anchor=tk.W)
-        t.column("asset", width=110, anchor=tk.W,      stretch=False)
-        t.column("time",  width=70,  anchor=tk.CENTER, stretch=False)
-        t.column("frase", width=240, anchor=tk.W,      stretch=True)
+        t.column("palavra", width=60,  anchor=tk.W,      stretch=False)
+        t.column("asset", width=100, anchor=tk.W,      stretch=False)
+        t.column("time",  width=64,  anchor=tk.CENTER, stretch=False)
+        t.column("frase", width=220, anchor=tk.W,      stretch=True)
         vsb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=t.yview)
         t.configure(yscrollcommand=vsb.set)
         t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -449,22 +451,31 @@ class App(tk.Tk):
         cb = self._col_import()
         if not cb:
             return
-        word = self._col_word.get().strip()
-        if not word:
-            messagebox.showwarning("Aviso", "Digite uma palavra em mandarim para buscar.")
+        raw = self._col_word.get().strip()
+        # Aceita várias palavras separadas por vírgula (ex.: "著,當,與").
+        words, seen = [], set()
+        for w in raw.replace("，", ",").split(","):
+            w = w.strip()
+            if w and w not in seen:
+                seen.add(w)
+                words.append(w)
+        if not words:
+            messagebox.showwarning("Aviso", "Digite uma ou mais palavras (separadas por vírgula).")
             return
 
         self._col_status.set("Buscando…")
         self._col_tree.delete(*self._col_tree.get_children())
         self._col_matches = []
-        self._log_line(f"🔎 Buscando coleção: '{word}'", "cmd")
+        self._log_line(f"🔎 Buscando coleção: {', '.join(words)}", "cmd")
 
         def _search_log(msg: str):
             tag = "warning" if msg.startswith("⚠️") else "info"
             self._log_q.put((msg, tag))
 
         def _work():
-            matches = cb.search(word, log_cb=_search_log)
+            matches = []
+            for w in words:
+                matches.extend(cb.search(w, log_cb=_search_log))
             self.after(0, lambda: self._col_show_results(matches))
 
         threading.Thread(target=_work, daemon=True).start()
@@ -475,9 +486,11 @@ class App(tk.Tk):
         for i, m in enumerate(matches):
             frase = (m["chinese"] or "").strip()
             self._col_tree.insert("", tk.END, iid=str(i),
-                                  values=(m["asset"], f"{m['avg_time']:.1f}s", frase[:60]))
+                                  values=(m.get("word", ""), m["asset"], f"{m['avg_time']:.1f}s", frase[:60]))
         n = len(matches)
-        self._col_status.set(f"{n} frase(s) encontrada(s)" if n else "Nenhuma frase encontrada")
+        n_words = len({m.get("word", "") for m in matches})
+        self._col_status.set(
+            f"{n} frase(s) em {n_words} palavra(s)" if n else "Nenhuma frase encontrada")
         self._col_save_btn.config(state=tk.NORMAL if n else tk.DISABLED)
         self._col_preview.config(image="", text="(preview r36s aparece aqui)")
         self._col_photo = None
@@ -543,40 +556,58 @@ class App(tk.Tk):
         cb = self._col_import()
         if not cb or not self._col_matches or self._col_saving:
             return
-        word = self._col_word.get().strip()
-        n = len(self._col_matches)
-        folder = cb.collection_folder_name(word, self._col_matches)
-        if not messagebox.askyesno("Salvar coleção",
-                                   f"Gerar {n} imagem(ns) em 2 resoluções para '{word}'?\n"
-                                   "→ warehouse/collections/" + folder + "/"):
+
+        # Agrupa os matches por palavra → uma coleção (pasta) por palavra.
+        groups: dict = {}
+        for m in self._col_matches:
+            groups.setdefault(m.get("word", ""), []).append(m)
+        groups = [(w, ms) for w, ms in groups.items() if w]
+        if not groups:
+            return
+
+        n_total = sum(len(ms) for _, ms in groups)
+        folders = [cb.collection_folder_name(w, ms) for w, ms in groups]
+        shown = ", ".join(folders[:8]) + ("…" if len(folders) > 8 else "")
+        if not messagebox.askyesno(
+                "Salvar coleções",
+                f"Gerar {n_total} imagem(ns) em {len(groups)} coleção(ões) (uma pasta por palavra)?\n"
+                f"→ warehouse/collections/: {shown}"):
             return
 
         self._col_saving = True
         self._col_save_btn.config(state=tk.DISABLED)
         self._nb.select(3)
-        self._log_line(f"💾 Salvando coleção '{word}' ({n} frases)…", "cmd")
-        matches = list(self._col_matches)
+        self._log_line(f"💾 Salvando {len(groups)} coleção(ões) ({n_total} frases)…", "cmd")
 
         def _progress(i, total, msg):
             self._log_q.put((f"  [{i}/{total}] {msg}", "info"))
 
         def _work():
-            try:
-                out = cb.save_collection(word, matches, progress_cb=_progress)
-                self._log_q.put((f"✓ Coleção salva em {out}", "success"))
-                self.after(0, lambda: self._col_save_done(out))
-            except Exception as e:  # noqa: BLE001
-                self._log_q.put((f"Erro ao salvar coleção: {e}", "error"))
-                self.after(0, lambda: self._col_save_done(None))
+            last_out = None
+            ok_count = 0
+            for w, ms in groups:
+                try:
+                    self._log_q.put((f"💾 Coleção '{w}' ({len(ms)} frases)…", "cmd"))
+                    out = cb.save_collection(w, ms, progress_cb=_progress)
+                    self._log_q.put((f"✓ Coleção salva em {out}", "success"))
+                    last_out = out
+                    ok_count += 1
+                except Exception as e:  # noqa: BLE001
+                    self._log_q.put((f"Erro ao salvar coleção '{w}': {e}", "error"))
+            self.after(0, lambda: self._col_save_done(last_out, ok_count, len(groups)))
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _col_save_done(self, out):
+    def _col_save_done(self, out, ok_count: int = 0, total: int = 0):
         self._col_saving = False
         self._col_save_btn.config(state=tk.NORMAL if self._col_matches else tk.DISABLED)
         if out is not None:
-            if messagebox.askyesno("Concluído", f"Coleção salva em:\n{out}\n\nAbrir a pasta?"):
-                subprocess.Popen(["open", str(out)])
+            # Abre a pasta de coleções (pai), já que pode haver várias.
+            open_dir = out.parent if total > 1 else out
+            if messagebox.askyesno(
+                    "Concluído",
+                    f"{ok_count}/{total} coleção(ões) salva(s).\nAbrir a pasta?"):
+                subprocess.Popen(["open", str(open_dir)])
 
     # ── Log Tab ────────────────────────────────────────────────────────────────
     def _build_log_tab(self):
