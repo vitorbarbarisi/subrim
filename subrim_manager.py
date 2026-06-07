@@ -8,6 +8,7 @@ import re
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext
@@ -138,6 +139,11 @@ class App(tk.Tk):
         self._col_render_token = 0
         self._col_photo = None
         self._col_saving = False
+        # Cronômetro de leitura (tempo por caractere)
+        self._timing_active = False
+        self._timing_records: list = []   # (n_caracteres, segundos) por imagem lida
+        self._timing_start = None         # time.monotonic() do início da imagem atual
+        self._timing_idx = None           # índice da imagem cujo tempo está correndo
 
         # Expected chunk-total cache: asset_name -> (base_mtime, total)
         self._chunk_total_cache: dict = {}
@@ -418,6 +424,12 @@ class App(tk.Tk):
         ttk.Label(nav, textvariable=self._col_pos, width=10, anchor=tk.CENTER).pack(side=tk.LEFT, padx=6)
         ttk.Button(nav, text="Próxima ▶", command=lambda: self._col_step(1)).pack(side=tk.LEFT)
 
+        self._timing_btn = ttk.Button(nav, text="⏱ Cronometrar",
+                                      command=self._timing_toggle, state=tk.DISABLED)
+        self._timing_btn.pack(side=tk.RIGHT)
+        self._timing_info = tk.StringVar(value="")
+        ttk.Label(nav, textvariable=self._timing_info, foreground="#888").pack(side=tk.RIGHT, padx=8)
+
         self._col_preview = ttk.Label(right, text="(preview r36s aparece aqui)",
                                       anchor=tk.CENTER, foreground="#888")
         self._col_preview.pack(fill=tk.BOTH, expand=True, pady=6)
@@ -492,6 +504,9 @@ class App(tk.Tk):
         self._col_status.set(
             f"{n} frase(s) em {n_words} palavra(s)" if n else "Nenhuma frase encontrada")
         self._col_save_btn.config(state=tk.NORMAL if n else tk.DISABLED)
+        # Cronômetro: nova busca encerra qualquer sessão ativa e (re)habilita o botão.
+        self._timing_reset()
+        self._timing_btn.config(state=tk.NORMAL if n else tk.DISABLED)
         self._col_preview.config(image="", text="(preview r36s aparece aqui)")
         self._col_photo = None
         self._col_caption.set("")
@@ -505,6 +520,8 @@ class App(tk.Tk):
         if not sel:
             return
         self._col_index = int(sel[0])
+        if self._timing_active:
+            self._timing_mark(self._col_index)
         self._col_render_current()
 
     def _col_step(self, delta: int):
@@ -540,6 +557,97 @@ class App(tk.Tk):
             self.after(0, lambda: self._col_set_preview(token, img))
 
         threading.Thread(target=_work, daemon=True).start()
+
+    # ── Cronômetro de leitura (tempo por caractere) ─────────────────────────────
+    @staticmethod
+    def _count_chars(text: str) -> int:
+        """Conta os ideogramas CJK da frase (o que o usuário efetivamente lê)."""
+        if not text:
+            return 0
+        cjk = sum(1 for ch in text
+                  if "一" <= ch <= "鿿" or "㐀" <= ch <= "䶿"
+                  or "豈" <= ch <= "﫿")
+        # fallback: se não houver CJK, conta caracteres não-espaço
+        return cjk if cjk else len(text.replace(" ", "").replace("　", ""))
+
+    def _timing_reset(self):
+        """Zera o estado do cronômetro e devolve o botão ao estado inicial."""
+        self._timing_active = False
+        self._timing_records = []
+        self._timing_start = None
+        self._timing_idx = None
+        self._timing_info.set("")
+        self._timing_btn.config(text="⏱ Cronometrar")
+
+    def _timing_mark(self, new_idx: int):
+        """Registra o tempo da imagem que está sendo deixada e (re)inicia para a nova."""
+        if (self._timing_idx is not None and self._timing_start is not None
+                and new_idx != self._timing_idx):
+            elapsed = time.monotonic() - self._timing_start
+            chars = self._count_chars(self._col_matches[self._timing_idx].get("chinese", ""))
+            if chars > 0 and elapsed > 0:
+                self._timing_records.append((chars, elapsed))
+                self._timing_info.set(
+                    f"{len(self._timing_records)} lida(s) · "
+                    f"{elapsed / chars:.2f}s/caractere (última)")
+        self._timing_idx = new_idx
+        self._timing_start = time.monotonic()
+
+    def _timing_toggle(self):
+        if not self._col_matches:
+            return
+        if not self._timing_active:
+            # Inicia: zera registros e começa a contar na 1ª imagem. Pré-fixamos
+            # o índice/início ANTES de mexer na seleção para que o evento de
+            # seleção (se disparar) não registre um tempo espúrio da imagem anterior.
+            self._timing_records = []
+            self._timing_active = True
+            self._timing_btn.config(text="⏹ Finalizar cronômetro")
+            self._timing_info.set("0 lida(s)")
+            self._log_line("⏱ Cronômetro iniciado — leia cada frase e clique 'Próxima ▶'.", "cmd")
+            self._col_index = 0
+            self._timing_idx = 0
+            self._timing_start = time.monotonic()
+            self._col_tree.selection_set("0")
+            self._col_tree.focus("0")
+            self._col_tree.see("0")
+            self._col_render_current()
+        else:
+            self._timing_finalize()
+
+    def _timing_finalize(self):
+        # Registra a imagem que estava sendo lida no momento de finalizar.
+        if self._timing_idx is not None and self._timing_start is not None:
+            elapsed = time.monotonic() - self._timing_start
+            chars = self._count_chars(self._col_matches[self._timing_idx].get("chinese", ""))
+            if chars > 0 and elapsed > 0:
+                self._timing_records.append((chars, elapsed))
+
+        records = self._timing_records
+        self._timing_active = False
+        self._timing_btn.config(text="⏱ Cronometrar")
+        self._timing_idx = None
+        self._timing_start = None
+
+        total_chars = sum(c for c, _ in records)
+        total_time = sum(t for _, t in records)
+        if total_chars > 0:
+            avg = total_time / total_chars
+            self._timing_info.set(f"média: {avg:.2f}s/caractere")
+            self._log_line(
+                f"⏱ Cronômetro finalizado: {avg:.2f}s/caractere "
+                f"({len(records)} imagem(ns), {total_chars} caracteres, {total_time:.1f}s)",
+                "success")
+            messagebox.showinfo(
+                "Resultado do cronômetro",
+                f"Imagens lidas: {len(records)}\n"
+                f"Caracteres lidos: {total_chars}\n"
+                f"Tempo total: {total_time:.1f}s\n\n"
+                f"⏱  Média geral: {avg:.2f}s por caractere")
+        else:
+            self._timing_info.set("")
+            messagebox.showinfo("Resultado do cronômetro",
+                                "Nenhuma leitura registrada.")
 
     def _col_set_preview(self, token: int, img):
         if token != self._col_render_token:
