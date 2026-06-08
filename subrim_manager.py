@@ -880,14 +880,17 @@ class App(tk.Tk):
         self._maybe_fill_totals(assets)
 
     def _format_chunks(self, a: dict) -> str:
-        """Coluna Chunks: ``processados / gerados / total`` quando o total é conhecido."""
+        """Coluna Chunks: indicador binário (✓ ou ○) pois processamento é paralelo.
+
+        Como chunks agora queimam em paralelo, não há progresso granular a mostrar.
+        Indicador simples: ✓ se todos processados, ○ se não.
+        """
         if a["phase"] in ("empty", "ready") or not a["has_base"]:
             return "—"
         done, generated = a["chunks_done"], a["chunks_total"]
-        total = self._chunk_total_for(a["name"])
-        if total:
-            return f"{done} / {generated} / {total}"
-        return f"{done} / {generated}"
+        if generated > 0 and done == generated:
+            return "✓"
+        return "○"
 
     def _chunk_total_for(self, name: str):
         """Total previsto de chunks: prioriza o valor lido ao vivo dos logs."""
