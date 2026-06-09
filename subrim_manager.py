@@ -912,7 +912,7 @@ class App(tk.Tk):
 
         self._col_saving = True
         self._col_save_btn.config(state=tk.DISABLED)
-        self._nb.select(3)
+        self._nb.select(4)
         self._log_line(f"💾 Salvando {len(groups)} coleção(ões) ({n_total} frases)…", "cmd")
 
         def _progress(i, total, msg):
@@ -1304,7 +1304,7 @@ class App(tk.Tk):
                                        "Aguarde ou pare o processo atual antes de iniciar outro.")
                 return
 
-        self._nb.select(3)
+        self._nb.select(4)
         self._log_line(f"$ {' '.join(str(c) for c in cmd)}", "cmd")
         self._status_var.set(f"▶  {label}")
         self._stop_btn.config(state=tk.NORMAL)
