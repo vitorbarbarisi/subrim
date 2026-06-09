@@ -173,6 +173,80 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
     return results
 
 
+def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
+                          max_unknown: int = 1) -> List[dict]:
+    """Busca frases com no máximo ``max_unknown`` palavras desconhecidas.
+
+    "Desconhecida" = entrada do array que possui tanto pinyin quanto tradução
+    (ou seja, ainda há algo a aprender). Palavras nuas (só o caractere, sem
+    pinyin/trad) são consideradas conhecidas.
+
+    O campo ``word`` de cada match indica o nº de desconhecidas da frase
+    (ex.: "0" ou "1") e é usado na coluna Palavra da GUI.
+    """
+    def _log(msg: str) -> None:
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg, flush=True)
+
+    results: List[dict] = []
+    skipped_no_video: List[str] = []
+    if not WAREHOUSE.exists():
+        return results
+
+    for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
+        asset = base_file.stem.replace("_base", "")
+        video_path = _find_video(base_file)
+        if not video_path:
+            skipped_no_video.append(asset)
+            continue
+
+        try:
+            with open(base_file, "r", encoding="utf-8") as f:
+                for line_num, line in enumerate(f, 1):
+                    line = line.rstrip("\n")
+                    cols = line.split("\t")
+                    if len(cols) < 6:
+                        continue
+
+                    word_array = cols[4]
+                    pairs = parse_pinyin_translations(word_array)
+                    # conta palavras desconhecidas: têm pinyin E tradução
+                    n_unknown = sum(
+                        1 for _, py, tr in pairs if py.strip() and tr.strip()
+                    )
+                    if n_unknown > max_unknown:
+                        continue
+
+                    try:
+                        begin = float(cols[1].replace("s", ""))
+                        end   = float(cols[2].replace("s", ""))
+                    except ValueError:
+                        continue
+
+                    results.append({
+                        "asset":            asset,
+                        "video_path":       str(video_path),
+                        "line_num":         line_num,
+                        "begin":            begin,
+                        "end":              end,
+                        "avg_time":         (begin + end) / 2,
+                        "chinese":          cols[3],
+                        "translations_json": word_array,
+                        "portuguese":       cols[5],
+                        "pinyin":           "",
+                        "word":             str(n_unknown),  # "0" ou "1"
+                    })
+        except Exception as e:  # noqa: BLE001
+            _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
+
+    if skipped_no_video:
+        _log(f"⚠️  {len(skipped_no_video)} base(s) ignorada(s) por falta de vídeo.")
+    _log(f"✓ i+1: {len(results)} frase(s) com ≤{max_unknown} palavra(s) desconhecida(s).")
+    return results
+
+
 def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> bool:
     """Extrai o frame do vídeo na minutagem indicada e salva como PNG (sem legenda)."""
     cap = cv2.VideoCapture(video_path)

@@ -688,17 +688,28 @@ class App(tk.Tk):
         self._col_status.set("Buscando…")
         self._col_tree.delete(*self._col_tree.get_children())
         self._col_matches = []
-        self._log_line(f"🔎 Buscando coleção: {', '.join(words)}", "cmd")
+
+        # Modo especial "0": frases com 0 ou 1 palavra desconhecida (i+1 input).
+        comprehensible_mode = words == ["0"]
 
         def _search_log(msg: str):
             tag = "warning" if msg.startswith("⚠️") else "info"
             self._log_q.put((msg, tag))
 
-        def _work():
-            matches = []
-            for w in words:
-                matches.extend(cb.search(w, log_cb=_search_log))
-            self.after(0, lambda: self._col_show_results(matches))
+        if comprehensible_mode:
+            self._log_line("🔎 Buscando frases i+1 (≤1 palavra desconhecida)…", "cmd")
+
+            def _work():
+                matches = cb.search_comprehensible(log_cb=_search_log, max_unknown=1)
+                self.after(0, lambda: self._col_show_results(matches))
+        else:
+            self._log_line(f"🔎 Buscando coleção: {', '.join(words)}", "cmd")
+
+            def _work():
+                matches = []
+                for w in words:
+                    matches.extend(cb.search(w, log_cb=_search_log))
+                self.after(0, lambda: self._col_show_results(matches))
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -710,9 +721,16 @@ class App(tk.Tk):
             self._col_tree.insert("", tk.END, iid=str(i),
                                   values=(m.get("word", ""), m["asset"], f"{m['avg_time']:.1f}s", frase[:60]))
         n = len(matches)
-        n_words = len({m.get("word", "") for m in matches})
-        self._col_status.set(
-            f"{n} frase(s) em {n_words} palavra(s)" if n else "Nenhuma frase encontrada")
+        words_set = {m.get("word", "") for m in matches}
+        # modo i+1: palavras são "0"/"1" (contagem de desconhecidas)
+        if words_set <= {"0", "1"}:
+            n0 = sum(1 for m in matches if m.get("word") == "0")
+            n1 = n - n0
+            status = f"{n} frase(s) — {n0} sem desconhecidas, {n1} com 1 desconhecida"
+        else:
+            n_words = len(words_set)
+            status = f"{n} frase(s) em {n_words} palavra(s)"
+        self._col_status.set(status if n else "Nenhuma frase encontrada")
         self._col_save_btn.config(state=tk.NORMAL if n else tk.DISABLED)
         # Cronômetro: nova busca encerra qualquer sessão ativa e (re)habilita o botão.
         self._timing_reset()
