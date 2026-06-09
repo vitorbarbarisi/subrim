@@ -16,9 +16,78 @@ import tkinter as tk
 from tkinter import ttk
 
 # ─── Paths ─────────────────────────────────────────────────────────────────────
-REPO   = Path(__file__).parent
-ASSETS = REPO / "assets"
-SOURCE = ASSETS / "source"
+REPO      = Path(__file__).parent
+ASSETS    = REPO / "assets"
+SOURCE    = ASSETS / "source"
+WAREHOUSE = REPO / "warehouse"
+
+
+def _wh_readable_name(stem: str) -> str:
+    """Converte 'amor80_base' → 'Amor 80', 'Death_Becomes_Her_base' → 'Death Becomes Her'."""
+    name = stem.replace("_base", "").replace("_", " ").strip()
+    # separa letras de dígitos colados: 'amor80' → 'amor 80'
+    name = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", name)
+    name = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", name)
+    return name.title()
+
+
+def _wh_analyse(base_path: Path) -> dict:
+    """Analisa um base.txt do warehouse e retorna estatísticas de palavras.
+
+    Retorna:
+      total_words   – palavras distintas no array
+      known         – palavras SEM pinyin e tradução (dominadas / confidence-3)
+      unknown       – palavras COM pinyin e tradução (a aprender)
+      freq          – lista [(palavra, count)] por frequência desc
+    """
+    from collections import defaultdict
+    word_count: dict = defaultdict(int)
+    # conjunto de pares distintos para contar conhecido/desconhecido
+    word_meta: dict = {}   # palavra → (has_pinyin, has_translation)
+
+    try:
+        with open(base_path, "r", encoding="utf-8") as f:
+            for line in f:
+                parts = line.rstrip("\n").split("\t")
+                if len(parts) < 5:
+                    continue
+                arr = parts[4].strip()
+                if not arr.startswith("["):
+                    continue
+                # extrai itens do array JSON-like
+                for item in re.findall(r'"([^"]*)"', arr):
+                    item = item.strip()
+                    if not item:
+                        continue
+                    m = re.match(r'^([^\s\(]+)\s*\(([^)]*)\)\s*:\s*(.+)$', item)
+                    if m:
+                        word, pinyin, translation = m.group(1), m.group(2), m.group(3)
+                        has_py = bool(pinyin.strip())
+                        has_tr = bool(translation.strip())
+                    else:
+                        # entrada nua (palavra dominada sem pinyin/trad)
+                        bare = re.match(r'^([^\s\(:]+)', item)
+                        if not bare:
+                            continue
+                        word = bare.group(1)
+                        has_py, has_tr = False, False
+                    if word:
+                        word_count[word] += 1
+                        # known = sem pinyin OU sem tradução
+                        existing = word_meta.get(word, (has_py, has_tr))
+                        word_meta[word] = (existing[0] or has_py, existing[1] or has_tr)
+    except Exception:
+        pass
+
+    freq = sorted(word_count.items(), key=lambda x: -x[1])
+    known = sum(1 for w, (hp, ht) in word_meta.items() if not hp or not ht)
+    unknown = len(word_meta) - known
+    return {
+        "total_words": len(word_meta),
+        "known": known,
+        "unknown": unknown,
+        "freq": freq,
+    }
 
 
 def _scraper_python() -> str:
@@ -178,6 +247,7 @@ class App(tk.Tk):
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
         self._build_assets_tab()
+        self._build_warehouse_tab()
         self._build_downloads_tab()
         self._build_collections_tab()
         self._build_log_tab()
@@ -295,6 +365,134 @@ class App(tk.Tk):
             self._phase_marks[key] = var
 
         self._refresh_assets()
+
+    # ── Warehouse Tab ──────────────────────────────────────────────────────────
+    def _build_warehouse_tab(self):
+        outer = ttk.Frame(self._nb, padding=8)
+        self._nb.add(outer, text="  Warehouse  ")
+
+        # barra superior
+        ctrl = ttk.Frame(outer)
+        ctrl.pack(fill=tk.X, pady=(0, 6))
+        ttk.Button(ctrl, text="↺  Atualizar", command=self._wh_refresh).pack(side=tk.LEFT)
+        self._wh_count_var = tk.StringVar()
+        ttk.Label(ctrl, textvariable=self._wh_count_var, foreground="#888").pack(side=tk.RIGHT)
+
+        pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
+        pw.pack(fill=tk.BOTH, expand=True)
+
+        # ── lista ──
+        left = ttk.Frame(pw)
+        pw.add(left, weight=2)
+
+        cols = ("name", "status")
+        wt = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        wt.heading("name",   text="Nome",   anchor=tk.W)
+        wt.heading("status", text="Status", anchor=tk.CENTER)
+        wt.column("name",   width=200, anchor=tk.W,      stretch=True)
+        wt.column("status", width=110, anchor=tk.CENTER, stretch=False)
+        vsb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=wt.yview)
+        wt.configure(yscrollcommand=vsb.set)
+        wt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        wt.tag_configure("ok",      foreground="#27AE60")
+        wt.tag_configure("missing", foreground="#E74C3C")
+        wt.bind("<<TreeviewSelect>>", self._wh_on_select)
+        self._wh_tree = wt
+
+        # ── detalhes ──
+        right = ttk.Frame(pw, padding=(12, 0, 0, 0))
+        pw.add(right, weight=3)
+
+        ttk.Label(right, text="Detalhes", font=("", 11, "bold")).pack(anchor=tk.W)
+        ttk.Separator(right, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=(4, 8))
+
+        self._wh_detail = tk.StringVar(value="Selecione um arquivo para ver os detalhes.")
+        ttk.Label(right, textvariable=self._wh_detail, justify=tk.LEFT,
+                  font=("Menlo", 11), foreground="#333").pack(anchor=tk.W)
+
+        ttk.Label(right, text="Palavras por frequência:", font=("", 10, "bold")).pack(
+            anchor=tk.W, pady=(14, 4))
+
+        freq_f = ttk.Frame(right)
+        freq_f.pack(fill=tk.BOTH, expand=True)
+        fcols = ("word", "count")
+        ft = ttk.Treeview(freq_f, columns=fcols, show="headings", selectmode="browse", height=18)
+        ft.heading("word",  text="Palavra", anchor=tk.W)
+        ft.heading("count", text="Ocorrências", anchor=tk.CENTER)
+        ft.column("word",  width=120, anchor=tk.W,      stretch=False)
+        ft.column("count", width=90,  anchor=tk.CENTER, stretch=False)
+        fvsb = ttk.Scrollbar(freq_f, orient=tk.VERTICAL, command=ft.yview)
+        ft.configure(yscrollcommand=fvsb.set)
+        ft.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        fvsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._wh_freq_tree = ft
+
+        self._wh_refresh()
+
+    def _wh_refresh(self):
+        """Recarrega a lista de base.txt do warehouse, ordenada alfabeticamente por nome legível."""
+        self._wh_tree.delete(*self._wh_tree.get_children())
+        self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
+        self._wh_detail.set("Selecione um arquivo para ver os detalhes.")
+
+        if not WAREHOUSE.exists():
+            self._wh_count_var.set("warehouse/ não encontrada")
+            return
+
+        bases = sorted(WAREHOUSE.glob("*_base.txt"),
+                       key=lambda p: _wh_readable_name(p.stem).lower())
+        for bf in bases:
+            readable = _wh_readable_name(bf.stem)
+            # vídeo correspondente: mesmo prefixo sem _base, extensão .mp4
+            prefix = bf.stem.replace("_base", "")
+            has_video = any(True for _ in WAREHOUSE.glob(f"{prefix}.mp4"))
+            status = "Completo" if has_video else "Falta vídeo"
+            tag    = "ok" if has_video else "missing"
+            self._wh_tree.insert("", tk.END, iid=str(bf),
+                                 values=(readable, status), tags=(tag,))
+
+        total    = len(bases)
+        complete = sum(1 for bf in bases
+                       if any(True for _ in WAREHOUSE.glob(
+                           f"{bf.stem.replace('_base', '')}.mp4")))
+        self._wh_count_var.set(f"{complete}/{total} com vídeo")
+
+    def _wh_on_select(self, _=None):
+        sel = self._wh_tree.selection()
+        if not sel:
+            return
+        bf = Path(sel[0])
+        prefix = bf.stem.replace("_base", "")
+
+        # vídeo
+        mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
+        video_line = mp4.name if mp4 else "—"
+
+        # análise (em thread para não travar a UI)
+        self._wh_detail.set("Analisando…")
+        self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
+
+        def _work():
+            stats = _wh_analyse(bf)
+            detail = (
+                f"Arquivo : {bf.name}\n"
+                f"Vídeo   : {video_line}\n"
+                f"\n"
+                f"Palavras distintas : {stats['total_words']}\n"
+                f"  Conhecidas (sem pinyin/trad) : {stats['known']}\n"
+                f"  Desconhecidas (com pinyin+trad) : {stats['unknown']}"
+            )
+            freq = stats["freq"]
+            self.after(0, lambda: self._wh_show_details(detail, freq))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _wh_show_details(self, detail: str, freq: list):
+        self._wh_detail.set(detail)
+        self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
+        for word, count in freq:
+            self._wh_freq_tree.insert("", tk.END, values=(word, count))
 
     # ── Downloads & Scraping Tab ───────────────────────────────────────────────
     def _build_downloads_tab(self):
