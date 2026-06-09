@@ -1495,29 +1495,49 @@ class DownloadDialog(tk.Toplevel):
         except Exception:
             pass
 
+        # Modo: único ou lote
+        self._mode = tk.StringVar(value="batch")
+        mode_f = ttk.Frame(f)
+        mode_f.pack(fill=tk.X, pady=(0, 6))
+        ttk.Radiobutton(mode_f, text="Próximos 6 a partir de",
+                        variable=self._mode, value="batch",
+                        command=self._on_mode).pack(side=tk.LEFT)
+        ttk.Radiobutton(mode_f, text="Episódio único",
+                        variable=self._mode, value="single",
+                        command=self._on_mode).pack(side=tk.LEFT, padx=(12, 0))
+
         row = ttk.Frame(f)
         row.pack(fill=tk.X)
-        ttk.Label(row, text="Baixar a partir do episódio:").pack(side=tk.LEFT)
+        self._ep_label = ttk.Label(row, text="Episódio inicial:")
+        self._ep_label.pack(side=tk.LEFT)
         self._start = tk.StringVar(value="1")
         ttk.Entry(row, textvariable=self._start, width=6).pack(side=tk.LEFT, padx=6)
 
-        ttk.Label(f, text="(máximo 6 episódios por vez)", foreground="#999",
-                  font=("", 9)).pack(anchor=tk.W, pady=(4, 0))
+        self._hint = ttk.Label(f, text="(máximo 6 episódios por vez)", foreground="#999",
+                               font=("", 9))
+        self._hint.pack(anchor=tk.W, pady=(4, 0))
 
         btns = ttk.Frame(f)
         btns.pack(fill=tk.X, pady=(12, 0))
-        ttk.Button(btns, text="Cancelar",      command=self.destroy).pack(side=tk.RIGHT, padx=4)
-        ttk.Button(btns, text="📥 Baixar",     command=self._start_download).pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Cancelar",  command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="📥 Baixar", command=self._start_download).pack(side=tk.RIGHT)
+
+    def _on_mode(self):
+        single = self._mode.get() == "single"
+        self._ep_label.config(text="Número do episódio:" if single else "Episódio inicial:")
+        self._hint.config(text="" if single else "(máximo 6 episódios por vez)")
 
     def _start_download(self):
-        start_ep = self._start.get().strip()
-        if not start_ep.isdigit():
+        ep = self._start.get().strip()
+        if not ep.isdigit():
             messagebox.showwarning("Aviso", "Número do episódio inválido", parent=self)
             return
-        self.app._launch(
-            [sys.executable, str(REPO / "video_fetcher.py"), self.series, start_ep],
-            label=f"Download: {self.series} ep{start_ep}+",
-        )
+        single = self._mode.get() == "single"
+        cmd = [sys.executable, str(REPO / "video_fetcher.py"), self.series, ep]
+        if single:
+            cmd.append("--only")
+        label = f"Download: {self.series} ep{ep}" if single else f"Download: {self.series} ep{ep}+"
+        self.app._launch(cmd, label=label)
         self.destroy()
 
 

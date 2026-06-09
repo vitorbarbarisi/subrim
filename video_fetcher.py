@@ -109,13 +109,18 @@ def download_video(url, directory, retries=3, delay=8):
 
 
 def main():
-    if len(sys.argv) != 3:
-        print("Uso: python3 video_fetcher.py <nome> <episodio_inicial>")
-        print("Exemplo: python3 video_fetcher.py onibus 138")
-        sys.exit(1)
+    import argparse
+    parser = argparse.ArgumentParser(
+        description="Baixa episódios de uma série via yt-dlp.")
+    parser.add_argument("series_name", help="Nome da série (ex.: onibus)")
+    parser.add_argument("start_episode", help="Episódio inicial (ou único com --only)")
+    parser.add_argument("--only", action="store_true",
+                        help="Baixa apenas o episódio exato, sem avançar para os próximos.")
+    args = parser.parse_args()
 
-    series_name = sys.argv[1]
-    start_episode = sys.argv[2]
+    series_name   = args.series_name
+    start_episode = args.start_episode
+    only_one      = args.only
 
     # Caminhos
     base_dir = Path(__file__).parent
@@ -134,9 +139,13 @@ def main():
     filtered_episodes = filter_episodes(episodes, start_episode)
     print(f"Episódios a partir de {start_episode}: {len(filtered_episodes)}")
 
-    # Processa apenas os primeiros 6 episódios
-    episodes_to_process = filtered_episodes[:6]
-    print(f"Processando {len(episodes_to_process)} episódios (limite de 6)")
+    # Modo --only: episódio exato; senão, os 6 próximos.
+    if only_one:
+        episodes_to_process = filtered_episodes[:1]
+        print(f"Modo episódio único: {len(episodes_to_process)} episódio")
+    else:
+        episodes_to_process = filtered_episodes[:6]
+        print(f"Processando {len(episodes_to_process)} episódios (limite de 6)")
 
     if not episodes_to_process:
         print(f"Nenhum episódio encontrado a partir do número {start_episode}")
