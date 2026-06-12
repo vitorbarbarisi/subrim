@@ -607,7 +607,7 @@ class App(tk.Tk):
         left = ttk.Frame(pw)
         pw.add(left, weight=2)
         cols = ("palavra", "asset", "time", "frase")
-        t = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        t = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
         t.heading("palavra", text="Palavra", anchor=tk.W)
         t.heading("asset", text="Asset",  anchor=tk.W)
         t.heading("time",  text="Tempo",  anchor=tk.CENTER)
@@ -621,6 +621,8 @@ class App(tk.Tk):
         t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         t.bind("<<TreeviewSelect>>", self._col_on_select)
+        t.bind("<Delete>",    lambda _: self._col_delete_selected())
+        t.bind("<BackSpace>", lambda _: self._col_delete_selected())
         self._col_tree = t
 
         # Right: preview
@@ -751,6 +753,14 @@ class App(tk.Tk):
         if self._timing_active:
             self._timing_mark(self._col_index)
         self._col_render_current()
+
+    def _col_delete_selected(self):
+        sel = self._col_tree.selection()
+        if not sel:
+            return
+        to_delete = {int(iid) for iid in sel}
+        new_matches = [m for i, m in enumerate(self._col_matches) if i not in to_delete]
+        self._col_show_results(new_matches)
 
     def _col_step(self, delta: int):
         if not self._col_matches:
