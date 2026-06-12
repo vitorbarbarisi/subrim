@@ -762,7 +762,26 @@ class App(tk.Tk):
             return
         to_delete = {int(iid) for iid in sel}
         new_matches = [m for i, m in enumerate(self._col_matches) if i not in to_delete]
+
+        # find new selection: first surviving item after the deleted range
+        max_del = max(to_delete)
+        new_sel = max(0, len(new_matches) - 1)
+        j = 0
+        for i in range(len(self._col_matches)):
+            if i in to_delete:
+                continue
+            if i > max_del:
+                new_sel = j
+                break
+            j += 1
+
         self._col_show_results(new_matches)
+        if new_matches:
+            iid = str(new_sel)
+            self._col_tree.selection_set(iid)
+            self._col_tree.focus(iid)
+            self._col_tree.see(iid)
+            self._col_index = new_sel
 
     def _col_extend_selection(self, direction: int):
         focused = self._col_tree.focus()
