@@ -220,20 +220,24 @@ class VideoBurner:
             self.log(f"✓ {dir_name} já processado e enviado ao Drive")
             return True
 
-        # Phase 1: Subtitle processing
-        self.log(f"Fase 1: Processamento de legendas para {dir_name}")
+        # Phase 1: Subtitle processing (skip if base.txt already exists)
+        has_base = bool(list(directory.glob("*base.txt")))
+        if has_base and not force:
+            self.log(f"Fase 1: base.txt já existe para {dir_name} — pulando processor")
+        else:
+            self.log(f"Fase 1: Processamento de legendas para {dir_name}")
 
-        if not self.run_script("processor.py", dir_name):
-            self.log(f"Falha no processor.py para {dir_name}", "ERROR")
-            return False
+            if not self.run_script("processor.py", dir_name):
+                self.log(f"Falha no processor.py para {dir_name}", "ERROR")
+                return False
 
-        if not self.run_script("adjust_base_times.py", dir_name):
-            self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
-            return False
+            if not self.run_script("adjust_base_times.py", dir_name):
+                self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
+                return False
 
-        if not self.run_script("sanitize_base.py", dir_name):
-            self.log(f"Falha no sanitize_base.py para {dir_name}", "ERROR")
-            return False
+            if not self.run_script("sanitize_base.py", dir_name):
+                self.log(f"Falha no sanitize_base.py para {dir_name}", "ERROR")
+                return False
 
         # Phase 2: Video processing
         self.log(f"Fase 2: Processamento de vídeo para {dir_name}")
