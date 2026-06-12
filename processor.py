@@ -898,7 +898,19 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
         for begin_pt, end_pt, text_pt in pt_entries:
             if (end_pt >= zht_begin) and (begin_pt <= zht_end):
                 return text_pt
-        return "N/A"
+        # Fallback: nearest PT entry by midpoint distance (handles timing offsets
+        # between Whisper-generated zht and downloaded pt-BR subtitles)
+        zht_mid = (zht_begin + zht_end) / 2
+        _MAX_RADIUS = Decimal("30")
+        best_dist = _MAX_RADIUS + 1
+        best_text = "N/A"
+        for begin_pt, end_pt, text_pt in pt_entries:
+            pt_mid = (begin_pt + end_pt) / 2
+            dist = abs(pt_mid - zht_mid)
+            if dist < best_dist:
+                best_dist = dist
+                best_text = text_pt
+        return best_text if best_dist <= _MAX_RADIUS else "N/A"
 
     p_nodes = list(_iter_p_elements(root))
     total_nodes = len(p_nodes)
