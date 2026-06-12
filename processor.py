@@ -890,27 +890,30 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
     pairs_cache: dict[str, str] = {}
 
     def match_pt_text(zht_begin: Decimal, zht_end: Decimal) -> str:
-        # Prefer PT whose begin falls within the ZHT interval
-        for begin_pt, end_pt, text_pt in pt_entries:
-            if begin_pt >= zht_begin and begin_pt <= zht_end:
-                return text_pt
-        # Otherwise take any overlapping interval
-        for begin_pt, end_pt, text_pt in pt_entries:
-            if (end_pt >= zht_begin) and (begin_pt <= zht_end):
-                return text_pt
-        # Fallback: nearest PT entry by midpoint distance (handles timing offsets
-        # between Whisper-generated zht and downloaded pt-BR subtitles)
-        zht_mid = (zht_begin + zht_end) / 2
-        _MAX_RADIUS = Decimal("30")
-        best_dist = _MAX_RADIUS + 1
-        best_text = "N/A"
-        for begin_pt, end_pt, text_pt in pt_entries:
-            pt_mid = (begin_pt + end_pt) / 2
-            dist = abs(pt_mid - zht_mid)
-            if dist < best_dist:
-                best_dist = dist
-                best_text = text_pt
-        return best_text if best_dist <= _MAX_RADIUS else "N/A"
+        # The zht (Chinese) track is the timing source of truth — it is synced to
+        # the original audio. The PT translation is adapted to fit: join every PT
+        # phrase that occurs within the zht [begin, end] window.
+        #
+        # A PT entry "occurs within" the window when it substantially overlaps it:
+        # the overlap covers at least half of the window OR at least half of the PT
+        # entry. This grabs full sentences while ignoring entries that merely clip
+        # the window edge by a few milliseconds. Because zht is more finely
+        # segmented than PT, one PT sentence is naturally repeated across the
+        # consecutive zht fragments it spans (each fragment shows its meaning).
+        zdur = zht_end - zht_begin
+        parts: list[str] = []
+        for begin_pt, end_pt, text_pt in pt_entries:  # sorted by begin → time order
+            lo = max(zht_begin, begin_pt)
+            hi = min(zht_end, end_pt)
+            overlap = hi - lo
+            if overlap <= 0:
+                continue
+            pdur = end_pt - begin_pt
+            if (zdur > 0 and overlap >= zdur / 2) or (pdur > 0 and overlap >= pdur / 2):
+                text_pt = (text_pt or "").strip()
+                if text_pt and (not parts or parts[-1] != text_pt):
+                    parts.append(text_pt)
+        return " ".join(parts) if parts else "N/A"
 
     p_nodes = list(_iter_p_elements(root))
     total_nodes = len(p_nodes)
