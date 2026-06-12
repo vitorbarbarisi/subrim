@@ -623,6 +623,8 @@ class App(tk.Tk):
         t.bind("<<TreeviewSelect>>", self._col_on_select)
         t.bind("<Delete>",    lambda _: self._col_delete_selected())
         t.bind("<BackSpace>", lambda _: self._col_delete_selected())
+        t.bind("<Shift-Down>", lambda _: self._col_extend_selection(1)  or "break")
+        t.bind("<Shift-Up>",   lambda _: self._col_extend_selection(-1) or "break")
         self._col_tree = t
 
         # Right: preview
@@ -761,6 +763,17 @@ class App(tk.Tk):
         to_delete = {int(iid) for iid in sel}
         new_matches = [m for i, m in enumerate(self._col_matches) if i not in to_delete]
         self._col_show_results(new_matches)
+
+    def _col_extend_selection(self, direction: int):
+        focused = self._col_tree.focus()
+        if not focused:
+            return
+        nxt = self._col_tree.next(focused) if direction > 0 else self._col_tree.prev(focused)
+        if not nxt:
+            return
+        self._col_tree.selection_add(nxt)
+        self._col_tree.focus(nxt)
+        self._col_tree.see(nxt)
 
     def _col_step(self, delta: int):
         if not self._col_matches:
