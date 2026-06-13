@@ -204,6 +204,8 @@ class App(tk.Tk):
 
         # Collections tab state
         self._col_matches: list = []
+        self._col_sort_col = None
+        self._col_sort_reverse = False
         self._col_index = 0
         self._col_render_token = 0
         self._col_photo = None
@@ -608,10 +610,16 @@ class App(tk.Tk):
         pw.add(left, weight=2)
         cols = ("palavra", "asset", "time", "frase")
         t = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
-        t.heading("palavra", text="Palavra", anchor=tk.W)
-        t.heading("asset", text="Asset",  anchor=tk.W)
-        t.heading("time",  text="Tempo",  anchor=tk.CENTER)
-        t.heading("frase", text="Frase",  anchor=tk.W)
+        self._col_headers = {"palavra": "Palavra", "asset": "Asset",
+                             "time": "Tempo", "frase": "Frase"}
+        t.heading("palavra", text="Palavra", anchor=tk.W,
+                  command=lambda: self._col_sort("palavra"))
+        t.heading("asset", text="Asset",  anchor=tk.W,
+                  command=lambda: self._col_sort("asset"))
+        t.heading("time",  text="Tempo",  anchor=tk.CENTER,
+                  command=lambda: self._col_sort("time"))
+        t.heading("frase", text="Frase",  anchor=tk.W,
+                  command=lambda: self._col_sort("frase"))
         t.column("palavra", width=60,  anchor=tk.W,      stretch=False)
         t.column("asset", width=100, anchor=tk.W,      stretch=False)
         t.column("time",  width=64,  anchor=tk.CENTER, stretch=False)
@@ -692,6 +700,11 @@ class App(tk.Tk):
         self._col_status.set("Buscando…")
         self._col_tree.delete(*self._col_tree.get_children())
         self._col_matches = []
+        # Nova busca: zera a ordenação e os indicadores (▲/▼) dos cabeçalhos.
+        self._col_sort_col = None
+        self._col_sort_reverse = False
+        for c, base in self._col_headers.items():
+            self._col_tree.heading(c, text=base)
 
         # Modo especial "0": frases com 0 ou 1 palavra desconhecida (i+1 input).
         comprehensible_mode = words == ["0"]
@@ -755,6 +768,29 @@ class App(tk.Tk):
         if self._timing_active:
             self._timing_mark(self._col_index)
         self._col_render_current()
+
+    def _col_sort(self, col: str):
+        """Ordena a lista de resultados pela coluna clicada (toggle asc/desc)."""
+        if not self._col_matches:
+            return
+        reverse = (self._col_sort_col == col) and not self._col_sort_reverse
+        keyfns = {
+            "palavra": lambda m: m.get("word", ""),
+            "asset":   lambda m: m.get("asset", ""),
+            "time":    lambda m: m.get("avg_time", 0.0),
+            "frase":   lambda m: (m.get("chinese") or "").strip(),
+        }
+        self._col_matches = sorted(self._col_matches, key=keyfns.get(col, lambda m: ""),
+                                   reverse=reverse)
+        self._col_sort_col = col
+        self._col_sort_reverse = reverse
+
+        # Indicador visual (▲/▼) no cabeçalho ordenado; demais voltam ao label base.
+        arrow = " ▼" if reverse else " ▲"
+        for c, base in self._col_headers.items():
+            self._col_tree.heading(c, text=base + (arrow if c == col else ""))
+
+        self._col_show_results(self._col_matches)
 
     def _col_delete_selected(self):
         sel = self._col_tree.selection()
