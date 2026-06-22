@@ -1275,6 +1275,7 @@ class App(tk.Tk):
         self._launch(
             [sys.executable, str(REPO / "video_burner.py"), prefix],
             label=f"Batch: {prefix}*",
+            pause_rate=0.0,  # batch nunca usa pausas, independente do checkbox
         )
 
     def _cleanup_selected(self):
@@ -1375,7 +1376,7 @@ class App(tk.Tk):
         return rate if rate > 0 else 0.0
 
     # ── Process management ─────────────────────────────────────────────────────
-    def _launch(self, cmd: list, label: str = ""):
+    def _launch(self, cmd: list, label: str = "", pause_rate: float = None):
         with self._proc_lock:
             if self._proc and self._proc.poll() is None:
                 messagebox.showwarning("Processo em execução",
@@ -1388,7 +1389,9 @@ class App(tk.Tk):
         self._stop_btn.config(state=tk.NORMAL)
         self._log_label.set(label)
 
-        pause_rate = self._pause_rate_value()  # 0 se desligado/ inválido
+        # None = use checkbox value; caller can force 0.0 to disable pauses.
+        if pause_rate is None:
+            pause_rate = self._pause_rate_value()
 
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
