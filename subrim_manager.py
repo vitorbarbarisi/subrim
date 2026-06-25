@@ -605,6 +605,26 @@ class App(tk.Tk):
         pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
         pw.pack(fill=tk.BOTH, expand=True)
 
+        # Far-left: asset filter
+        af = ttk.Frame(pw, padding=(0, 0, 4, 0))
+        pw.add(af, weight=0)
+        af_top = ttk.Frame(af)
+        af_top.pack(fill=tk.X, pady=(0, 2))
+        ttk.Label(af_top, text="Assets", font=("", 9, "bold")).pack(side=tk.LEFT)
+        ttk.Button(af_top, text="Todos",  width=5,
+                   command=lambda: self._col_asset_lb.selection_set(0, tk.END)).pack(side=tk.RIGHT)
+        ttk.Button(af_top, text="Nenhum", width=6,
+                   command=lambda: self._col_asset_lb.selection_clear(0, tk.END)).pack(side=tk.RIGHT, padx=(0, 2))
+        af_lb_f = ttk.Frame(af)
+        af_lb_f.pack(fill=tk.BOTH, expand=True)
+        lb = tk.Listbox(af_lb_f, selectmode=tk.EXTENDED, width=14, exportselection=False,
+                        font=("Menlo", 9), activestyle="none")
+        af_vsb = ttk.Scrollbar(af_lb_f, orient=tk.VERTICAL, command=lb.yview)
+        lb.configure(yscrollcommand=af_vsb.set)
+        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        af_vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        self._col_asset_lb = lb
+
         # Left: matches list
         left = ttk.Frame(pw)
         pw.add(left, weight=2)
@@ -660,6 +680,9 @@ class App(tk.Tk):
         ttk.Label(right, textvariable=self._col_caption, justify=tk.LEFT,
                   wraplength=520, font=("", 11)).pack(anchor=tk.W)
 
+        # Popula a listbox de assets na construção inicial
+        self.after(100, self._col_refresh_asset_filter)
+
         # Bottom: save
         bottom = ttk.Frame(outer)
         bottom.pack(fill=tk.X, pady=(6, 0))
@@ -681,6 +704,33 @@ class App(tk.Tk):
                                  "Verifique se opencv-python e Pillow estão instalados.")
             return None
 
+    def _col_refresh_asset_filter(self):
+        """Popula (ou atualiza) a listbox de assets com os *_base.txt do warehouse."""
+        lb = self._col_asset_lb
+        prev_selected = {lb.get(i) for i in lb.curselection()}
+        lb.delete(0, tk.END)
+        if WAREHOUSE.exists():
+            names = sorted(
+                b.stem.replace("_base", "")
+                for b in WAREHOUSE.glob("*_base.txt")
+            )
+            for name in names:
+                lb.insert(tk.END, name)
+            # restaura seleção anterior para os itens que ainda existem
+            for i, name in enumerate(names):
+                if not prev_selected or name in prev_selected:
+                    lb.selection_set(i)
+
+    def _col_selected_assets(self) -> set:
+        """Conjunto de assets selecionados; vazio = todos."""
+        lb = self._col_asset_lb
+        sel = {lb.get(i) for i in lb.curselection()}
+        all_items = {lb.get(i) for i in range(lb.size())}
+        # "tudo selecionado" e "nada selecionado" são tratados como "todos"
+        if not sel or sel == all_items:
+            return set()
+        return sel
+
     def _col_do_search(self):
         cb = self._col_import()
         if not cb:
@@ -696,6 +746,9 @@ class App(tk.Tk):
         if not words:
             messagebox.showwarning("Aviso", "Digite uma ou mais palavras (separadas por vírgula).")
             return
+
+        self._col_refresh_asset_filter()
+        asset_filter = self._col_selected_assets()  # vazio = todos
 
         self._col_status.set("Buscando…")
         self._col_tree.delete(*self._col_tree.get_children())
@@ -713,11 +766,16 @@ class App(tk.Tk):
             tag = "warning" if msg.startswith("⚠️") else "info"
             self._log_q.put((msg, tag))
 
+        def _apply_filter(matches):
+            if asset_filter:
+                matches = [m for m in matches if m.get("asset") in asset_filter]
+            return matches
+
         if comprehensible_mode:
             self._log_line("🔎 Buscando frases i+1 (≤1 palavra desconhecida)…", "cmd")
 
             def _work():
-                matches = cb.search_comprehensible(log_cb=_search_log, max_unknown=1)
+                matches = _apply_filter(cb.search_comprehensible(log_cb=_search_log, max_unknown=1))
                 self.after(0, lambda: self._col_show_results(matches))
         else:
             self._log_line(f"🔎 Buscando coleção: {', '.join(words)}", "cmd")
@@ -726,7 +784,7 @@ class App(tk.Tk):
                 matches = []
                 for w in words:
                     matches.extend(cb.search(w, log_cb=_search_log))
-                self.after(0, lambda: self._col_show_results(matches))
+                self.after(0, lambda: self._col_show_results(_apply_filter(matches)))
 
         threading.Thread(target=_work, daemon=True).start()
 
