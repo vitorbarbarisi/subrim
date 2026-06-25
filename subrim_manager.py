@@ -207,6 +207,8 @@ class App(tk.Tk):
         self._col_sort_col = None
         self._col_sort_reverse = False
         self._col_index = 0
+        # Filtro de assets: None = todos (sem filtro); set = só esses assets.
+        self._col_asset_filter = None
         self._col_render_token = 0
         self._col_photo = None
         self._col_saving = False
@@ -599,31 +601,14 @@ class App(tk.Tk):
         e.pack(side=tk.LEFT, padx=6)
         e.bind("<Return>", lambda _: self._col_do_search())
         ttk.Button(top, text="🔍 Buscar", command=self._col_do_search).pack(side=tk.LEFT)
+        self._col_filter_btn = ttk.Button(top, text="⚙ Filtro",
+                                          command=self._col_open_filter_dialog)
+        self._col_filter_btn.pack(side=tk.LEFT, padx=(6, 0))
         self._col_status = tk.StringVar(value="Digite uma ou mais palavras (ex.: 著,當,與) e busque no warehouse")
         ttk.Label(top, textvariable=self._col_status, foreground="#888").pack(side=tk.LEFT, padx=12)
 
         pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
         pw.pack(fill=tk.BOTH, expand=True)
-
-        # Far-left: asset filter
-        af = ttk.Frame(pw, padding=(0, 0, 4, 0))
-        pw.add(af, weight=0)
-        af_top = ttk.Frame(af)
-        af_top.pack(fill=tk.X, pady=(0, 2))
-        ttk.Label(af_top, text="Assets", font=("", 9, "bold")).pack(side=tk.LEFT)
-        ttk.Button(af_top, text="Todos",  width=5,
-                   command=lambda: self._col_asset_lb.selection_set(0, tk.END)).pack(side=tk.RIGHT)
-        ttk.Button(af_top, text="Nenhum", width=6,
-                   command=lambda: self._col_asset_lb.selection_clear(0, tk.END)).pack(side=tk.RIGHT, padx=(0, 2))
-        af_lb_f = ttk.Frame(af)
-        af_lb_f.pack(fill=tk.BOTH, expand=True)
-        lb = tk.Listbox(af_lb_f, selectmode=tk.EXTENDED, width=14, exportselection=False,
-                        font=("Menlo", 9), activestyle="none")
-        af_vsb = ttk.Scrollbar(af_lb_f, orient=tk.VERTICAL, command=lb.yview)
-        lb.configure(yscrollcommand=af_vsb.set)
-        lb.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        af_vsb.pack(side=tk.RIGHT, fill=tk.Y)
-        self._col_asset_lb = lb
 
         # Left: matches list
         left = ttk.Frame(pw)
@@ -680,9 +665,6 @@ class App(tk.Tk):
         ttk.Label(right, textvariable=self._col_caption, justify=tk.LEFT,
                   wraplength=520, font=("", 11)).pack(anchor=tk.W)
 
-        # Popula a listbox de assets na construção inicial
-        self.after(100, self._col_refresh_asset_filter)
-
         # Bottom: save
         bottom = ttk.Frame(outer)
         bottom.pack(fill=tk.X, pady=(6, 0))
@@ -704,32 +686,23 @@ class App(tk.Tk):
                                  "Verifique se opencv-python e Pillow estão instalados.")
             return None
 
-    def _col_refresh_asset_filter(self):
-        """Popula (ou atualiza) a listbox de assets com os *_base.txt do warehouse."""
-        lb = self._col_asset_lb
-        prev_selected = {lb.get(i) for i in lb.curselection()}
-        lb.delete(0, tk.END)
-        if WAREHOUSE.exists():
-            names = sorted(
-                b.stem.replace("_base", "")
-                for b in WAREHOUSE.glob("*_base.txt")
-            )
-            for name in names:
-                lb.insert(tk.END, name)
-            # restaura seleção anterior para os itens que ainda existem
-            for i, name in enumerate(names):
-                if not prev_selected or name in prev_selected:
-                    lb.selection_set(i)
+    def _col_available_assets(self) -> list:
+        """Lista de assets disponíveis (a partir dos *_base.txt do warehouse)."""
+        if not WAREHOUSE.exists():
+            return []
+        return sorted(b.stem.replace("_base", "") for b in WAREHOUSE.glob("*_base.txt"))
 
-    def _col_selected_assets(self) -> set:
-        """Conjunto de assets selecionados; vazio = todos."""
-        lb = self._col_asset_lb
-        sel = {lb.get(i) for i in lb.curselection()}
-        all_items = {lb.get(i) for i in range(lb.size())}
-        # "tudo selecionado" e "nada selecionado" são tratados como "todos"
-        if not sel or sel == all_items:
-            return set()
-        return sel
+    def _col_update_filter_btn(self):
+        """Atualiza o rótulo do botão de filtro conforme o estado (ativo/inativo)."""
+        if self._col_asset_filter:
+            n = len(self._col_asset_filter)
+            self._col_filter_btn.config(text=f"⚙ Filtro ({n}) ●")
+        else:
+            self._col_filter_btn.config(text="⚙ Filtro")
+
+    def _col_open_filter_dialog(self):
+        """Abre o pop-up de seleção de assets via checkboxes."""
+        AssetFilterDialog(self)
 
     def _col_do_search(self):
         cb = self._col_import()
@@ -747,8 +720,7 @@ class App(tk.Tk):
             messagebox.showwarning("Aviso", "Digite uma ou mais palavras (separadas por vírgula).")
             return
 
-        self._col_refresh_asset_filter()
-        asset_filter = self._col_selected_assets()  # vazio = todos
+        asset_filter = self._col_asset_filter  # None = todos
 
         self._col_status.set("Buscando…")
         self._col_tree.delete(*self._col_tree.get_children())
@@ -1552,6 +1524,80 @@ class App(tk.Tk):
             self._refresh_assets()
             self.after(3000 if running else 12000, _tick)
         self.after(12000, _tick)
+
+
+# ─── Dialog: Asset Filter (Coleções) ────────────────────────────────────────────
+class AssetFilterDialog(tk.Toplevel):
+    """Pop-up de seleção de assets (checkboxes) para filtrar a busca de coleções."""
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.app = app
+        self.title("Filtrar por assets")
+        self.geometry("320x460")
+        self.minsize(260, 300)
+        self.grab_set()
+
+        assets = app._col_available_assets()
+        current = app._col_asset_filter  # None = todos
+
+        f = ttk.Frame(self, padding=12)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text="Selecione os assets da busca", font=("", 11, "bold")).pack(anchor=tk.W)
+        ttk.Label(f, text="Nenhum marcado = buscar em todos.",
+                  foreground="#888", font=("", 9)).pack(anchor=tk.W, pady=(0, 6))
+
+        top = ttk.Frame(f)
+        top.pack(fill=tk.X, pady=(0, 4))
+        ttk.Button(top, text="Marcar todos",  command=self._select_all).pack(side=tk.LEFT)
+        ttk.Button(top, text="Desmarcar todos", command=self._clear_all).pack(side=tk.LEFT, padx=4)
+
+        # Área rolável de checkboxes
+        canvas_f = ttk.Frame(f)
+        canvas_f.pack(fill=tk.BOTH, expand=True)
+        canvas = tk.Canvas(canvas_f, highlightthickness=0)
+        vsb = ttk.Scrollbar(canvas_f, orient=tk.VERTICAL, command=canvas.yview)
+        inner = ttk.Frame(canvas)
+        inner.bind("<Configure>",
+                   lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        canvas.configure(yscrollcommand=vsb.set)
+        canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+
+        self._vars = {}
+        for name in assets:
+            checked = (current is None) or (name in current)
+            var = tk.BooleanVar(value=checked)
+            self._vars[name] = var
+            ttk.Checkbutton(inner, text=name, variable=var).pack(anchor=tk.W, pady=1)
+
+        if not assets:
+            ttk.Label(inner, text="(nenhum base.txt no warehouse)",
+                      foreground="#888").pack(anchor=tk.W)
+
+        btns = ttk.Frame(f)
+        btns.pack(fill=tk.X, pady=(10, 0))
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Aplicar",  command=self._apply).pack(side=tk.RIGHT)
+
+    def _select_all(self):
+        for v in self._vars.values():
+            v.set(True)
+
+    def _clear_all(self):
+        for v in self._vars.values():
+            v.set(False)
+
+    def _apply(self):
+        selected = {name for name, v in self._vars.items() if v.get()}
+        # Tudo marcado (ou nada marcado) → sem filtro (None = todos).
+        if not selected or selected == set(self._vars):
+            self.app._col_asset_filter = None
+        else:
+            self.app._col_asset_filter = selected
+        self.app._col_update_filter_btn()
+        self.destroy()
 
 
 # ─── Dialog: New Scraping ──────────────────────────────────────────────────────
