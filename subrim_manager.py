@@ -661,9 +661,11 @@ class App(tk.Tk):
                                       anchor=tk.CENTER, foreground="#888")
         self._col_preview.pack(fill=tk.BOTH, expand=True, pady=6)
 
-        self._col_caption = tk.StringVar(value="")
-        ttk.Label(right, textvariable=self._col_caption, justify=tk.LEFT,
-                  wraplength=520, font=("", 11)).pack(anchor=tk.W)
+        # Caption: frase em chinês e tradução em português (selecionável para copiar)
+        self._col_caption = tk.Text(right, height=4, font=("", 11), wrap=tk.WORD,
+                                     state=tk.DISABLED, bg=self.cget("bg"),
+                                     relief=tk.FLAT, bd=0)
+        self._col_caption.pack(fill=tk.X, anchor=tk.W)
 
         # Bottom: save
         bottom = ttk.Frame(outer)
@@ -784,7 +786,9 @@ class App(tk.Tk):
         self._timing_btn.config(state=tk.NORMAL if n else tk.DISABLED)
         self._col_preview.config(image="", text="(preview r36s aparece aqui)")
         self._col_photo = None
-        self._col_caption.set("")
+        self._col_caption.config(state=tk.NORMAL)
+        self._col_caption.delete("1.0", tk.END)
+        self._col_caption.config(state=tk.DISABLED)
         self._col_pos.set(f"0/{n}")
         if n:
             self._col_tree.selection_set("0")
@@ -878,7 +882,10 @@ class App(tk.Tk):
         m = self._col_matches[idx]
         n = len(self._col_matches)
         self._col_pos.set(f"{idx + 1}/{n}")
-        self._col_caption.set(f"{m['chinese']}\n{m['portuguese']}")
+        self._col_caption.config(state=tk.NORMAL)
+        self._col_caption.delete("1.0", tk.END)
+        self._col_caption.insert(tk.END, f"{m['chinese']}\n{m['portuguese']}")
+        self._col_caption.config(state=tk.DISABLED)
         self._col_preview.config(image="", text="Renderizando…")
 
         self._col_render_token += 1
