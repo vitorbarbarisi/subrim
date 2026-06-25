@@ -1565,12 +1565,21 @@ class AssetFilterDialog(tk.Toplevel):
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
 
+        # Scroll com mouse no Mac
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        canvas.bind("<MouseWheel>", _on_mousewheel)
+        inner.bind("<MouseWheel>", _on_mousewheel)
+
         self._vars = {}
         for name in assets:
             checked = (current is None) or (name in current)
             var = tk.BooleanVar(value=checked)
             self._vars[name] = var
-            ttk.Checkbutton(inner, text=name, variable=var).pack(anchor=tk.W, pady=1)
+            cb = ttk.Checkbutton(inner, text=name, variable=var)
+            cb.pack(anchor=tk.W, pady=1)
+            # Propaga scroll do mouse para o Canvas
+            cb.bind("<MouseWheel>", _on_mousewheel)
 
         if not assets:
             ttk.Label(inner, text="(nenhum base.txt no warehouse)",
