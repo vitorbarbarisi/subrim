@@ -1032,15 +1032,18 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
                             if timestamp_str.endswith('s'):
                                 try:
                                     timestamp = float(timestamp_str[:-1])
-                                    # Only preserve lines that have a valid translation (not "N/A")
-                                    # This allows reprocessing lines that didn't have matches before
-                                    has_translation = len(parts) >= 6 and parts[5].strip() not in ("N/A", "")
-                                    if has_translation:
+                                    # "Pronta" = pares extraídos (coluna 4, parte cara via LLM).
+                                    # A tradução PT (coluna 5) pode ser "N/A" de forma legítima
+                                    # (nenhuma legenda PT sobrepõe a janela chinesa) — isso é
+                                    # final e NÃO deve forçar reprocessamento. Só linhas sem
+                                    # pares (LLM não rodou/falhou) são reprocessadas.
+                                    has_pairs = len(parts) >= 5 and parts[4].strip() not in ("N/A", "")
+                                    if has_pairs:
                                         processed_timestamps.add(timestamp_str)
                                         existing_lines.append(line)
                                         index_counter = max(index_counter, int(parts[0]) + 1)
                                     else:
-                                        # Line has "N/A" - will be reprocessed, but update index_counter anyway
+                                        # Sem pares - será reprocessada, mas avança o index_counter.
                                         index_counter = max(index_counter, int(parts[0]) + 1)
                                     last_timestamp = timestamp
                                 except (ValueError, IndexError):
