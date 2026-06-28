@@ -51,9 +51,15 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
     # Filtro de escala (≤1080p) comum às duas variantes de encode.
     scale_vf = 'scale=min(1920\\,iw):min(1080\\,ih):force_original_aspect_ratio=decrease'
 
+    # Escreve num arquivo TEMP e renomeia atomicamente ao final. Assim o arquivo
+    # final só existe quando 100% válido (moov atom escrito) — nunca meio-escrito.
+    # Evita "moov atom not found" se a conversão for interrompida (deixa só o temp,
+    # que NÃO engana o "exists()" da próxima execução) ou lida durante a finalização.
+    temp_video = output_video.with_name(f"{output_video.stem}_temp{output_video.suffix}")
+
     audio_args = ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000']
     common_tail = ['-pix_fmt', 'yuv420p', '-movflags', '+faststart',
-                   '-progress', 'pipe:1', '-nostats', '-y', str(output_video)]
+                   '-progress', 'pipe:1', '-nostats', '-y', str(temp_video)]
 
     # Este arquivo é INTERMEDIÁRIO (re-encodado de novo na queima), então usamos
     # o encoder de hardware (VideoToolbox): ~2.7× mais rápido no decode+encode 4K,
@@ -106,7 +112,12 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
             rc = _run(cmd_sw)
         if rc != 0:
             print("\n❌ Erro na conversão (HW e software falharam)")
+            if temp_video.exists():
+                temp_video.unlink()
             return False
+
+        # Promove o temp → final só agora (operação atômica no mesmo filesystem).
+        os.replace(str(temp_video), str(output_video))
 
         print("\n✅ Vídeo convertido para Chromecast com sucesso!", flush=True)
         if output_video.exists():
@@ -117,6 +128,11 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
 
     except Exception as e:
         print(f"❌ Erro na conversão: {e}")
+        if temp_video.exists():
+            try:
+                temp_video.unlink()
+            except OSError:
+                pass
         return False
 
 

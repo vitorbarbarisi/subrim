@@ -336,6 +336,21 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
         print("❌ Manifesto sem chunks")
         return 1
 
+    # Valida a fonte ANTES de disparar os workers: um chromecast truncado/incompleto
+    # (ex.: conversão interrompida → sem moov atom) faria todos os chunks falharem
+    # com "moov atom not found". Falha cedo, com mensagem clara e acionável.
+    probe = subprocess.run(
+        ['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+         '-of', 'default=nw=1:nk=1', str(source)],
+        capture_output=True, text=True,
+    )
+    if probe.returncode != 0 or not probe.stdout.strip():
+        print(f"❌ Fonte inválida/corrompida: {source.name}")
+        print(f"   ffprobe: {(probe.stderr or '').strip()[:200]}")
+        print("   💡 A conversão para chromecast pode ter sido interrompida. "
+              "Apague o arquivo e rode o pipeline de novo para regenerá-lo.")
+        return 1
+
     width, height, _ = get_video_info(source)
     print(f"📐 Fonte: {source.name} ({width}x{height})")
 
