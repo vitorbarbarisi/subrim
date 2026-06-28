@@ -1108,10 +1108,14 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
         pt_text = match_pt_text(z_begin, z_end)
         pending.append((begin_time, end_time, text_content, pt_text))
 
-    # ── Pacote 2: extração de pares em lotes (chunks maiores) + concorrência ─────
-    # BATCH frases por chamada; CONCURRENCY chamadas em paralelo. Ajustáveis por env.
-    BATCH = max(1, int(os.getenv("DEEPSEEK_PAIRS_BATCH", "12") or 12))
-    CONCURRENCY = max(1, int(os.getenv("DEEPSEEK_PAIRS_CONCURRENCY", "4") or 4))
+    # ── Pacote 2: extração de pares em lotes (chunks maiores) ────────────────────
+    # O ganho real vem do BATCH (menos round-trips, prompt compartilhado), não da
+    # concorrência: a DeepSeek serializa as requisições por conta (segura a conexão
+    # em vez de devolver 429), então paralelizar não aumenta o throughput e ainda
+    # arrisca timeouts. Por isso CONCURRENCY=1 por default; ajustável por env caso
+    # se queira experimentar.
+    BATCH = max(1, int(os.getenv("DEEPSEEK_PAIRS_BATCH", "20") or 20))
+    CONCURRENCY = max(1, int(os.getenv("DEEPSEEK_PAIRS_CONCURRENCY", "1") or 1))
     GROUP = BATCH * CONCURRENCY   # entradas por grupo de escrita (resume por grupo)
 
     def _fatal_llm(sample_text: str, e: Exception):
