@@ -50,6 +50,7 @@ import sys
 import ssl
 import xml.etree.ElementTree as ET
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 
 def _get_ssl_context():
@@ -585,6 +586,95 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
             raise RuntimeError(f"Falha ao extrair pares via DeepSeek: {exc}")
 
 
+def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) -> dict[str, str]:
+    """Extract word pairs for MANY zht sentences in a single API call.
+
+    Sends a numbered list of sentences and asks for a JSON object mapping the
+    sentence number (string) to its list of "palavra (pinyin): tradução". Returns
+    a dict {sentence_text: pairs_str} for the sentences that were parsed back
+    successfully. Sentences missing from the response are simply absent from the
+    returned dict so the caller can fall back to per-sentence extraction.
+
+    Raises RuntimeError on network/HTTP errors (so the retry wrapper can act).
+    """
+    if not sentences:
+        return {}
+
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key or api_key.strip() == "":
+        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente")
+
+    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    url = f"{api_base.rstrip('/')}/chat/completions"
+
+    if timeout_sec is None:
+        # Batches take longer to generate; scale the timeout with the batch size.
+        timeout_sec = min(120.0, 20.0 + 4.0 * len(sentences))
+
+    numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, start=1))
+    prompt = (
+        "Você é um extrator. Para CADA frase em chinês tradicional (zht) abaixo, "
+        "extraia APENAS as palavras da própria frase com pinyin e tradução para pt-BR.\n"
+        "RETORNE SOMENTE um objeto JSON onde a chave é o número da frase (string) e "
+        "o valor é uma lista de strings no formato \"palavra (pinyin): tradução\".\n"
+        "Sem explicações, sem markdown, sem texto extra.\n"
+        "Exemplo: {\"1\": [\"三 (sān): três\", \"號 (hào): número\"], \"2\": [\"碼頭 (mǎ tóu): cais\"]}\n"
+        "Não invente palavras fora de cada frase.\n\n"
+        f"Frases:\n{numbered}"
+    )
+
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": 8192,
+    }
+    data = json.dumps(body).encode("utf-8")
+
+    req = urlrequest.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
+            resp_data = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(resp_data)
+            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
+        if isinstance(exc, urlerror.HTTPError):
+            if exc.code == 401:
+                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
+            elif exc.code == 429:
+                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
+            elif exc.code >= 500:
+                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
+        raise RuntimeError(f"Falha no batch de pares via DeepSeek: {exc}")
+
+    if not content:
+        return {}
+
+    # Strip optional ```json fences before parsing.
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return {}  # malformed → caller falls back per-sentence
+    if not isinstance(parsed, dict):
+        return {}
+
+    result: dict[str, str] = {}
+    for i, sentence in enumerate(sentences, start=1):
+        val = parsed.get(str(i))
+        if isinstance(val, list) and all(isinstance(x, str) for x in val):
+            result[sentence] = json.dumps(val, ensure_ascii=False)
+    return result
+
+
 def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 30.0) -> str:
     """Translate 'text' from source_lang ("pt" or "es") to Traditional Chinese (zht).
 
@@ -989,68 +1079,100 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
             pass
     
     # Open file for writing (either fresh or append mode)
-    with base_out_path.open(file_mode, encoding="utf-8") as output_file:
-        for idx, p in enumerate(p_nodes, start=1):
-            begin_time = p.get("begin", "")
-            end_time = p.get("end") or begin_time or ""
-            text_content = _extract_text_content(p)
-            # Skip empty lines (no text and no begin)
-            if not begin_time and not text_content:
+    # ── Pacote 1: coleta das entradas pendentes (após filtro de resume) ──────────
+    # Cada entrada: (begin_time, end_time, text_content, pt_text)
+    pending: list[tuple[str, str, str, str]] = []
+    for p in p_nodes:
+        begin_time = p.get("begin", "")
+        end_time = p.get("end") or begin_time or ""
+        text_content = _extract_text_content(p)
+        # Skip empty lines (no text and no begin)
+        if not begin_time and not text_content:
+            continue
+        # Skip if resume mode and timestamp is before resume point or already processed
+        if auto_resume_from_seconds is not None:
+            if begin_time in processed_timestamps:
                 continue
-                
-            # Skip if resume mode and timestamp is before resume point or already processed
-            if auto_resume_from_seconds is not None:
-                if begin_time in processed_timestamps:
-                    continue
-                try:
-                    current_timestamp = float(begin_time.rstrip('s'))
-                    if current_timestamp <= auto_resume_from_seconds:
-                        continue
-                except (ValueError, AttributeError):
-                    pass
-            
-            # Determine PT translation match
             try:
-                z_begin = _parse_seconds_value(begin_time or "0s")
-                z_end = _parse_seconds_value(end_time or begin_time or "0s")
-            except Exception:
-                z_begin = Decimal(0)
-                z_end = z_begin
-            pt_text = match_pt_text(z_begin, z_end)
-            
-            # Fetch pairs for zht text (with simple cache)
-            zht_norm = text_content
-            if zht_norm in pairs_cache:
-                pairs_str = pairs_cache[zht_norm]
-            else:
+                if float(begin_time.rstrip('s')) <= auto_resume_from_seconds:
+                    continue
+            except (ValueError, AttributeError):
+                pass
+        # Determine PT translation match
+        try:
+            z_begin = _parse_seconds_value(begin_time or "0s")
+            z_end = _parse_seconds_value(end_time or begin_time or "0s")
+        except Exception:
+            z_begin = Decimal(0)
+            z_end = z_begin
+        pt_text = match_pt_text(z_begin, z_end)
+        pending.append((begin_time, end_time, text_content, pt_text))
+
+    # ── Pacote 2: extração de pares em lotes (chunks maiores) + concorrência ─────
+    # BATCH frases por chamada; CONCURRENCY chamadas em paralelo. Ajustáveis por env.
+    BATCH = max(1, int(os.getenv("DEEPSEEK_PAIRS_BATCH", "12") or 12))
+    CONCURRENCY = max(1, int(os.getenv("DEEPSEEK_PAIRS_CONCURRENCY", "4") or 4))
+    GROUP = BATCH * CONCURRENCY   # entradas por grupo de escrita (resume por grupo)
+
+    def _fatal_llm(sample_text: str, e: Exception):
+        print(f"\n❌ Erro fatal na extração de pares via LLM:", file=sys.stderr)
+        print(f"   Tipo do erro: {type(e).__name__}", file=sys.stderr)
+        print(f"   Mensagem: {e}", file=sys.stderr)
+        print(f"   Texto para extrair pares: {sample_text[:100]}...", file=sys.stderr)
+        print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM", file=sys.stderr)
+        if base_out_path.exists():
+            base_out_path.unlink()
+            print(f"🗑️  Arquivo base parcial removido: {base_out_path}", file=sys.stderr)
+        raise SystemExit(1)
+
+    def _fetch_batch(batch_texts: list[str]) -> dict[str, str]:
+        """Pares para um lote de frases; cai para 1-a-1 nas que o lote não cobriu."""
+        try:
+            got = _retry_api_call(_call_deepseek_pairs_batch, batch_texts)
+        except Exception:
+            got = {}   # lote inteiro falhou → resolve tudo no fallback abaixo
+        for s in batch_texts:
+            if s not in got:
+                got[s] = _retry_api_call(_call_deepseek_pairs, s)
+        return got
+
+    written = 0
+    total_pending = len(pending)
+    with base_out_path.open(file_mode, encoding="utf-8") as output_file:
+        for gstart in range(0, total_pending, GROUP):
+            group = pending[gstart:gstart + GROUP]
+
+            # Frases únicas ainda não cacheadas neste grupo
+            need: list[str] = []
+            seen: set[str] = set()
+            for _b, _e, text_content, _pt in group:
+                if text_content and text_content not in pairs_cache and text_content not in seen:
+                    seen.add(text_content)
+                    need.append(text_content)
+
+            # Divide em lotes e processa com concorrência limitada
+            batches = [need[i:i + BATCH] for i in range(0, len(need), BATCH)]
+            if batches:
                 try:
-                    pairs_str = _retry_api_call(_call_deepseek_pairs, zht_norm)
-                    pairs_cache[zht_norm] = pairs_str
+                    with ThreadPoolExecutor(max_workers=min(CONCURRENCY, len(batches))) as ex:
+                        for got in ex.map(_fetch_batch, batches):
+                            pairs_cache.update(got)
                 except Exception as e:
-                    print(f"\n❌ Erro fatal na extração de pares via LLM:", file=sys.stderr)
-                    print(f"   Tipo do erro: {type(e).__name__}", file=sys.stderr)
-                    print(f"   Mensagem: {e}", file=sys.stderr)
-                    print(f"   Texto para extrair pares: {zht_norm[:100]}...", file=sys.stderr)
-                    print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM", file=sys.stderr)
-                    # Remove any partial base file to avoid corrupted data
-                    if base_out_path.exists():
-                        base_out_path.unlink()
-                        print(f"🗑️  Arquivo base parcial removido: {base_out_path}", file=sys.stderr)
-                    raise SystemExit(1)
-            
-            # Use tab-separated fields for safety; insert end time after begin time
-            line = (
-                f"{index_counter}\t{_sanitize_tsv_field(begin_time)}\t{_sanitize_tsv_field(end_time)}\t"
-                f"{_sanitize_tsv_field(text_content)}\t{_sanitize_tsv_field(pairs_str)}\t"
-                f"{_sanitize_tsv_field(pt_text)}"
-            )
-            
-            # Write line immediately to file
-            output_file.write(line + "\n")
-            output_file.flush()  # Ensure it's written to disk immediately
-            
-            index_counter += 1
-            _print_progress(idx, total_nodes, prefix="Gerando base/LLM")
+                    _fatal_llm(need[0] if need else "", e)
+
+            # Escreve o grupo na ordem original
+            for begin_time, end_time, text_content, pt_text in group:
+                pairs_str = pairs_cache.get(text_content, "N/A")
+                line = (
+                    f"{index_counter}\t{_sanitize_tsv_field(begin_time)}\t{_sanitize_tsv_field(end_time)}\t"
+                    f"{_sanitize_tsv_field(text_content)}\t{_sanitize_tsv_field(pairs_str)}\t"
+                    f"{_sanitize_tsv_field(pt_text)}"
+                )
+                output_file.write(line + "\n")
+                index_counter += 1
+                written += 1
+                _print_progress(written, total_pending, prefix="Gerando base/LLM")
+            output_file.flush()   # resiliência: cada grupo persistido antes do próximo
 
     return base_out_path
 
