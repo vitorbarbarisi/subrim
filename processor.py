@@ -743,6 +743,103 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
             raise RuntimeError(f"Falha ao chamar DeepSeek para tradução: {exc}")
 
 
+def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
+                                          timeout_sec: float = None) -> list[str | None]:
+    """Translate MANY consecutive subtitle segments to zht in ONE call.
+
+    The segments are sent together so the model has the surrounding context (a
+    subtitle phrase is often split across fragments), but it returns ONE
+    translation per segment so each keeps its own timing. Returns a list aligned
+    to ``texts`` (same length); entries the model didn't return usably are None
+    so the caller can fall back to per-segment translation.
+
+    Raises RuntimeError on network/HTTP errors (for the retry wrapper).
+    """
+    if not texts:
+        return []
+
+    api_key = os.getenv("DEEPSEEK_API_KEY")
+    if not api_key or api_key.strip() == "":
+        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
+
+    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
+    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
+    url = f"{api_base.rstrip('/')}/chat/completions"
+
+    sl = source_lang.lower()
+    if sl.startswith("pt"):
+        src_label = "português do Brasil"
+    elif sl.startswith("es"):
+        src_label = "espanhol"
+    else:
+        src_label = "inglês"
+
+    if timeout_sec is None:
+        timeout_sec = min(120.0, 25.0 + 4.0 * len(texts))
+
+    numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, start=1))
+    prompt = (
+        f"Traduza do {src_label} para chinês tradicional (zht) os segmentos de "
+        "legenda abaixo. Eles são CONSECUTIVOS e podem ser pedaços de uma mesma "
+        "fala — use os vizinhos como CONTEXTO para traduzir melhor, mas traduza "
+        "CADA segmento separadamente, mantendo a mesma divisão (uma tradução por número).\n"
+        "RETORNE SOMENTE um objeto JSON onde a chave é o número do segmento (string) "
+        "e o valor é a tradução em zht. Sem markdown, sem explicações, sem texto extra.\n"
+        "Exemplo: {\"1\": \"對不起\", \"2\": \"爸爸來晚了\"}\n\n"
+        f"Segmentos:\n{numbered}"
+    )
+
+    body = {
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "temperature": 0.2,
+        "max_tokens": 8192,
+    }
+    data = json.dumps(body).encode("utf-8")
+
+    req = urlrequest.Request(url, data=data, method="POST")
+    req.add_header("Content-Type", "application/json")
+    req.add_header("Authorization", f"Bearer {api_key}")
+
+    try:
+        with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
+            resp_data = resp.read().decode("utf-8", errors="replace")
+            obj = json.loads(resp_data)
+            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
+    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
+        if isinstance(exc, urlerror.HTTPError):
+            if exc.code == 401:
+                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
+            elif exc.code == 429:
+                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
+            elif exc.code >= 500:
+                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
+        raise RuntimeError(f"Falha no batch de tradução via DeepSeek: {exc}")
+
+    if not content:
+        return [None] * len(texts)
+
+    stripped = content.strip()
+    if stripped.startswith("```"):
+        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+        stripped = re.sub(r"\s*```$", "", stripped)
+    try:
+        parsed = json.loads(stripped)
+    except Exception:
+        return [None] * len(texts)
+    if not isinstance(parsed, dict):
+        return [None] * len(texts)
+
+    result: list[str | None] = []
+    for i in range(1, len(texts) + 1):
+        val = parsed.get(str(i))
+        if isinstance(val, str) and val.strip():
+            result.append(val.strip())
+        else:
+            result.append(None)
+    return result
+
+
 def _determine_zht_secs_output_from(source_secs: Path) -> Path:
     """Return a path for the zht_secs file derived from a pt/es *_secs.xml filename."""
     src = source_secs
@@ -820,69 +917,85 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
             else:
                 groups.append([p])
 
-    total = len(groups)
-    for g_idx, group in enumerate(groups, start=1):
-        # Compute merged original text and max end time
+    # ── Fase 1: coleta dos grupos pendentes (após filtro de resume) ──────────────
+    # Cada item: (merged_text, combined_end, dest_candidates)
+    pending: list[tuple[str, str, list[ET.Element]]] = []
+    for group in groups:
         merged_text = " ".join(_extract_text_content(p) for p in group if _extract_text_content(p))
         if not merged_text:
-            _print_progress(g_idx, total, prefix="Gerando zht via LLM")
             continue
-        # Determine combined end as max of group's end
         try:
             max_end = max((_parse_seconds_value(p.get("end") or p.get("begin") or "0s") for p in group))
             combined_end = f"{format(max_end, '.3f')}s"
         except Exception:
             combined_end = group[-1].get("end") or group[-1].get("begin") or "0s"
 
-        # In destination tree, find all <p> with this begin
         begin_key = group[0].get("begin", "")
         dest_candidates = [dp for dp in _iter_p_elements(dest_root) if dp.get("begin", "") == begin_key]
         if not dest_candidates:
-            _print_progress(g_idx, total, prefix="Gerando zht via LLM")
             continue
-        dest_first = dest_candidates[0]
+        # Já traduzido (resume) → pula
+        if _extract_text_content(dest_candidates[0]):
+            continue
+        pending.append((merged_text, combined_end, dest_candidates))
 
-        # If already has non-empty text, assume translated and skip
-        if _extract_text_content(dest_first):
-            _print_progress(g_idx, total, prefix="Gerando zht via LLM")
-            continue
+    # ── Fase 2: tradução em LOTES (contexto entre segmentos + menos round-trips) ──
+    # Os segmentos do lote vão juntos para a LLM (melhor contexto p/ falas quebradas),
+    # mas voltam um-a-um, preservando o timing de cada um. Fallback por segmento.
+    BATCH = max(1, int(os.getenv("DEEPSEEK_TRANSLATE_BATCH", "15") or 15))
+
+    def _fatal_llm(sample_text: str, e: Exception):
+        print(f"\n❌ Erro fatal na tradução via LLM:", file=sys.stderr)
+        print(f"   Tipo do erro: {type(e).__name__}", file=sys.stderr)
+        print(f"   Mensagem: {e}", file=sys.stderr)
+        print(f"   Texto sendo traduzido: {sample_text[:100]}...", file=sys.stderr)
+        print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM", file=sys.stderr)
+        if out_path.exists():
+            out_path.unlink()
+            print(f"🗑️  Arquivo parcial removido: {out_path}", file=sys.stderr)
+        raise SystemExit(1)
+
+    total_pending = len(pending)
+    done = 0
+    for bstart in range(0, total_pending, BATCH):
+        batch = pending[bstart:bstart + BATCH]
+        texts = [item[0] for item in batch]
 
         try:
-            translated = _retry_api_call(_call_deepseek_translate_to_zht, merged_text, source_lang)
-        except Exception as e:
-            print(f"\n❌ Erro fatal na tradução via LLM:", file=sys.stderr)
-            print(f"   Tipo do erro: {type(e).__name__}", file=sys.stderr)
-            print(f"   Mensagem: {e}", file=sys.stderr)
-            print(f"   Texto sendo traduzido: {merged_text[:100]}...", file=sys.stderr)
-            print(f"🛑 Interrompendo processamento do diretório devido ao erro na LLM", file=sys.stderr)
-            # Remove any partial output file to avoid corrupted data
-            if out_path.exists():
-                out_path.unlink()
-                print(f"🗑️  Arquivo parcial removido: {out_path}", file=sys.stderr)
-            raise SystemExit(1)
+            translations = _retry_api_call(_call_deepseek_translate_to_zht_batch, texts, source_lang)
+        except Exception:
+            translations = [None] * len(texts)   # lote falhou → resolve no fallback
 
-        # Small pause between API calls to avoid overwhelming the server
-        time.sleep(0.1)  # 100ms pause
-
-        # Keep only the first node for this begin; remove the rest
-        for extra in dest_candidates[1:]:
-            parent = _find_parent(dest_root, extra)
-            if parent is not None:
+        # Fallback 1-a-1 para segmentos que o lote não devolveu
+        for i, t in enumerate(translations):
+            if not t:
                 try:
-                    parent.remove(extra)
-                except Exception:
-                    pass
+                    translations[i] = _retry_api_call(_call_deepseek_translate_to_zht,
+                                                      texts[i], source_lang)
+                except Exception as e:
+                    _fatal_llm(texts[i], e)
 
-        # Set translated text and combined end on the kept node
-        for child in list(dest_first):
-            dest_first.remove(child)
-        dest_first.text = translated
-        if combined_end:
-            dest_first.set("end", combined_end)
+        # Escreve o lote na árvore destino
+        for (merged_text, combined_end, dest_candidates), translated in zip(batch, translations):
+            dest_first = dest_candidates[0]
+            # Mantém só o primeiro nó deste begin; remove os demais
+            for extra in dest_candidates[1:]:
+                parent = _find_parent(dest_root, extra)
+                if parent is not None:
+                    try:
+                        parent.remove(extra)
+                    except Exception:
+                        pass
+            for child in list(dest_first):
+                dest_first.remove(child)
+            dest_first.text = translated
+            if combined_end:
+                dest_first.set("end", combined_end)
+            done += 1
+            _print_progress(done, total_pending, prefix="Gerando zht via LLM (batch)")
 
-        # Persist after each group
+        # Persiste após cada lote (resume por lote)
         dest_tree.write(out_path, encoding="utf-8", xml_declaration=True)
-        _print_progress(g_idx, total, prefix="Gerando zht via LLM")
 
     # Ensure final write
     dest_tree.write(out_path, encoding="utf-8", xml_declaration=True)
