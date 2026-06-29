@@ -63,6 +63,31 @@ def _get_ssl_context():
     return ssl.create_default_context()
 
 
+def _log_deepseek(tag: str, prompt: str, raw_response: str) -> None:
+    """Se DEEPSEEK_DEBUG estiver ligado, registra prompt + resposta crua de cada
+    chamada à DeepSeek. Destino: DEEPSEEK_DEBUG_FILE (default: deepseek_debug.log
+    ao lado do script). Formato JSONL — uma chamada por linha.
+
+    Ative com:  DEEPSEEK_DEBUG=1 python3 processor.py <asset>
+    Acompanhe:  tail -f deepseek_debug.log
+    """
+    if os.getenv("DEEPSEEK_DEBUG", "").strip().lower() not in ("1", "true", "yes"):
+        return
+    try:
+        dest = os.getenv("DEEPSEEK_DEBUG_FILE", "").strip() or \
+            str(Path(__file__).resolve().parent / "deepseek_debug.log")
+        record = {
+            "ts": time.strftime("%Y-%m-%d %H:%M:%S"),
+            "tag": tag,
+            "prompt": prompt,
+            "response": raw_response,
+        }
+        with open(dest, "a", encoding="utf-8") as fh:
+            fh.write(json.dumps(record, ensure_ascii=False) + "\n")
+    except Exception:
+        pass   # logging nunca deve quebrar o pipeline
+
+
 # =============================================================================
 # EARLY ENVIRONMENT SETUP - Load .env before any other operations
 # =============================================================================
@@ -554,6 +579,7 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     try:
         with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
             resp_data = resp.read().decode("utf-8", errors="replace")
+            _log_deepseek("deepseek", prompt, resp_data)
             obj = json.loads(resp_data)
             content = obj.get("choices", [{}])[0].get("message", {}).get("content")
             if not content:
@@ -639,6 +665,7 @@ def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) 
     try:
         with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
             resp_data = resp.read().decode("utf-8", errors="replace")
+            _log_deepseek("deepseek", prompt, resp_data)
             obj = json.loads(resp_data)
             content = obj.get("choices", [{}])[0].get("message", {}).get("content")
     except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
@@ -719,6 +746,7 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
     try:
         with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
             resp_data = resp.read().decode("utf-8", errors="replace")
+            _log_deepseek("deepseek", prompt, resp_data)
             obj = json.loads(resp_data)
             content = obj.get("choices", [{}])[0].get("message", {}).get("content")
             if not content:
@@ -804,6 +832,7 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
     try:
         with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
             resp_data = resp.read().decode("utf-8", errors="replace")
+            _log_deepseek("deepseek", prompt, resp_data)
             obj = json.loads(resp_data)
             content = obj.get("choices", [{}])[0].get("message", {}).get("content")
     except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
