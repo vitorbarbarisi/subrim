@@ -20,6 +20,7 @@ REPO      = Path(__file__).parent
 ASSETS    = REPO / "assets"
 SOURCE    = ASSETS / "source"
 WAREHOUSE = REPO / "warehouse"
+DEEPSEEK_LOG = REPO / "deepseek_debug.log"
 
 
 def _wh_readable_name(stem: str) -> str:
@@ -202,6 +203,11 @@ class App(tk.Tk):
         self._proc_lock = threading.Lock()
         self._selected = None
 
+        # DeepSeek debug viewer
+        self._ds_debug_on = tk.BooleanVar(value=False)   # injeta DEEPSEEK_DEBUG=1
+        self._ds_auto = tk.BooleanVar(value=False)        # auto-atualizar a lista
+        self._ds_records: list = []
+
         # Collections tab state
         self._col_matches: list = []
         self._col_sort_col = None
@@ -255,6 +261,7 @@ class App(tk.Tk):
         self._build_downloads_tab()
         self._build_collections_tab()
         self._build_log_tab()
+        self._build_deepseek_tab()
 
     # ── Assets Tab ─────────────────────────────────────────────────────────────
     def _build_assets_tab(self):
@@ -1086,6 +1093,131 @@ class App(tk.Tk):
         txt.tag_configure("info",    foreground="#EBEBF5")
         self._log_txt = txt
 
+    # ── DeepSeek Tab ─────────────────────────────────────────────────────────────
+    def _build_deepseek_tab(self):
+        outer = ttk.Frame(self._nb, padding=8)
+        self._nb.add(outer, text="  DeepSeek  ")
+
+        ctrl = ttk.Frame(outer)
+        ctrl.pack(fill=tk.X, pady=(0, 6))
+        ttk.Checkbutton(ctrl, text="Registrar chamadas (DEEPSEEK_DEBUG)",
+                        variable=self._ds_debug_on).pack(side=tk.LEFT)
+        ttk.Button(ctrl, text="↺ Atualizar", command=self._ds_refresh).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Checkbutton(ctrl, text="Auto", variable=self._ds_auto).pack(side=tk.LEFT, padx=4)
+        ttk.Button(ctrl, text="🗑 Limpar log", command=self._ds_clear).pack(side=tk.LEFT, padx=4)
+        self._ds_count = tk.StringVar(value="")
+        ttk.Label(ctrl, textvariable=self._ds_count, foreground="#888").pack(side=tk.RIGHT)
+
+        pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
+        pw.pack(fill=tk.BOTH, expand=True)
+
+        # Esquerda: lista de chamadas
+        left = ttk.Frame(pw)
+        pw.add(left, weight=2)
+        cols = ("n", "ts", "prompt")
+        t = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        t.heading("n",      text="#",       anchor=tk.CENTER)
+        t.heading("ts",     text="Hora",    anchor=tk.W)
+        t.heading("prompt", text="Prompt (início)", anchor=tk.W)
+        t.column("n",      width=44,  anchor=tk.CENTER, stretch=False)
+        t.column("ts",     width=150, anchor=tk.W,      stretch=False)
+        t.column("prompt", width=300, anchor=tk.W,      stretch=True)
+        vsb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=t.yview)
+        t.configure(yscrollcommand=vsb.set)
+        t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        t.bind("<<TreeviewSelect>>", self._ds_on_select)
+        self._ds_tree = t
+
+        # Direita: detalhe (prompt + response)
+        right = ttk.Frame(pw, padding=(8, 0))
+        pw.add(right, weight=3)
+
+        ttk.Label(right, text="Prompt enviado", font=("", 10, "bold")).pack(anchor=tk.W)
+        self._ds_prompt = scrolledtext.ScrolledText(
+            right, height=12, font=("Menlo", 10), wrap=tk.WORD,
+            bg="#1C1C1E", fg="#EBEBF5", relief=tk.FLAT)
+        self._ds_prompt.pack(fill=tk.BOTH, expand=True, pady=(2, 6))
+
+        ttk.Label(right, text="Response crua", font=("", 10, "bold")).pack(anchor=tk.W)
+        self._ds_response = scrolledtext.ScrolledText(
+            right, height=12, font=("Menlo", 10), wrap=tk.WORD,
+            bg="#1C1C1E", fg="#30D158", relief=tk.FLAT)
+        self._ds_response.pack(fill=tk.BOTH, expand=True, pady=(2, 0))
+
+        self._ds_refresh()
+
+    def _ds_refresh(self):
+        """Recarrega as chamadas do deepseek_debug.log (mantém as últimas 500)."""
+        records = []
+        if DEEPSEEK_LOG.exists():
+            try:
+                with open(DEEPSEEK_LOG, "r", encoding="utf-8") as fh:
+                    for line in fh:
+                        line = line.strip()
+                        if not line:
+                            continue
+                        try:
+                            records.append(json.loads(line))
+                        except Exception:
+                            continue
+            except Exception as e:  # noqa: BLE001
+                self._ds_count.set(f"erro ao ler log: {e}")
+                return
+        records = records[-500:]
+        self._ds_records = records
+
+        # Preserva seleção pelo índice atual
+        prev = self._ds_tree.selection()
+        self._ds_tree.delete(*self._ds_tree.get_children())
+        for i, rec in enumerate(records):
+            snippet = (rec.get("prompt", "") or "").replace("\n", " ")[:80]
+            self._ds_tree.insert("", tk.END, iid=str(i),
+                                 values=(i + 1, rec.get("ts", ""), snippet))
+        n = len(records)
+        self._ds_count.set(f"{n} chamada(s)" + (" (últimas 500)" if n >= 500 else ""))
+        # Seleciona a última por padrão (acompanhar ao vivo)
+        if n and (self._ds_auto.get() or not prev):
+            iid = str(n - 1)
+            self._ds_tree.selection_set(iid)
+            self._ds_tree.see(iid)
+            self._ds_on_select()
+
+    def _ds_on_select(self, _=None):
+        sel = self._ds_tree.selection()
+        if not sel:
+            return
+        idx = int(sel[0])
+        if idx >= len(self._ds_records):
+            return
+        rec = self._ds_records[idx]
+        prompt = rec.get("prompt", "")
+        raw = rec.get("response", "")
+        # Tenta formatar o JSON da response para leitura
+        try:
+            raw = json.dumps(json.loads(raw), ensure_ascii=False, indent=2)
+        except Exception:
+            pass
+        for widget, content in ((self._ds_prompt, prompt), (self._ds_response, raw)):
+            widget.config(state=tk.NORMAL)
+            widget.delete("1.0", tk.END)
+            widget.insert(tk.END, content)
+
+    def _ds_clear(self):
+        if not DEEPSEEK_LOG.exists():
+            self._ds_refresh()
+            return
+        if messagebox.askyesno("Limpar log",
+                               f"Apagar {DEEPSEEK_LOG.name}?\nIsso remove o histórico de chamadas."):
+            try:
+                DEEPSEEK_LOG.unlink()
+            except OSError as e:
+                messagebox.showerror("Erro", f"Não foi possível apagar: {e}")
+            for w in (self._ds_prompt, self._ds_response):
+                w.config(state=tk.NORMAL)
+                w.delete("1.0", tk.END)
+            self._ds_refresh()
+
     # ── Asset logic ────────────────────────────────────────────────────────────
     @staticmethod
     def _video_duration(video: Path) -> float:
@@ -1430,12 +1562,18 @@ class App(tk.Tk):
         if pause_rate is None:
             pause_rate = self._pause_rate_value()
 
+        debug_ds = self._ds_debug_on.get()
+
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
             if pause_rate > 0:
                 env["BURN_PAUSE_RATE"] = f"{pause_rate}"
             else:
                 env.pop("BURN_PAUSE_RATE", None)
+            if debug_ds:
+                env["DEEPSEEK_DEBUG"] = "1"
+            else:
+                env.pop("DEEPSEEK_DEBUG", None)
             p = subprocess.Popen(
                 cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                 text=True, cwd=str(REPO), env=env,
@@ -1529,6 +1667,8 @@ class App(tk.Tk):
             with self._proc_lock:
                 running = self._proc is not None and self._proc.poll() is None
             self._refresh_assets()
+            if self._ds_auto.get():
+                self._ds_refresh()
             self.after(3000 if running else 12000, _tick)
         self.after(12000, _tick)
 
