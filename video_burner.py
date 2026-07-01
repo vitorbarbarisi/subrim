@@ -220,24 +220,31 @@ class VideoBurner:
             self.log(f"✓ {dir_name} já processado e enviado ao Drive")
             return True
 
-        # Phase 1: Subtitle processing (skip if base.txt already exists)
-        has_base = bool(list(directory.glob("*base.txt")))
-        if has_base and not force:
-            self.log(f"Fase 1: base.txt já existe para {dir_name} — pulando processor")
-        else:
-            self.log(f"Fase 1: Processamento de legendas para {dir_name}")
+        # Phase 1: Subtitle processing.
+        # O processor gera o base.txt a partir do SRT (e é idempotente: retoma um
+        # base parcial). Só pulamos o processor quando NÃO há SRT e já existe um
+        # base — caso de um base.txt fornecido manualmente, sem legenda de origem.
+        # adjust_base_times e sanitize_base sempre rodam (são normalizações do base).
+        self.log(f"Fase 1: Processamento de legendas para {dir_name}")
 
+        srt_present = bool(list(directory.glob("*.srt")) + list(directory.glob("*.vtt")))
+        has_base    = bool(list(directory.glob("*base.txt")))
+        skip_processor = has_base and not srt_present and not force
+
+        if skip_processor:
+            self.log(f"  Sem SRT e base.txt já existe — pulando apenas o processor")
+        else:
             if not self.run_script("processor.py", dir_name):
                 self.log(f"Falha no processor.py para {dir_name}", "ERROR")
                 return False
 
-            if not self.run_script("adjust_base_times.py", dir_name):
-                self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
-                return False
+        if not self.run_script("adjust_base_times.py", dir_name):
+            self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
+            return False
 
-            if not self.run_script("sanitize_base.py", dir_name):
-                self.log(f"Falha no sanitize_base.py para {dir_name}", "ERROR")
-                return False
+        if not self.run_script("sanitize_base.py", dir_name):
+            self.log(f"Falha no sanitize_base.py para {dir_name}", "ERROR")
+            return False
 
         # Phase 2: Video processing
         self.log(f"Fase 2: Processamento de vídeo para {dir_name}")

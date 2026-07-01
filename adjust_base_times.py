@@ -113,18 +113,18 @@ def adjust_end_times(parsed_lines):
         adjusted_line = line_data.copy()
         current_end = line_data['end_time']
         
-        # Option 1: Add 60 seconds to current end time
-        option1_end = current_end + 60.0
-        
         # Option 2: 1ms before next line's start (if there is a next line)
-        option2_end = option1_end  # Default to option1 if no next line
-        
         if i + 1 < len(parsed_lines) and parsed_lines[i + 1] is not None:
             next_start = parsed_lines[i + 1]['start_time']
             option2_end = next_start - 0.001  # 1ms before next start
-        
-        # Choose the smaller option
-        new_end_time = min(option1_end, option2_end)
+            # Option 1: no máximo +60s de exibição
+            option1_end = current_end + 60.0
+            new_end_time = min(option1_end, option2_end)
+        else:
+            # Última linha (sem próxima): estende +60s sobre o START, não sobre o
+            # end atual — assim reprocessar o mesmo base é IDEMPOTENTE (não cresce
+            # +60 a cada passada).
+            new_end_time = line_data['start_time'] + 60.0
         
         # Ensure the new end time is not before the current start time
         if new_end_time <= line_data['start_time']:
