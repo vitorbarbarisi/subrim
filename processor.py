@@ -1184,10 +1184,14 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
                                         processed_timestamps.add(timestamp_str)
                                         existing_lines.append(line)
                                         index_counter = max(index_counter, int(parts[0]) + 1)
+                                        # A âncora de resume só avança em linhas PRESERVADAS.
+                                        # Se nenhuma linha tem pares (base antigo/corrompido),
+                                        # last_timestamp fica None → auto_resume None → regenera
+                                        # do zero (evita truncar o arquivo e pular tudo).
+                                        last_timestamp = timestamp
                                     else:
                                         # Sem pares - será reprocessada, mas avança o index_counter.
                                         index_counter = max(index_counter, int(parts[0]) + 1)
-                                    last_timestamp = timestamp
                                 except (ValueError, IndexError):
                                     pass
                 
