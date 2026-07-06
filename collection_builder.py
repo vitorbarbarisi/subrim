@@ -26,6 +26,32 @@ from video_screenshoter_r36s import add_subtitles_to_frame, parse_pinyin_transla
 REPO = Path(__file__).parent
 WAREHOUSE = REPO / "warehouse"
 COLLECTIONS = WAREHOUSE / "collections"
+# Cache de frames de um episódio "arquivado" (mp4 trocado por 1 frame/legenda).
+# Estrutura: warehouse/frames/<asset>/line{NNNN}.jpg — chaveado por line_num,
+# que é estável e mapeia 1-para-1 com a linha do *_base.txt.
+FRAMES = WAREHOUSE / "frames"
+
+
+def _frames_dir(asset: str) -> Path:
+    return FRAMES / asset
+
+
+def _cached_frame_path(asset: str, line_num: int) -> Path:
+    return _frames_dir(asset) / f"line{line_num:04d}.jpg"
+
+
+def has_frame_cache(asset: str) -> bool:
+    """True se o episódio tem cache de frames (foi arquivado)."""
+    d = _frames_dir(asset)
+    return d.is_dir() and next(d.glob("line*.jpg"), None) is not None
+
+
+def frame_cache_count(asset: str) -> int:
+    """Quantidade de frames no cache do episódio (0 se não houver)."""
+    d = _frames_dir(asset)
+    if not d.is_dir():
+        return 0
+    return sum(1 for _ in d.glob("line*.jpg"))
 
 
 def pinyin_to_ascii(pinyin: str) -> str:
@@ -86,6 +112,22 @@ def _find_video(base_file: Path) -> Optional[Path]:
     return None
 
 
+def _asset_source(base_file: Path):
+    """Fonte utilizável de frames para o episódio do ``*_base.txt``.
+
+    Retorna ``("video", Path)`` se há o mp4 original, ``("frames", Path)`` se
+    o episódio foi arquivado (só cache de frames), ou ``(None, None)`` se não
+    há nenhuma fonte (a busca precisa ignorar esse episódio).
+    """
+    video = _find_video(base_file)
+    if video is not None:
+        return "video", video
+    asset = base_file.stem.replace("_base", "")
+    if has_frame_cache(asset):
+        return "frames", _frames_dir(asset)
+    return None, None
+
+
 def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[dict]:
     """Varre o warehouse e retorna as frases cujo array de palavras contém ``word``.
 
@@ -107,16 +149,18 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
     if not word or not WAREHOUSE.exists():
         return results
 
-    skipped_no_video: List[str] = []   # base sem vídeo original → não dá pra extrair frame
+    skipped_no_src: List[str] = []     # base sem vídeo E sem cache → não dá pra extrair frame
     scanned_no_match: List[str] = []   # base varrida, mas a palavra não aparece nela
     bases_with_match = 0
 
     for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
         asset = base_file.stem.replace("_base", "")
-        video_path = _find_video(base_file)
-        if not video_path:
-            skipped_no_video.append(asset)
+        kind, src = _asset_source(base_file)
+        if kind is None:
+            skipped_no_src.append(asset)
             continue
+        # Arquivado (frames-only): não há mp4; o frame vem do cache por line_num.
+        video_path = str(src) if kind == "video" else ""
 
         hits_before = len(results)
         try:
@@ -162,13 +206,13 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
             scanned_no_match.append(asset)
 
     # ── Diagnóstico ─────────────────────────────────────────────────────────
-    if skipped_no_video:
-        _log(f"⚠️  {len(skipped_no_video)} base(s) IGNORADA(s) por falta de vídeo original: "
-             + ", ".join(skipped_no_video))
+    if skipped_no_src:
+        _log(f"⚠️  {len(skipped_no_src)} base(s) IGNORADA(s) por falta de vídeo e de cache de frames: "
+             + ", ".join(skipped_no_src))
     if scanned_no_match:
         _log(f"🔎 {len(scanned_no_match)} base(s) varrida(s) SEM '{word}': "
              + ", ".join(scanned_no_match))
-    _log(f"✓ '{word}': {len(results)} ocorrência(s) em {bases_with_match} base(s) com vídeo.")
+    _log(f"✓ '{word}': {len(results)} ocorrência(s) em {bases_with_match} base(s) com fonte.")
 
     return results
 
@@ -191,16 +235,17 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
             print(msg, flush=True)
 
     results: List[dict] = []
-    skipped_no_video: List[str] = []
+    skipped_no_src: List[str] = []
     if not WAREHOUSE.exists():
         return results
 
     for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
         asset = base_file.stem.replace("_base", "")
-        video_path = _find_video(base_file)
-        if not video_path:
-            skipped_no_video.append(asset)
+        kind, src = _asset_source(base_file)
+        if kind is None:
+            skipped_no_src.append(asset)
             continue
+        video_path = str(src) if kind == "video" else ""
 
         try:
             with open(base_file, "r", encoding="utf-8") as f:
@@ -241,8 +286,8 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
         except Exception as e:  # noqa: BLE001
             _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
 
-    if skipped_no_video:
-        _log(f"⚠️  {len(skipped_no_video)} base(s) ignorada(s) por falta de vídeo.")
+    if skipped_no_src:
+        _log(f"⚠️  {len(skipped_no_src)} base(s) ignorada(s) por falta de vídeo e de cache de frames.")
     _log(f"✓ i+1: {len(results)} frase(s) com ≤{max_unknown} palavra(s) desconhecida(s).")
     return results
 
@@ -274,6 +319,103 @@ def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> 
         cap.release()
 
 
+def _render_frame_to(match: dict, out_path: Path) -> bool:
+    """Materializa o frame da frase em ``out_path`` (sem legenda).
+
+    Usa o mp4 original quando disponível; senão cai no cache de frames do
+    episódio arquivado (``warehouse/frames/<asset>/lineNNNN.jpg``). É o único
+    ponto por onde preview e coleção obtêm o frame — mantém busca, visualização
+    e salvamento consistentes esteja o episódio arquivado ou não.
+    """
+    video_path = match.get("video_path") or ""
+    if video_path and Path(video_path).exists():
+        return extract_frame(video_path, match["avg_time"], out_path)
+
+    # Fallback: episódio arquivado — frame já extraído, indexado por line_num.
+    cached = _cached_frame_path(match["asset"], match["line_num"])
+    if cached.exists():
+        img = cv2.imread(str(cached))
+        if img is not None:
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            cv2.imwrite(str(out_path), img)
+            return True
+        print(f"❌ Cache de frame ilegível: {cached}", flush=True)
+    else:
+        print(f"❌ Sem vídeo nem cache para {match.get('asset')} "
+              f"(linha {match.get('line_num')})", flush=True)
+    return False
+
+
+def archive_asset(asset: str, jpeg_quality: int = 90,
+                  progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Extrai 1 frame por legenda do episódio para o cache (``warehouse/frames/<asset>/``).
+
+    Percorre TODAS as linhas do ``*_base.txt`` (não só as de uma palavra), pois a
+    busca pode encontrar qualquer palavra. Cada frame é salvo como
+    ``line{NNNN}.jpg`` no mesmo timestamp (``avg_time``) que o preview/coleção
+    usariam ao vivo — logo o frame do cache é idêntico ao que o mp4 produziria.
+
+    NÃO apaga o mp4: devolve estatísticas para o chamador decidir a remoção só
+    após conferir que todos os frames foram extraídos.
+
+    Retorna ``{"total", "ok", "failed", "dir"}``.
+    """
+    base_file = WAREHOUSE / f"{asset}_base.txt"
+    if not base_file.exists():
+        raise FileNotFoundError(f"base não encontrado: {base_file}")
+
+    video = _find_video(base_file)
+    if video is None:
+        raise FileNotFoundError(f"vídeo original ausente para '{asset}' — nada a arquivar")
+
+    # Lê todas as linhas com timestamps válidos.
+    lines: List[tuple] = []  # (line_num, avg_time)
+    with open(base_file, "r", encoding="utf-8") as f:
+        for line_num, line in enumerate(f, 1):
+            cols = line.rstrip("\n").split("\t")
+            if len(cols) < 6:
+                continue
+            try:
+                begin = float(cols[1].replace("s", ""))
+                end = float(cols[2].replace("s", ""))
+            except ValueError:
+                continue
+            lines.append((line_num, (begin + end) / 2))
+
+    out_dir = _frames_dir(asset)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    total = len(lines)
+    ok = failed = 0
+    cap = cv2.VideoCapture(str(video))
+    try:
+        if not cap.isOpened():
+            raise RuntimeError(f"não foi possível abrir o vídeo: {video}")
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        if not fps:
+            raise RuntimeError(f"FPS inválido para o vídeo: {video}")
+
+        for i, (line_num, avg_time) in enumerate(lines, 1):
+            out_path = _cached_frame_path(asset, line_num)
+            ts = _corrected_timestamp(avg_time)
+            cap.set(cv2.CAP_PROP_POS_FRAMES, int(fps * ts))
+            ret, frame = cap.read()
+            if not ret:
+                failed += 1
+                if progress_cb:
+                    progress_cb(i, total, f"⚠️  falha na linha {line_num} ({ts:.1f}s)")
+                continue
+            cv2.imwrite(str(out_path), frame,
+                        [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
+            ok += 1
+            if progress_cb and (i % 25 == 0 or i == total):
+                progress_cb(i, total, f"{i}/{total} frames")
+    finally:
+        cap.release()
+
+    return {"total": total, "ok": ok, "failed": failed, "dir": out_dir}
+
+
 def render_preview(match: dict, mode: str = "r36s"):
     """Gera uma imagem PIL já legendada de uma frase (para preview na GUI).
 
@@ -284,7 +426,7 @@ def render_preview(match: dict, mode: str = "r36s"):
 
     with tempfile.TemporaryDirectory() as tmp:
         tmp_png = Path(tmp) / "frame.png"
-        if not extract_frame(match["video_path"], match["avg_time"], tmp_png):
+        if not _render_frame_to(match, tmp_png):
             return None
         add_subtitles_to_frame(
             tmp_png, match["chinese"], match["translations_json"], match["portuguese"],
@@ -314,7 +456,7 @@ def save_collection(word: str, matches: List[dict],
         orig_path = orig_dir / name
         r36s_path = r36s_dir / name
 
-        if not extract_frame(match["video_path"], match["avg_time"], orig_path):
+        if not _render_frame_to(match, orig_path):
             if progress_cb:
                 progress_cb(i, total, f"⚠️  Falha ao extrair frame de {match['asset']} (linha {match['line_num']})")
             continue
