@@ -292,6 +292,30 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
     return results
 
 
+def _grab_at(cap, fps: float, timestamp_seconds: float, total_frames: int = 0):
+    """Lê o frame no timestamp (já corrigido), robusto contra o fim do vídeo.
+
+    A correção de margem (``_corrected_timestamp``) empurra a última legenda
+    alguns segundos à frente, o que pode cair ALÉM do fim do vídeo e fazer
+    ``cap.read()`` falhar. Aqui o alvo é limitado ao último frame conhecido e,
+    se mesmo assim não decodificar, recua até achar o último frame legível.
+    Retorna o frame (ndarray) ou ``None``.
+    """
+    ts = _corrected_timestamp(timestamp_seconds)
+    target = int(fps * ts)
+    if total_frames and total_frames > 0:
+        target = min(target, total_frames - 1)
+    target = max(0, target)
+    # Recua no máximo ~1s de frames procurando o último frame decodificável.
+    lowest = max(0, target - int(round(fps)) - 1)
+    for probe in range(target, lowest - 1, -1):
+        cap.set(cv2.CAP_PROP_POS_FRAMES, probe)
+        ret, frame = cap.read()
+        if ret:
+            return frame
+    return None
+
+
 def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> bool:
     """Extrai o frame do vídeo na minutagem indicada e salva como PNG (sem legenda)."""
     cap = cv2.VideoCapture(video_path)
@@ -305,11 +329,10 @@ def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> 
             print(f"❌ FPS inválido para o vídeo: {video_path}", flush=True)
             return False
 
-        ts = _corrected_timestamp(timestamp_seconds)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, int(fps * ts))
-        ret, frame = cap.read()
-        if not ret:
-            print(f"❌ Falha ao capturar frame em {ts:.3f}s de {video_path}", flush=True)
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+        frame = _grab_at(cap, fps, timestamp_seconds, total_frames)
+        if frame is None:
+            print(f"❌ Falha ao capturar frame em ~{timestamp_seconds:.3f}s de {video_path}", flush=True)
             return False
 
         out_path.parent.mkdir(parents=True, exist_ok=True)
@@ -355,10 +378,10 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
     ``line{NNNN}.jpg`` no mesmo timestamp (``avg_time``) que o preview/coleção
     usariam ao vivo — logo o frame do cache é idêntico ao que o mp4 produziria.
 
-    NÃO apaga o mp4: devolve estatísticas para o chamador decidir a remoção só
-    após conferir que todos os frames foram extraídos.
+    NÃO apaga o mp4: devolve estatísticas para o chamador decidir a remoção
+    conforme a tolerância a frames perdidos.
 
-    Retorna ``{"total", "ok", "failed", "dir"}``.
+    Retorna ``{"total", "ok", "failed", "dropped": [line_num], "dir"}``.
     """
     base_file = WAREHOUSE / f"{asset}_base.txt"
     if not base_file.exists():
@@ -386,7 +409,8 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
     out_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(lines)
-    ok = failed = 0
+    ok = 0
+    dropped: List[int] = []   # line_nums que não puderam ser extraídos
     cap = cv2.VideoCapture(str(video))
     try:
         if not cap.isOpened():
@@ -394,17 +418,16 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
         fps = cap.get(cv2.CAP_PROP_FPS)
         if not fps:
             raise RuntimeError(f"FPS inválido para o vídeo: {video}")
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
         for i, (line_num, avg_time) in enumerate(lines, 1):
-            out_path = _cached_frame_path(asset, line_num)
-            ts = _corrected_timestamp(avg_time)
-            cap.set(cv2.CAP_PROP_POS_FRAMES, int(fps * ts))
-            ret, frame = cap.read()
-            if not ret:
-                failed += 1
+            frame = _grab_at(cap, fps, avg_time, total_frames)
+            if frame is None:
+                dropped.append(line_num)
                 if progress_cb:
-                    progress_cb(i, total, f"⚠️  falha na linha {line_num} ({ts:.1f}s)")
+                    progress_cb(i, total, f"⚠️  sem frame legível para a linha {line_num} (~{avg_time:.1f}s)")
                 continue
+            out_path = _cached_frame_path(asset, line_num)
             cv2.imwrite(str(out_path), frame,
                         [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
             ok += 1
@@ -413,7 +436,8 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
     finally:
         cap.release()
 
-    return {"total": total, "ok": ok, "failed": failed, "dir": out_dir}
+    return {"total": total, "ok": ok, "failed": len(dropped),
+            "dropped": dropped, "dir": out_dir}
 
 
 def render_preview(match: dict, mode: str = "r36s"):

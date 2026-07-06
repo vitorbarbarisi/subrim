@@ -599,20 +599,35 @@ class App(tk.Tk):
             self._wh_refresh()
             return
 
-        if res["ok"] == 0 or res["failed"] > 0:
-            # Extração incompleta: NÃO apaga o vídeo, para não perder dados.
+        # Tolerância: uns poucos frames ilegíveis (tipicamente a última legenda,
+        # cujo timestamp corrigido cai além do fim do vídeo) não devem impedir o
+        # arquivamento. Aborta só se a perda for relevante.
+        total = res["total"] or 1
+        tolerance = max(2, int(total * 0.01))  # ≤2 frames ou ≤1% do total
+        dropped = res.get("dropped", [])
+
+        if res["ok"] == 0 or res["failed"] > tolerance:
+            # Perda relevante: NÃO apaga o vídeo, para não perder dados.
             self._log_line(
                 f"⚠️  {res['failed']} frame(s) falharam ({res['ok']}/{res['total']} ok) — "
-                f"vídeo NÃO foi apagado. Cache em {res['dir']}.", "warning")
+                f"acima da tolerância ({tolerance}). Vídeo NÃO foi apagado. "
+                f"Linhas: {dropped[:20]}{'…' if len(dropped) > 20 else ''}", "warning")
             messagebox.showwarning(
                 "Arquivamento incompleto",
                 f"{res['failed']} frame(s) não puderam ser extraídos "
-                f"({res['ok']}/{res['total']}).\n\n"
+                f"({res['ok']}/{res['total']}), acima da tolerância.\n\n"
                 f"O vídeo foi mantido por segurança. Verifique o log.")
             self._wh_refresh()
             return
 
-        # Sucesso: todos os frames extraídos → remove o mp4.
+        if dropped:
+            # Poucos frames perdidos: segue, mas registra exatamente quais linhas.
+            self._log_line(
+                f"ℹ️  {len(dropped)} frame(s) sem imagem (dentro da tolerância) — "
+                f"linhas {dropped}. Essas frases não terão preview após o arquivamento.",
+                "warning")
+
+        # Sucesso (dentro da tolerância) → remove o mp4.
         try:
             freed = mp4.stat().st_size / (1024 ** 3)
             mp4.unlink()
