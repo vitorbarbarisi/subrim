@@ -39,7 +39,7 @@ def _wh_analyse(base_path: Path) -> dict:
       total_words   – palavras distintas no array
       known         – palavras SEM pinyin e tradução (dominadas / confidence-3)
       unknown       – palavras COM pinyin e tradução (a aprender)
-      freq          – lista [(palavra, count)] por frequência desc
+      freq          – lista [(palavra, count, is_conhecida)] por frequência desc
     """
     from collections import defaultdict
     word_count: dict = defaultdict(int)
@@ -80,7 +80,11 @@ def _wh_analyse(base_path: Path) -> dict:
     except Exception:
         pass
 
-    freq = sorted(word_count.items(), key=lambda x: -x[1])
+    # freq com is_conhecida: True se (not has_pinyin or not has_translation)
+    freq = [
+        (word, word_count[word], not word_meta[word][0] or not word_meta[word][1])
+        for word in sorted(word_count.keys(), key=lambda w: -word_count[w])
+    ]
     known = sum(1 for w, (hp, ht) in word_meta.items() if not hp or not ht)
     unknown = len(word_meta) - known
     return {
@@ -427,17 +431,23 @@ class App(tk.Tk):
 
         freq_f = ttk.Frame(right)
         freq_f.pack(fill=tk.BOTH, expand=True)
-        fcols = ("word", "count")
-        ft = ttk.Treeview(freq_f, columns=fcols, show="headings", selectmode="browse", height=18)
-        ft.heading("word",  text="Palavra", anchor=tk.W)
-        ft.heading("count", text="Ocorrências", anchor=tk.CENTER)
-        ft.column("word",  width=120, anchor=tk.W,      stretch=False)
-        ft.column("count", width=90,  anchor=tk.CENTER, stretch=False)
+        fcols = ("word", "count", "conhecida")
+        ft = ttk.Treeview(freq_f, columns=fcols, show="headings", selectmode="extended")
+        ft.heading("word",      text="Palavra",      anchor=tk.W)
+        ft.heading("count",     text="Ocorrências",  anchor=tk.CENTER)
+        ft.heading("conhecida", text="Conhecida",    anchor=tk.CENTER)
+        ft.column("word",      width=120, anchor=tk.W,      stretch=True)
+        ft.column("count",     width=90,  anchor=tk.CENTER, stretch=False)
+        ft.column("conhecida", width=80,  anchor=tk.CENTER, stretch=False)
         fvsb = ttk.Scrollbar(freq_f, orient=tk.VERTICAL, command=ft.yview)
         ft.configure(yscrollcommand=fvsb.set)
         ft.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         fvsb.pack(side=tk.RIGHT, fill=tk.Y)
+        ft.bind("<Button-1>", self._wh_freq_on_header_click)
+        ft.bind("<Control-c>", self._wh_freq_copy_selection)
         self._wh_freq_tree = ft
+        self._wh_freq_sort_col = "count"   # coluna de ordenação atual
+        self._wh_freq_sort_reverse = True  # decrescente por padrão
 
         self._wh_refresh()
 
@@ -445,6 +455,7 @@ class App(tk.Tk):
         """Recarrega a lista de base.txt do warehouse, ordenada alfabeticamente por nome legível."""
         self._wh_tree.delete(*self._wh_tree.get_children())
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
+        self._wh_freq_data = []
         self._wh_detail.set("Selecione um arquivo para ver os detalhes.")
 
         if not WAREHOUSE.exists():
@@ -502,8 +513,62 @@ class App(tk.Tk):
     def _wh_show_details(self, detail: str, freq: list):
         self._wh_detail.set(detail)
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
-        for word, count in freq:
-            self._wh_freq_tree.insert("", tk.END, values=(word, count))
+        self._wh_freq_data = freq   # armazena para reclassificação
+        # Popula com dados (respeita ordenação)
+        self._wh_freq_refresh_view()
+
+    def _wh_freq_refresh_view(self):
+        """Recarrega a visualização da tabela respeitando a ordenação atual."""
+        self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
+        if not hasattr(self, '_wh_freq_data'):
+            return
+        # Ordena pelos critérios atuais
+        sort_key = {
+            "word": lambda x: x[0],
+            "count": lambda x: x[1],
+            "conhecida": lambda x: (not x[2], x[0]),  # Desconhecidas primeiro (False antes True)
+        }[self._wh_freq_sort_col]
+        sorted_data = sorted(self._wh_freq_data, key=sort_key, reverse=self._wh_freq_sort_reverse)
+        for word, count, is_conhecida in sorted_data:
+            conhecida_str = "Sim" if is_conhecida else "Não"
+            self._wh_freq_tree.insert("", tk.END, values=(word, count, conhecida_str))
+
+    def _wh_freq_on_header_click(self, event):
+        """Detecta clique no header da tabela de frequência para ordenar."""
+        region = self._wh_freq_tree.identify_region(event.x, event.y)
+        if region != "heading":
+            return
+        col_index = self._wh_freq_tree.identify_column(event.x)
+        # Mapeia índice de coluna para nome
+        col_name = self._wh_freq_tree.heading(col_index)["text"]
+        col_map = {"Palavra": "word", "Ocorrências": "count", "Conhecida": "conhecida"}
+        col = col_map.get(col_name)
+        if not col:
+            return
+        # Se clicar na mesma coluna, inverte ordem; senão usa decrescente por padrão
+        if self._wh_freq_sort_col == col:
+            self._wh_freq_sort_reverse = not self._wh_freq_sort_reverse
+        else:
+            self._wh_freq_sort_col = col
+            self._wh_freq_sort_reverse = True  # decrescente por padrão (exceto "Palavra")
+            if col == "word":
+                self._wh_freq_sort_reverse = False  # alfabético crescente
+        self._wh_freq_refresh_view()
+
+    def _wh_freq_copy_selection(self, _=None):
+        """Copia as palavras selecionadas para a área de transferência (Ctrl+C)."""
+        sel = self._wh_freq_tree.selection()
+        if not sel:
+            return
+        words = []
+        for iid in sel:
+            values = self._wh_freq_tree.item(iid)["values"]
+            if values:
+                words.append(values[0])
+        if words:
+            text = "\n".join(words)
+            self.clipboard_clear()
+            self.clipboard_append(text)
 
     # ── Downloads & Scraping Tab ───────────────────────────────────────────────
     def _build_downloads_tab(self):
