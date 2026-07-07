@@ -414,7 +414,7 @@ class App(tk.Tk):
         pw.add(left, weight=2)
 
         cols = ("name", "status")
-        wt = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        wt = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
         wt.heading("name",   text="Nome",   anchor=tk.W)
         wt.heading("status", text="Status", anchor=tk.CENTER)
         wt.column("name",   width=200, anchor=tk.W,      stretch=True)
@@ -501,11 +501,35 @@ class App(tk.Tk):
         extra = f" · {archived} arquivado(s)" if archived else ""
         self._wh_count_var.set(f"{complete}/{total} com vídeo{extra}")
 
+    def _wh_archivable_selection(self):
+        """Bases selecionadas que ainda têm mp4 original (candidatas a arquivar)."""
+        out = []
+        for iid in self._wh_tree.selection():
+            bf = Path(iid)
+            prefix = bf.stem.replace("_base", "")
+            mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
+            if mp4:
+                out.append((bf, prefix, mp4))
+        return out
+
+    def _wh_update_archive_btn(self):
+        """Habilita/rotula o botão conforme a seleção (1 ou vários com mp4)."""
+        n = len(self._wh_archivable_selection())
+        if n > 1:
+            self._wh_archive_btn.config(text=f"🗄  Arquivar {n} selecionados")
+        else:
+            self._wh_archive_btn.config(text="🗄  Arquivar (trocar vídeo por frames)")
+        self._wh_archive_btn.config(
+            state=(tk.NORMAL if (n and not self._wh_archiving) else tk.DISABLED))
+
     def _wh_on_select(self, _=None):
         sel = self._wh_tree.selection()
+        self._wh_update_archive_btn()
         if not sel:
             return
-        bf = Path(sel[0])
+        # Detalhes: mostra o item com foco (ou o primeiro da seleção).
+        focus = self._wh_tree.focus()
+        bf = Path(focus if focus in sel else sel[0])
         prefix = bf.stem.replace("_base", "")
         self._wh_selected_base = bf
 
@@ -517,9 +541,6 @@ class App(tk.Tk):
             video_line = f"— (arquivado: {len(list((FRAMES / prefix).glob('line*.jpg')))} frames)"
         else:
             video_line = "—"
-        # Só dá para arquivar quem ainda tem o mp4 original e não está arquivando.
-        self._wh_archive_btn.config(
-            state=(tk.NORMAL if (mp4 and not self._wh_archiving) else tk.DISABLED))
 
         # análise (em thread para não travar a UI)
         self._wh_detail.set("Analisando…")
@@ -541,104 +562,122 @@ class App(tk.Tk):
         threading.Thread(target=_work, daemon=True).start()
 
     def _wh_archive_selected(self):
-        """Extrai 1 frame por legenda para o cache e, só se tudo der certo, apaga o mp4.
+        """Arquiva em lote os episódios selecionados que ainda têm mp4.
 
-        A busca/preview/salvamento na aba Coleções continuam funcionando via
-        cache de frames (warehouse/frames/<asset>/). A remoção do mp4 é feita
-        apenas após conferir que todos os frames foram extraídos.
+        Para cada um: extrai 1 frame por legenda para o cache
+        (warehouse/frames/<asset>/) e, dentro da tolerância a frames perdidos,
+        apaga o mp4. Busca/preview/salvamento na aba Coleções seguem funcionando
+        pelos frames. Um episódio com perda relevante mantém o vídeo.
         """
-        if self._wh_archiving or self._wh_selected_base is None:
+        if self._wh_archiving:
             return
         cb = self._col_import()
         if not cb:
             return
 
-        bf = self._wh_selected_base
-        prefix = bf.stem.replace("_base", "")
-        readable = _wh_readable_name(bf.stem)
-        mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
-        if not mp4:
-            messagebox.showinfo("Arquivar", "Este episódio não tem mp4 original para arquivar.")
+        targets = self._wh_archivable_selection()  # [(bf, prefix, mp4)]
+        if not targets:
+            messagebox.showinfo("Arquivar",
+                                "Selecione ao menos um episódio com mp4 original.")
             return
 
-        size_gb = mp4.stat().st_size / (1024 ** 3)
+        total_gb = sum(mp4.stat().st_size for _, _, mp4 in targets) / (1024 ** 3)
+        names = [_wh_readable_name(bf.stem) for bf, _, _ in targets]
+        shown = ", ".join(names[:8]) + ("…" if len(names) > 8 else "")
         if not messagebox.askyesno(
-                "Arquivar episódio",
-                f"Arquivar “{readable}”?\n\n"
-                f"• Extrai 1 frame por legenda para warehouse/frames/{prefix}/\n"
-                f"• Depois APAGA {mp4.name} (~{size_gb:.2f} GB)\n\n"
-                f"A busca e a visualização na aba Coleções continuam funcionando "
-                f"pelos frames. Para reverter é preciso repor o vídeo original.\n\n"
+                "Arquivar episódios",
+                f"Arquivar {len(targets)} episódio(s)?\n\n"
+                f"{shown}\n\n"
+                f"• Extrai 1 frame por legenda para warehouse/frames/<asset>/\n"
+                f"• Depois APAGA o(s) mp4 (~{total_gb:.2f} GB no total)\n\n"
+                f"Busca e visualização na aba Coleções seguem funcionando pelos "
+                f"frames. Para reverter é preciso repor o vídeo original.\n\n"
                 f"Continuar?"):
             return
 
         self._wh_archiving = True
         self._wh_archive_btn.config(state=tk.DISABLED)
         self._nb.select(4)  # aba Log
-        self._log_line(f"🗄  Arquivando “{readable}” — extraindo frames…", "cmd")
-
-        def _progress(i, total, msg):
-            self._log_q.put((f"  [{i}/{total}] {msg}", "info"))
+        n = len(targets)
+        self._log_line(f"🗄  Arquivamento em lote: {n} episódio(s)…", "cmd")
 
         def _work():
-            try:
-                res = cb.archive_asset(prefix, progress_cb=_progress)
-            except Exception as e:  # noqa: BLE001
-                self._log_q.put((f"Erro ao arquivar '{prefix}': {e}", "error"))
-                self.after(0, lambda: self._wh_archive_done(prefix, None, mp4))
-                return
-            self.after(0, lambda: self._wh_archive_done(prefix, res, mp4))
+            summary = {"n": n, "done": 0, "kept": 0, "freed_gb": 0.0}
+            for k, (bf, prefix, mp4) in enumerate(targets, 1):
+                readable = _wh_readable_name(bf.stem)
+                self._log_q.put((f"[{k}/{n}] 🗄  “{readable}” — extraindo frames…", "cmd"))
+
+                def _progress(i, total, msg):
+                    self._log_q.put((f"    ({i}/{total}) {msg}", "info"))
+
+                try:
+                    res = cb.archive_asset(prefix, progress_cb=_progress)
+                except Exception as e:  # noqa: BLE001
+                    self._log_q.put((f"    Erro ao arquivar '{prefix}': {e} — vídeo mantido.",
+                                     "error"))
+                    summary["kept"] += 1
+                    continue
+
+                outcome = self._wh_apply_archive_result(prefix, res, mp4)
+                if outcome["archived"]:
+                    summary["done"] += 1
+                    summary["freed_gb"] += outcome["freed_gb"]
+                else:
+                    summary["kept"] += 1
+
+            self.after(0, lambda: self._wh_batch_done(summary))
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _wh_archive_done(self, prefix: str, res, mp4: Path):
-        self._wh_archiving = False
-        if res is None:
-            # Falha na extração: mantém o mp4 intacto.
-            self._log_line("⚠️  Arquivamento abortado — vídeo mantido.", "warning")
-            self._wh_refresh()
-            return
-
+    def _wh_apply_archive_result(self, prefix: str, res: dict, mp4: Path) -> dict:
+        """Aplica a tolerância e, se aprovado, remove o mp4. Roda na thread de
+        trabalho e loga via fila. Retorna ``{"archived": bool, "freed_gb": float}``.
+        """
         # Tolerância: uns poucos frames ilegíveis (tipicamente a última legenda,
-        # cujo timestamp corrigido cai além do fim do vídeo) não devem impedir o
-        # arquivamento. Aborta só se a perda for relevante.
+        # cujo timestamp corrigido cai além do fim do vídeo) não impedem o
+        # arquivamento; perda relevante mantém o vídeo.
         total = res["total"] or 1
         tolerance = max(2, int(total * 0.01))  # ≤2 frames ou ≤1% do total
         dropped = res.get("dropped", [])
 
         if res["ok"] == 0 or res["failed"] > tolerance:
-            # Perda relevante: NÃO apaga o vídeo, para não perder dados.
-            self._log_line(
-                f"⚠️  {res['failed']} frame(s) falharam ({res['ok']}/{res['total']} ok) — "
-                f"acima da tolerância ({tolerance}). Vídeo NÃO foi apagado. "
-                f"Linhas: {dropped[:20]}{'…' if len(dropped) > 20 else ''}", "warning")
-            messagebox.showwarning(
-                "Arquivamento incompleto",
-                f"{res['failed']} frame(s) não puderam ser extraídos "
-                f"({res['ok']}/{res['total']}), acima da tolerância.\n\n"
-                f"O vídeo foi mantido por segurança. Verifique o log.")
-            self._wh_refresh()
-            return
+            self._log_q.put((
+                f"    ⚠️  {res['failed']} frame(s) falharam ({res['ok']}/{res['total']}) — "
+                f"acima da tolerância ({tolerance}). Vídeo NÃO apagado. "
+                f"Linhas: {dropped[:20]}{'…' if len(dropped) > 20 else ''}", "warning"))
+            return {"archived": False, "freed_gb": 0.0}
 
         if dropped:
-            # Poucos frames perdidos: segue, mas registra exatamente quais linhas.
-            self._log_line(
-                f"ℹ️  {len(dropped)} frame(s) sem imagem (dentro da tolerância) — "
-                f"linhas {dropped}. Essas frases não terão preview após o arquivamento.",
-                "warning")
+            self._log_q.put((
+                f"    ℹ️  {len(dropped)} frame(s) sem imagem (dentro da tolerância) — "
+                f"linhas {dropped}. Essas frases não terão preview.", "warning"))
 
-        # Sucesso (dentro da tolerância) → remove o mp4.
         try:
             freed = mp4.stat().st_size / (1024 ** 3)
             mp4.unlink()
-            self._log_line(
-                f"✓ “{prefix}” arquivado: {res['ok']} frames em {res['dir']}. "
-                f"Vídeo removido (~{freed:.2f} GB liberados).", "success")
+            self._log_q.put((
+                f"    ✓ “{prefix}” arquivado: {res['ok']} frames. "
+                f"Vídeo removido (~{freed:.2f} GB).", "success"))
+            return {"archived": True, "freed_gb": freed}
         except Exception as e:  # noqa: BLE001
-            self._log_line(
-                f"⚠️  Frames extraídos ({res['ok']}), mas falha ao apagar o mp4: {e}",
-                "warning")
+            self._log_q.put((
+                f"    ⚠️  Frames extraídos ({res['ok']}), mas falha ao apagar o mp4: {e}",
+                "warning"))
+            return {"archived": False, "freed_gb": 0.0}
+
+    def _wh_batch_done(self, summary: dict):
+        self._wh_archiving = False
+        self._log_line(
+            f"🗄  Lote concluído: {summary['done']} arquivado(s), "
+            f"{summary['kept']} mantido(s). ~{summary['freed_gb']:.2f} GB liberados.",
+            "success" if summary["done"] else "warning")
+        messagebox.showinfo(
+            "Arquivamento em lote",
+            f"{summary['done']} de {summary['n']} episódio(s) arquivado(s).\n"
+            f"{summary['kept']} mantido(s) (falha/tolerância).\n\n"
+            f"~{summary['freed_gb']:.2f} GB liberados.")
         self._wh_refresh()
+        self._wh_update_archive_btn()
 
     def _wh_show_details(self, detail: str, freq: list):
         self._wh_detail.set(detail)
