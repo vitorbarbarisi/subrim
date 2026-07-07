@@ -427,6 +427,8 @@ class App(tk.Tk):
         wt.tag_configure("archived", foreground="#2980B9")
         wt.tag_configure("missing",  foreground="#E74C3C")
         wt.bind("<<TreeviewSelect>>", self._wh_on_select)
+        wt.bind("<Shift-Down>", lambda _: self._wh_extend_selection(1)  or "break")
+        wt.bind("<Shift-Up>",   lambda _: self._wh_extend_selection(-1) or "break")
         self._wh_tree = wt
 
         # ── detalhes ──
@@ -500,6 +502,18 @@ class App(tk.Tk):
                        if _wh_is_archived(bf.stem.replace("_base", "")))
         extra = f" · {archived} arquivado(s)" if archived else ""
         self._wh_count_var.set(f"{complete}/{total} com vídeo{extra}")
+
+    def _wh_extend_selection(self, direction: int):
+        """Estende a seleção com Shift+Seta (espelha a aba Coleções)."""
+        focused = self._wh_tree.focus()
+        if not focused:
+            return
+        nxt = self._wh_tree.next(focused) if direction > 0 else self._wh_tree.prev(focused)
+        if not nxt:
+            return
+        self._wh_tree.selection_add(nxt)
+        self._wh_tree.focus(nxt)
+        self._wh_tree.see(nxt)
 
     def _wh_archivable_selection(self):
         """Bases selecionadas que ainda têm mp4 original (candidatas a arquivar)."""
