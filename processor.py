@@ -480,11 +480,77 @@ def _sanitize_tsv_field(text: str) -> str:
     return cleaned
 
 
-def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, **kwargs):
+def _env_float(name: str, default: float) -> float:
+    """Lê um float de env; volta ao default se ausente/vazio/ inválido."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+def _env_int(name: str, default: int) -> int:
+    """Lê um int de env; volta ao default se ausente/vazio/ inválido."""
+    raw = os.getenv(name)
+    if raw is None or raw.strip() == "":
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
+def _deepseek_timeout(n_items: int = 1) -> float:
+    """Read-timeout (s) de uma chamada DeepSeek.
+
+    O gargalo é a GERAÇÃO no servidor, não a rede: para respostas não-streaming
+    o cliente só recebe bytes quando o modelo termina de gerar, então um timeout
+    curto vira ``read operation timed out`` espúrio sob carga.
+
+    - ``DEEPSEEK_TIMEOUT`` (env) fixa um valor e ignora o resto.
+    - Senão escala com o tamanho do lote, com piso/teto generosos, ajustáveis
+      por ``DEEPSEEK_TIMEOUT_FLOOR`` (default 90s) e ``DEEPSEEK_TIMEOUT_CAP``
+      (default 180s).
+    """
+    override = _env_float("DEEPSEEK_TIMEOUT", 0.0)
+    if override > 0:
+        return override
+    floor = _env_float("DEEPSEEK_TIMEOUT_FLOOR", 90.0)
+    cap = _env_float("DEEPSEEK_TIMEOUT_CAP", 180.0)
+    scaled = 25.0 + 4.0 * max(1, n_items)
+    return max(floor, min(cap, scaled))
+
+
+def _deepseek_max_tokens(n_items: int = 1, per_item: int = 120, base: int = 400) -> int:
+    """Teto de tokens de saída de um lote DeepSeek.
+
+    Menos tokens de saída = menos tempo de geração no servidor = menos timeout.
+    ``DEEPSEEK_MAX_TOKENS`` (env) força um valor; senão escala com o lote e é
+    limitado a 8192. O default é folgado para legendas curtas sem truncar.
+    """
+    override = _env_int("DEEPSEEK_MAX_TOKENS", 0)
+    if override > 0:
+        return override
+    return min(8192, base + per_item * max(1, n_items))
+
+
+def _retry_api_call(func, *args, max_retries: int = None, base_delay: float = None,
+                    backoff_factor: float = None, **kwargs):
     """Retry API call with exponential backoff on failures.
 
     Usage: _retry_api_call(function_name, arg1, arg2, max_retries=3, base_delay=2.0)
     """
+    # Backoff mais tolerante (padrão 4 tentativas: 5s → 15s → 45s), pensado para
+    # "esperar" janelas de sobrecarga do servidor passarem. Ajustável por env.
+    if max_retries is None:
+        max_retries = _env_int("DEEPSEEK_MAX_RETRIES", 4)
+    if base_delay is None:
+        base_delay = _env_float("DEEPSEEK_RETRY_BASE_DELAY", 5.0)
+    if backoff_factor is None:
+        backoff_factor = _env_float("DEEPSEEK_RETRY_FACTOR", 3.0)
+
     last_exception = None
 
     for attempt in range(max_retries):
@@ -515,7 +581,7 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
 
             if is_network_error:
                 if attempt < max_retries - 1:  # Don't sleep on last attempt
-                    delay = base_delay * (2 ** attempt)  # Exponential backoff
+                    delay = base_delay * (backoff_factor ** attempt)  # Exponential backoff
                     print(f"⚠️  Tentativa {attempt + 1}/{max_retries} falhou:", file=sys.stderr)
                     print(f"   Tipo: {type(e).__name__}", file=sys.stderr)
                     print(f"   Erro: {str(e)[:200]}...", file=sys.stderr)
@@ -535,7 +601,7 @@ def _retry_api_call(func, *args, max_retries: int = 3, base_delay: float = 2.0, 
     raise last_exception
 
 
-def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
+def _call_deepseek_pairs(zht_text: str, timeout_sec: float = None) -> str:
     """Call DeepSeek chat API to extract list ["palavra: tradução", ...] for zht_text.
 
     Reads configuration from env vars:
@@ -548,6 +614,9 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = 15.0) -> str:
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key or api_key.strip() == "":
         raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente")
+
+    if timeout_sec is None:
+        timeout_sec = _deepseek_timeout(1)
 
     api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -635,8 +704,7 @@ def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) 
     url = f"{api_base.rstrip('/')}/chat/completions"
 
     if timeout_sec is None:
-        # Batches take longer to generate; scale the timeout with the batch size.
-        timeout_sec = min(120.0, 20.0 + 4.0 * len(sentences))
+        timeout_sec = _deepseek_timeout(len(sentences))
 
     numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, start=1))
     prompt = (
@@ -654,7 +722,8 @@ def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) 
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 8192,
+        # Listas de pares por frase → escala com o lote (per_item maior).
+        "max_tokens": _deepseek_max_tokens(len(sentences), per_item=300),
     }
     data = json.dumps(body).encode("utf-8")
 
@@ -702,7 +771,7 @@ def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) 
     return result
 
 
-def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = 30.0) -> str:
+def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = None) -> str:
     """Translate 'text' from source_lang ("pt" or "es") to Traditional Chinese (zht).
 
     On any failure (missing API key, HTTP/timeout, or empty response), raises
@@ -711,6 +780,9 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
     api_key = os.getenv("DEEPSEEK_API_KEY")
     if not api_key or api_key.strip() == "":
         raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
+
+    if timeout_sec is None:
+        timeout_sec = _deepseek_timeout(1)
 
     api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
@@ -803,7 +875,7 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
         src_label = "inglês"
 
     if timeout_sec is None:
-        timeout_sec = min(120.0, 25.0 + 4.0 * len(texts))
+        timeout_sec = _deepseek_timeout(len(texts))
 
     numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, start=1))
     prompt = (
@@ -821,7 +893,8 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
         "temperature": 0.2,
-        "max_tokens": 8192,
+        # Traduções zht curtas (uma por segmento) → teto enxuto e escalado.
+        "max_tokens": _deepseek_max_tokens(len(texts), per_item=120),
     }
     data = json.dumps(body).encode("utf-8")
 
@@ -1564,14 +1637,17 @@ def convert_simplified_to_traditional(text: str) -> str:
             result = result.replace(simplified, traditional)
         return result
 
-def _call_deepseek_translate_to_pt(text: str, timeout_sec: float = 30.0) -> str:
+def _call_deepseek_translate_to_pt(text: str, timeout_sec: float = None) -> str:
     """
     Call DeepSeek API to translate Chinese text to Portuguese.
     """
     api_key = os.getenv("DEEPSEEK_API_KEY")
     api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
     model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-    
+
+    if timeout_sec is None:
+        timeout_sec = _deepseek_timeout(1)
+
     if not api_key:
         raise ValueError("DEEPSEEK_API_KEY not found in environment")
     
