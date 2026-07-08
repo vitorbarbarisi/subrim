@@ -123,12 +123,20 @@ def read_text_robust(path) -> str:
     """
     from pathlib import Path as _Path
     data = _Path(path).read_bytes()
+    text = None
     for enc in ("utf-8-sig", "utf-8", "cp1252", "latin-1"):
         try:
-            return data.decode(enc)
+            text = data.decode(enc)
+            break
         except UnicodeDecodeError:
             continue
-    return data.decode("utf-8", errors="replace")
+    if text is None:
+        text = data.decode("utf-8", errors="replace")
+    # Normaliza quebras de linha (CRLF/CR → LF). Sem isso, um .srt com \r\n faz a
+    # separação de blocos por linha em branco (re.split r'\n\n+') falhar — o
+    # separador vira \r\n\r\n, sem dois \n consecutivos — e TODAS as legendas
+    # colapsam numa única entrada com o filme inteiro no texto.
+    return text.replace("\r\n", "\n").replace("\r", "\n")
 
 
 # TTML/IMSC namespaces used in the input file
