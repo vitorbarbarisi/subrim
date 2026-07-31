@@ -17,6 +17,9 @@ from tkinter import ttk
 
 # Maestria de vocabulário (word-api). Só stdlib, seguro importar no topo.
 import word_vocab
+from app_identity import set_app_name
+
+APP_NAME = "Subrim Manager"
 
 # ─── Paths ─────────────────────────────────────────────────────────────────────
 REPO      = Path(__file__).parent
@@ -219,7 +222,15 @@ def list_sources() -> list:
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
-        self.title("Subrim Manager")
+        self.title(APP_NAME)
+        # Guardado em self: o Tk não é dono do PhotoImage, então deixá-lo ser
+        # coletado derruba o ícone. Caminho absoluto porque o app nem sempre é
+        # iniciado a partir da raiz do repo.
+        try:
+            self._icon_image = tk.PhotoImage(file=str(REPO / "subrim_icon.png"))
+            self.iconphoto(True, self._icon_image)
+        except tk.TclError as e:
+            print(f"Ícone não carregado: {e}")
         self.geometry("1180x700")
         self.minsize(960, 600)
 
@@ -2263,5 +2274,7 @@ class SourceViewerDialog(tk.Toplevel):
 
 # ─── Entry point ───────────────────────────────────────────────────────────────
 if __name__ == "__main__":
+    # Antes do Tk(): o Dock lê o nome do app quando o processo se registra.
+    set_app_name(APP_NAME)
     app = App()
     app.mainloop()

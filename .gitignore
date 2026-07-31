@@ -1,6 +1,8 @@
 # Ignore generated screenshots
 r36s_viewer
 *.png
+# ...exceto o ícone do app (gerado por tools/make_icon.py, mas versionado)
+!subrim_icon.png
 
 # Ignore warehouse media files
 warehouse/*
