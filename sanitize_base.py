@@ -27,12 +27,15 @@ Caracteres removidos da coluna chinesa:
 - Caracteres alfanuméricos (A-Z, a-z, 0-9)
 - Outros caracteres especiais problemáticos
 
-Integração com word-api:
+Integração com word-api (registro de vocabulário — NÃO altera o array):
 - Para cada palavra em mandarim nos pares de tradução:
-  - Faz GET para http://localhost:7998/word-api/{palavra}
-  - Se confidence_level == 3: remove a palavra do array
+  - Faz GET para {WORD_API_BASE_URL}/{palavra}
   - Se não existir: faz POST para adicionar com confidence_level = 1
-- Palavras com confidence_level != 3 são mantidas no arquivo
+  - Se existir e não for dominada: faz PUT da tradução, se ela ainda não constar
+- O array de pares é SEMPRE preservado integralmente, com pinyin e tradução de
+  todas as palavras. Esconder a ajuda de palavras dominadas (confidence_level
+  == 3) é decisão do RENDER, feita em word_vocab.display_pairs() — assim a
+  maestria vale retroativamente sem reescrever nenhum base.
 """
 
 import sys
@@ -43,6 +46,8 @@ import json
 import re
 from pathlib import Path
 
+import word_vocab
+
 # Frases específicas que indicam erro de tradução e devem ser removidas
 ERROR_TRANSLATION_TEXTS = [
     "Infelizmente, não há uma frase em chinês fornecida para eu extrair e traduzir. Por favor, envie a frase em chinês tradicional para que eu possa ajudá-lo.",
@@ -50,8 +55,8 @@ ERROR_TRANSLATION_TEXTS = [
     "A frase fornecida está vazia, portanto, não há palavras para extrair e traduzir."
 ]
 
-# URL da word-api localhost
-WORD_API_BASE_URL = "http://localhost:7998/word-api"
+# URL da word-api (respeita WORD_API_BASE_URL; ver word_vocab.base_url)
+WORD_API_BASE_URL = word_vocab.base_url()
 
 
 def check_word_api_health() -> bool:
@@ -283,12 +288,17 @@ def extract_pairs_from_translation(translation_text: str) -> list:
 def process_word_api_integration(pairs: list) -> list:
     """
     Processa integração com word-api para cada palavra nos pares.
-    
+
+    Registra no vocabulário as palavras ainda desconhecidas pela API (POST com
+    confidence_level = 1) e enriquece traduções (PUT). NÃO altera os pares: o
+    base preserva pinyin e tradução de TODAS as palavras. Omitir a ajuda das
+    dominadas é decisão do render (word_vocab.display_pairs).
+
     Args:
         pairs: Lista de pares de palavras
-        
+
     Returns:
-        list: Lista de pares filtrada (palavras com confidence_level == 3 removidas)
+        list: Os mesmos pares, sem as entradas de palavra vazia
     """
     filtered_pairs = []
     
@@ -321,12 +331,11 @@ def process_word_api_integration(pairs: list) -> list:
             except (ValueError, TypeError):
                 confidence_level = 0
             
-            if confidence_level == 3:
-                print(f"   ⭐ Palavra '{word}' dominada (confidence_level == 3) — "
-                      "mantida no array sem pinyin/tradução")
-                # Mantém a palavra (buscável e posicionada na queima), mas sem
-                # pinyin nem tradução — o aprendiz já domina, então não recebe ajuda.
-                filtered_pairs.append({"word": word, "pinyin": "", "translation": ""})
+            if confidence_level == word_vocab.MASTERED_LEVEL:
+                print(f"   ⭐ Palavra '{word}' dominada "
+                      f"(confidence_level == {confidence_level}) — preservada no "
+                      "base; a ajuda é omitida no render")
+                # Dominada não recebe PUT: já não há tradução a aprender nela.
             else:
                 print(f"   ✅ Palavra '{word}' mantida (confidence_level == {confidence_level})")
 
@@ -337,8 +346,10 @@ def process_word_api_integration(pairs: list) -> list:
                 if translation.strip().lower() not in normalized:
                     put_word_translation(word, translation)
 
-                filtered_pairs.append(pair)
-    
+            # O par vai INTACTO para o base em qualquer caso — o arquivo nunca
+            # perde pinyin/tradução por causa da maestria.
+            filtered_pairs.append(pair)
+
     return filtered_pairs
 
 

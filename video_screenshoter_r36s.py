@@ -30,6 +30,10 @@ try:
 except ImportError:
     SANITIZE_AVAILABLE = False
 
+# Maestria de vocabulário: decide, no render, quais palavras recebem
+# pinyin/tradução. Falha aberta se a word-api estiver fora do ar.
+import word_vocab
+
 # R36S resolution
 R36S_WIDTH = 640
 R36S_HEIGHT = 480
@@ -344,8 +348,12 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                 pinyin_font = ImageFont.load_default()
                 portuguese_font = ImageFont.load_default()
             
-            # Parse translations
+            # Parse translations. A ajuda (pinyin/tradução) das palavras já
+            # dominadas é omitida AQUI, no render — o base preserva tudo.
+            # Precisa vir antes do cálculo de largura das colunas (mais abaixo
+            # a largura usa pinyin_width), senão o espaçamento sobra.
             word_data = parse_pinyin_translations(translations_json) if translations_json else []
+            word_data = word_vocab.display_pairs(word_data)
             
             # Clean Chinese text
             clean_chinese = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '').replace('"', '').replace('"', '')

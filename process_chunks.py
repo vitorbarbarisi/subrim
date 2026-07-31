@@ -32,6 +32,10 @@ import re
 from contextlib import redirect_stdout
 from concurrent.futures import ProcessPoolExecutor, as_completed
 
+# Maestria de vocabulário: decide, no render, quais palavras recebem
+# pinyin/tradução. Falha aberta se a word-api estiver fora do ar.
+import word_vocab
+
 # Chunk especial que recebe tratamento de cópia idêntica em caso de falha.
 _SPECIAL_COPY_CHUNK = "Death.Becomes.Her.1992.1080p.BluRay.H264.AAC_chromecast_chunk_115.mp4"
 
@@ -382,9 +386,17 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
     print(f"\n🎬 Corte+queima de {len(tasks)} chunk(s) com {workers} worker(s) em paralelo...")
     print("-" * 60)
 
+    # Carrega a maestria UMA vez aqui e prima cada worker com o mesmo conjunto,
+    # para que todos os chunks apliquem critério idêntico (mesmo se a API cair
+    # durante a queima).
+    mastered = word_vocab.mastered_words()
+    print(f"   📚 {len(mastered)} palavra(s) dominada(s) — ajuda omitida no render")
+
     processed_count = 0
     error_count = 0
-    with ProcessPoolExecutor(max_workers=workers) as executor:
+    with ProcessPoolExecutor(max_workers=workers,
+                             initializer=word_vocab.set_mastered,
+                             initargs=(mastered,)) as executor:
         futures = [executor.submit(_fused_chunk_worker, t) for t in tasks]
         done = 0
         for future in as_completed(futures):
@@ -603,6 +615,20 @@ def parse_pinyin_translations(translation_list_str: str) -> list[tuple[str, str,
     except Exception as e:
         print(f"Erro ao fazer parsing da lista de traduções com pinyin: {e}")
         return []
+
+
+def _display_word_data(translations_json: str) -> list[tuple[str, str, str]]:
+    """Pares prontos para desenhar: parse do base + omissão da ajuda das dominadas.
+
+    O base preserva pinyin/tradução de todas as palavras; quem decide o que
+    aparece é o render (word_vocab). Existe como função única porque
+    create_ffmpeg_drawtext_filters percorre as legendas DUAS vezes (medição das
+    larguras e emissão dos drawtext) — se os dois passes divergissem, a caixa de
+    fundo e a centralização sairiam dimensionadas para texto que não é desenhado.
+    """
+    if not translations_json:
+        return []
+    return word_vocab.display_pairs(parse_pinyin_translations(translations_json))
 
 
 def parse_base_file(base_file_path: Path) -> Dict[float, Tuple[str, str, str, str, float]]:
@@ -955,7 +981,7 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         chinese_text, translations_text, translations_json, portuguese_text, duration = valid_subtitles[begin_time]
 
         # Parse translations for pinyin and word-by-word Portuguese
-        word_data = parse_pinyin_translations(translations_json) if translations_json else []
+        word_data = _display_word_data(translations_json)
 
         # Clean Chinese text
         clean_chinese = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '').replace('"', '').replace('"', '')
@@ -1047,7 +1073,7 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         chinese_text, translations_text, translations_json, portuguese_text, duration = valid_subtitles[begin_time]
 
         # Parse translations for pinyin and word-by-word Portuguese
-        word_data = parse_pinyin_translations(translations_json) if translations_json else []
+        word_data = _display_word_data(translations_json)
 
         # Clean Chinese text
         clean_chinese = chinese_text.replace(' ', '').replace('　', '').replace('（', '').replace('）', '').replace('.', '').replace('《', '').replace('》', '').replace('"', '').replace('"', '')
@@ -1547,7 +1573,13 @@ Para reprocessar:
 
         tasks = [(str(cf), total, i) for i, cf in enumerate(unprocessed_chunk_files, 1)]
 
-        with ProcessPoolExecutor(max_workers=workers) as executor:
+        # Maestria carregada uma vez e replicada nos workers (ver run_fused_from_manifest).
+        mastered = word_vocab.mastered_words()
+        print(f"   📚 {len(mastered)} palavra(s) dominada(s) — ajuda omitida no render")
+
+        with ProcessPoolExecutor(max_workers=workers,
+                                 initializer=word_vocab.set_mastered,
+                                 initargs=(mastered,)) as executor:
             futures = [executor.submit(_process_chunk_worker, t) for t in tasks]
             done = 0
             for future in as_completed(futures):

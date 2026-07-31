@@ -15,6 +15,9 @@ from tkinter import filedialog, messagebox, scrolledtext
 import tkinter as tk
 from tkinter import ttk
 
+# Maestria de vocabulário (word-api). Só stdlib, seguro importar no topo.
+import word_vocab
+
 # ─── Paths ─────────────────────────────────────────────────────────────────────
 REPO      = Path(__file__).parent
 ASSETS    = REPO / "assets"
@@ -39,15 +42,24 @@ def _wh_readable_name(stem: str) -> str:
     return name.title()
 
 
-def _wh_analyse(base_path: Path) -> dict:
+def _wh_analyse(base_path: Path, mastered=None) -> dict:
     """Analisa um base.txt do warehouse e retorna estatísticas de palavras.
+
+    ``mastered`` é o conjunto de palavras dominadas na word-api (ver word_vocab).
+    Deve ser carregado pelo chamador — esta função roda em thread e não deve
+    fazer I/O de rede. Se vier ``None``, usa o cache já carregado no processo.
+
+    Uma palavra é "conhecida" quando não há ajuda a exibir no render: o base não
+    tem pinyin/tradução para ela (entrada nua) OU ela já é dominada na word-api.
 
     Retorna:
       total_words   – palavras distintas no array
-      known         – palavras SEM pinyin e tradução (dominadas / confidence-3)
-      unknown       – palavras COM pinyin e tradução (a aprender)
+      known         – palavras conhecidas (sem ajuda a exibir)
+      unknown       – palavras a aprender (com pinyin+tradução e não dominadas)
       freq          – lista [(palavra, count, is_conhecida)] por frequência desc
     """
+    if mastered is None:
+        mastered = word_vocab.mastered_words()
     from collections import defaultdict
     word_count: dict = defaultdict(int)
     # conjunto de pares distintos para contar conhecido/desconhecido
@@ -87,12 +99,14 @@ def _wh_analyse(base_path: Path) -> dict:
     except Exception:
         pass
 
-    # freq com is_conhecida: True se (not has_pinyin or not has_translation)
+    # conhecida = sem ajuda a exibir no render (entrada nua) OU dominada na API
     freq = [
-        (word, word_count[word], not word_meta[word][0] or not word_meta[word][1])
+        (word, word_count[word],
+         word_vocab.is_known(word, word_meta[word][0], word_meta[word][1], mastered))
         for word in sorted(word_count.keys(), key=lambda w: -word_count[w])
     ]
-    known = sum(1 for w, (hp, ht) in word_meta.items() if not hp or not ht)
+    known = sum(1 for w, (hp, ht) in word_meta.items()
+                if word_vocab.is_known(w, hp, ht, mastered))
     unknown = len(word_meta) - known
     return {
         "total_words": len(word_meta),
@@ -564,15 +578,19 @@ class App(tk.Tk):
         self._wh_detail.set("Analisando…")
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
 
+        # Maestria lida aqui, na thread da GUI (usa o cache da sessão), para que
+        # a thread de análise não faça I/O de rede.
+        mastered = word_vocab.mastered_words()
+
         def _work():
-            stats = _wh_analyse(bf)
+            stats = _wh_analyse(bf, mastered)
             detail = (
                 f"Arquivo : {bf.name}\n"
                 f"Vídeo   : {video_line}\n"
                 f"\n"
                 f"Palavras distintas : {stats['total_words']}\n"
-                f"  Conhecidas (sem pinyin/trad) : {stats['known']}\n"
-                f"  Desconhecidas (com pinyin+trad) : {stats['unknown']}"
+                f"  Conhecidas (nuas ou dominadas) : {stats['known']}\n"
+                f"  A aprender : {stats['unknown']}"
             )
             freq = stats["freq"]
             self.after(0, lambda: self._wh_show_details(detail, freq))
@@ -863,6 +881,9 @@ class App(tk.Tk):
         self._col_filter_btn = ttk.Button(top, text="⚙ Filtro",
                                           command=self._col_open_filter_dialog)
         self._col_filter_btn.pack(side=tk.LEFT, padx=(6, 0))
+        self._col_vocab_btn = ttk.Button(top, text="↻ Vocab",
+                                         command=self._col_reload_vocab)
+        self._col_vocab_btn.pack(side=tk.LEFT, padx=(6, 0))
         self._col_status = tk.StringVar(
             value="Palavras (ex.: 著,當,與)  ·  0 = frases i+1  ·  1 = todas as frases")
         ttk.Label(top, textvariable=self._col_status, foreground="#888").pack(side=tk.LEFT, padx=12)
@@ -953,6 +974,33 @@ class App(tk.Tk):
         if not WAREHOUSE.exists():
             return []
         return sorted(b.stem.replace("_base", "") for b in WAREHOUSE.glob("*_base.txt"))
+
+    def _col_reload_vocab(self):
+        """Recarrega da word-api quais palavras estão dominadas.
+
+        O conjunto fica em cache pela sessão: é ele que decide, no render, quais
+        palavras aparecem sem pinyin/tradução, e quais contam como conhecidas na
+        busca i+1 e na coluna Conhecida do Warehouse.
+        """
+        self._col_vocab_btn.config(state=tk.DISABLED, text="↻ …")
+        self._log_line("📚 Recarregando vocabulário da word-api…", "cmd")
+
+        def _work():
+            try:
+                n = word_vocab.reload_mastered()
+                self._log_q.put((f"✓ vocabulário recarregado: {n} palavra(s) dominada(s)",
+                                 "success"))
+            except Exception as e:  # noqa: BLE001
+                n = None
+                self._log_q.put((f"Erro ao recarregar vocabulário: {e}", "error"))
+            self.after(0, lambda: self._col_reload_vocab_done(n))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _col_reload_vocab_done(self, n):
+        self._col_vocab_btn.config(state=tk.NORMAL, text="↻ Vocab")
+        if n is not None:
+            self._col_status.set(f"Vocabulário: {n} dominada(s) — refaça a busca para aplicar")
 
     def _col_update_filter_btn(self):
         """Atualiza o rótulo do botão de filtro conforme o estado (ativo/inativo)."""

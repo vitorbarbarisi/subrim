@@ -21,6 +21,7 @@ from typing import Callable, List, Optional
 
 import cv2
 
+import word_vocab
 from video_screenshoter_r36s import add_subtitles_to_frame, parse_pinyin_translations
 
 REPO = Path(__file__).parent
@@ -279,9 +280,10 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
                           max_unknown: int = 1) -> List[dict]:
     """Busca frases com no máximo ``max_unknown`` palavras desconhecidas.
 
-    "Desconhecida" = entrada do array que possui tanto pinyin quanto tradução
-    (ou seja, ainda há algo a aprender). Palavras nuas (só o caractere, sem
-    pinyin/trad) são consideradas conhecidas.
+    "Desconhecida" = o base tem pinyin E tradução para a palavra E ela ainda não
+    é dominada na word-api (``confidence_level != 3``). Palavras nuas (só o
+    caractere) e dominadas contam como conhecidas — nos dois casos não há ajuda
+    a ser exibida no render.
 
     O campo ``word`` de cada match indica o nº de desconhecidas da frase
     (ex.: "0" ou "1") e é usado na coluna Palavra da GUI.
@@ -292,11 +294,14 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
         else:
             print(msg, flush=True)
 
+    # Uma carga só para a varredura inteira (são ~130k linhas).
+    mastered = word_vocab.mastered_words()
+    _log(f"📚 {len(mastered)} palavra(s) dominada(s) contam como conhecidas.")
+
     results: List[dict] = []
     for rec in _scan_bases(log_cb=log_cb):
         pairs = parse_pinyin_translations(rec["translations_json"])
-        # conta palavras desconhecidas: têm pinyin E tradução
-        n_unknown = sum(1 for _, py, tr in pairs if py.strip() and tr.strip())
+        n_unknown = word_vocab.count_learnable(pairs, mastered)
         if n_unknown > max_unknown:
             continue
         rec["pinyin"] = ""
