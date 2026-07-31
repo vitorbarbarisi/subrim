@@ -221,6 +221,10 @@ class App(tk.Tk):
 
         # Collections tab state
         self._col_matches: list = []
+        # Modo da última busca: "word" (por palavra), "i+1" (busca "0") ou
+        # "all" (busca "1"). Define como o status dos resultados é formatado —
+        # antes isso era inferido dos dados, o que confundia os modos.
+        self._col_mode = "word"
         self._col_sort_col = None
         self._col_sort_reverse = False
         self._col_index = 0
@@ -859,7 +863,8 @@ class App(tk.Tk):
         self._col_filter_btn = ttk.Button(top, text="⚙ Filtro",
                                           command=self._col_open_filter_dialog)
         self._col_filter_btn.pack(side=tk.LEFT, padx=(6, 0))
-        self._col_status = tk.StringVar(value="Digite uma ou mais palavras (ex.: 著,當,與) e busque no warehouse")
+        self._col_status = tk.StringVar(
+            value="Palavras (ex.: 著,當,與)  ·  0 = frases i+1  ·  1 = todas as frases")
         ttk.Label(top, textvariable=self._col_status, foreground="#888").pack(side=tk.LEFT, padx=12)
 
         pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
@@ -988,8 +993,15 @@ class App(tk.Tk):
         for c, base in self._col_headers.items():
             self._col_tree.heading(c, text=base)
 
-        # Modo especial "0": frases com 0 ou 1 palavra desconhecida (i+1 input).
-        comprehensible_mode = words == ["0"]
+        # Modos especiais por número (buscas de um único termo):
+        #   "0" → frases i+1 (0 ou 1 palavra desconhecida)
+        #   "1" → TODAS as frases disponíveis (sem filtro de palavra)
+        if words == ["0"]:
+            self._col_mode = "i+1"
+        elif words == ["1"]:
+            self._col_mode = "all"
+        else:
+            self._col_mode = "word"
 
         def _search_log(msg: str):
             tag = "warning" if msg.startswith("⚠️") else "info"
@@ -1000,11 +1012,19 @@ class App(tk.Tk):
                 matches = [m for m in matches if m.get("asset") in asset_filter]
             return matches
 
-        if comprehensible_mode:
+        if self._col_mode == "i+1":
             self._log_line("🔎 Buscando frases i+1 (≤1 palavra desconhecida)…", "cmd")
 
             def _work():
                 matches = _apply_filter(cb.search_comprehensible(log_cb=_search_log, max_unknown=1))
+                self.after(0, lambda: self._col_show_results(matches))
+        elif self._col_mode == "all":
+            scope = (f"{len(asset_filter)} asset(s) do filtro" if asset_filter
+                     else "todos os assets")
+            self._log_line(f"🔎 Buscando TODAS as frases disponíveis ({scope})…", "cmd")
+
+            def _work():
+                matches = _apply_filter(cb.search_all(log_cb=_search_log))
                 self.after(0, lambda: self._col_show_results(matches))
         else:
             self._log_line(f"🔎 Buscando coleção: {', '.join(words)}", "cmd")
@@ -1025,14 +1045,15 @@ class App(tk.Tk):
             self._col_tree.insert("", tk.END, iid=str(i),
                                   values=(m.get("word", ""), m["asset"], f"{m['avg_time']:.1f}s", frase[:60]))
         n = len(matches)
-        words_set = {m.get("word", "") for m in matches}
-        # modo i+1: palavras são "0"/"1" (contagem de desconhecidas)
-        if words_set <= {"0", "1"}:
+        if self._col_mode == "i+1":
+            # word carrega a contagem de desconhecidas da frase ("0" ou "1")
             n0 = sum(1 for m in matches if m.get("word") == "0")
-            n1 = n - n0
-            status = f"{n} frase(s) — {n0} sem desconhecidas, {n1} com 1 desconhecida"
+            status = f"{n} frase(s) — {n0} sem desconhecidas, {n - n0} com 1 desconhecida"
+        elif self._col_mode == "all":
+            n_assets = len({m.get("asset", "") for m in matches})
+            status = f"{n} frase(s) (todas) em {n_assets} asset(s)"
         else:
-            n_words = len(words_set)
+            n_words = len({m.get("word", "") for m in matches})
             status = f"{n} frase(s) em {n_words} palavra(s)"
         self._col_status.set(status if n else "Nenhuma frase encontrada")
         self._col_save_btn.config(state=tk.NORMAL if n else tk.DISABLED)

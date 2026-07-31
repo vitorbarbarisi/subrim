@@ -217,6 +217,64 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
     return results
 
 
+def _scan_bases(log_cb: Optional[Callable[[str], None]] = None):
+    """Gera um registro por linha válida de cada ``*_base.txt`` com fonte utilizável.
+
+    Centraliza o contrato de leitura do base (colunas, timestamps, resolução da
+    fonte de frames) compartilhado pelas buscas que varrem TODO o warehouse.
+    Cada registro traz apenas os campos comuns; o chamador acrescenta ``word`` e
+    ``pinyin`` conforme o modo de busca.
+
+    Consuma o gerador até o fim: o aviso de bases sem fonte sai no encerramento.
+    """
+    def _log(msg: str) -> None:
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg, flush=True)
+
+    if not WAREHOUSE.exists():
+        return
+
+    skipped_no_src: List[str] = []
+    for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
+        asset = base_file.stem.replace("_base", "")
+        kind, src = _asset_source(base_file)
+        if kind is None:
+            skipped_no_src.append(asset)
+            continue
+        video_path = str(src) if kind == "video" else ""
+
+        try:
+            with open(base_file, "r", encoding="utf-8") as f:
+                for line_num, line in enumerate(f, 1):
+                    cols = line.rstrip("\r\n").split("\t")
+                    if len(cols) < 6:
+                        continue
+                    try:
+                        begin = float(cols[1].replace("s", ""))
+                        end   = float(cols[2].replace("s", ""))
+                    except ValueError:
+                        continue
+
+                    yield {
+                        "asset":             asset,
+                        "video_path":        video_path,
+                        "line_num":          line_num,
+                        "begin":             begin,
+                        "end":               end,
+                        "avg_time":          (begin + end) / 2,
+                        "chinese":           cols[3],
+                        "translations_json": cols[4],
+                        "portuguese":        cols[5],
+                    }
+        except Exception as e:  # noqa: BLE001
+            _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
+
+    if skipped_no_src:
+        _log(f"⚠️  {len(skipped_no_src)} base(s) ignorada(s) por falta de vídeo e de cache de frames.")
+
+
 def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
                           max_unknown: int = 1) -> List[dict]:
     """Busca frases com no máximo ``max_unknown`` palavras desconhecidas.
@@ -235,60 +293,46 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
             print(msg, flush=True)
 
     results: List[dict] = []
-    skipped_no_src: List[str] = []
-    if not WAREHOUSE.exists():
-        return results
-
-    for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
-        asset = base_file.stem.replace("_base", "")
-        kind, src = _asset_source(base_file)
-        if kind is None:
-            skipped_no_src.append(asset)
+    for rec in _scan_bases(log_cb=log_cb):
+        pairs = parse_pinyin_translations(rec["translations_json"])
+        # conta palavras desconhecidas: têm pinyin E tradução
+        n_unknown = sum(1 for _, py, tr in pairs if py.strip() and tr.strip())
+        if n_unknown > max_unknown:
             continue
-        video_path = str(src) if kind == "video" else ""
+        rec["pinyin"] = ""
+        rec["word"] = str(n_unknown)   # "0" ou "1"
+        results.append(rec)
 
-        try:
-            with open(base_file, "r", encoding="utf-8") as f:
-                for line_num, line in enumerate(f, 1):
-                    line = line.rstrip("\n")
-                    cols = line.split("\t")
-                    if len(cols) < 6:
-                        continue
-
-                    word_array = cols[4]
-                    pairs = parse_pinyin_translations(word_array)
-                    # conta palavras desconhecidas: têm pinyin E tradução
-                    n_unknown = sum(
-                        1 for _, py, tr in pairs if py.strip() and tr.strip()
-                    )
-                    if n_unknown > max_unknown:
-                        continue
-
-                    try:
-                        begin = float(cols[1].replace("s", ""))
-                        end   = float(cols[2].replace("s", ""))
-                    except ValueError:
-                        continue
-
-                    results.append({
-                        "asset":            asset,
-                        "video_path":       str(video_path),
-                        "line_num":         line_num,
-                        "begin":            begin,
-                        "end":              end,
-                        "avg_time":         (begin + end) / 2,
-                        "chinese":          cols[3],
-                        "translations_json": word_array,
-                        "portuguese":       cols[5],
-                        "pinyin":           "",
-                        "word":             str(n_unknown),  # "0" ou "1"
-                    })
-        except Exception as e:  # noqa: BLE001
-            _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
-
-    if skipped_no_src:
-        _log(f"⚠️  {len(skipped_no_src)} base(s) ignorada(s) por falta de vídeo e de cache de frames.")
     _log(f"✓ i+1: {len(results)} frase(s) com ≤{max_unknown} palavra(s) desconhecida(s).")
+    return results
+
+
+def search_all(log_cb: Optional[Callable[[str], None]] = None) -> List[dict]:
+    """Retorna TODAS as frases das bases com fonte utilizável (sem filtrar por palavra).
+
+    Modo especial da GUI (busca ``"1"``): mostra tudo o que está disponível para
+    virar imagem. O filtro de assets é aplicado pelo chamador.
+
+    Não faz parsing de pinyin — desnecessário aqui, e evita o custo de percorrer
+    o array de palavras de cada frase.
+
+    O campo ``word`` recebe ``"1"`` (o termo que ativa o modo), usado na coluna
+    Palavra e no agrupamento ao salvar a coleção.
+    """
+    def _log(msg: str) -> None:
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg, flush=True)
+
+    results: List[dict] = []
+    for rec in _scan_bases(log_cb=log_cb):
+        rec["pinyin"] = ""
+        rec["word"] = "1"
+        results.append(rec)
+
+    n_assets = len({r["asset"] for r in results})
+    _log(f"✓ todas: {len(results)} frase(s) disponíveis em {n_assets} asset(s).")
     return results
 
 
