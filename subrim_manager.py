@@ -993,6 +993,11 @@ class App(tk.Tk):
             w.bind("<Button-1>", lambda _: self._nota_frame.focus_set())
         self._nota_frame.bind("<FocusIn>", self._nota_focus_in)
         self._nota_frame.bind("<FocusOut>", self._nota_focus_out)
+        # Tab/Shift+Tab alternam entre a lista e a nota. São só dois destinos,
+        # então os dois sentidos levam ao outro widget; o "break" impede o
+        # traversal padrão do Tk de sair para os botões da barra.
+        self._nota_bind_tab(self._col_tree, self._nota_frame)
+        self._nota_bind_tab(self._nota_frame, self._col_tree)
         self._nota_frame.bind("<Up>",    lambda _: self._nota_bump(1)  or "break")
         self._nota_frame.bind("<Down>",  lambda _: self._nota_bump(-1) or "break")
         self._nota_frame.bind("<plus>",  lambda _: self._nota_bump(1)  or "break")
@@ -1074,13 +1079,21 @@ class App(tk.Tk):
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _nota_persist(self, match: dict, nota):
-        """Atualiza o match em memória e enfileira a gravação no base."""
+    def _nota_enqueue(self, match: dict, nota) -> bool:
+        """Atualiza o match em memória e enfileira a gravação. Não toca na tabela.
+
+        Devolve True se houve mudança (permite pular quem já tem a nota).
+        """
         if match.get("nota") == nota:
-            return
+            return False
         match["nota"] = nota
         self._nota_q.put((match["asset"], match["line_num"], nota))
-        # A linha da tabela reflete a nota na hora.
+        return True
+
+    def _nota_persist(self, match: dict, nota):
+        """Como ``_nota_enqueue``, mas reflete também na linha selecionada."""
+        if not self._nota_enqueue(match, nota):
+            return
         iid = str(self._col_index)
         if self._col_tree.exists(iid):
             vals = list(self._col_tree.item(iid, "values"))
@@ -1130,6 +1143,22 @@ class App(tk.Tk):
         novo = cb.clamp_nota(int(self._nota_typing))
         self._nota_persist(m, novo)
         self._nota_show(novo)
+
+    def _nota_bind_tab(self, origem, destino):
+        """Tab e Shift+Tab em ``origem`` levam o foco para ``destino``.
+
+        ``<ISO_Left_Tab>`` é o keysym do Shift+Tab em alguns builds do Tk; nem
+        todo build o aceita, daí o try.
+        """
+        def _go(_=None):
+            destino.focus_set()
+            return "break"
+
+        for seq in ("<Tab>", "<Shift-Tab>", "<ISO_Left_Tab>"):
+            try:
+                origem.bind(seq, _go)
+            except tk.TclError:
+                pass   # keysym inexistente neste build
 
     def _nota_focus_in(self, _=None):
         self._nota_frame.config(highlightbackground="#7048e8", highlightcolor="#7048e8")
@@ -1342,6 +1371,19 @@ class App(tk.Tk):
         if not sel:
             return
         to_delete = {int(iid) for iid in sel}
+
+        # Tirar a frase da lista é o gesto de reprová-la: grava nota 0 no base.
+        # A fila coalesce e agrupa por asset, então excluir 50 de uma vez ainda
+        # é uma reescrita por arquivo.
+        zeradas = 0
+        for i in to_delete:
+            if 0 <= i < len(self._col_matches):
+                if self._nota_enqueue(self._col_matches[i], 0):
+                    zeradas += 1
+        if zeradas:
+            self._log_line(f"🗑️  {zeradas} frase(s) removida(s) da lista — nota 0 gravada.",
+                           "info")
+
         new_matches = [m for i, m in enumerate(self._col_matches) if i not in to_delete]
 
         # find new selection: first surviving item after the deleted range
