@@ -11,13 +11,14 @@ A coleção é salva em ``warehouse/collections/<palavra>/`` com duas resoluçõ
 ``original/`` (resolução do vídeo) e ``r36s/`` (640x480, legenda maior).
 """
 
+import os
 import re
 import shutil
 import tempfile
 import unicodedata
 from collections import Counter
 from pathlib import Path
-from typing import Callable, List, Optional
+from typing import Callable, Dict, List, Optional
 
 import cv2
 
@@ -80,6 +81,138 @@ def collection_folder_name(word: str, matches: List[dict]) -> str:
         return safe_word
     most_common = Counter(suffixes).most_common(1)[0][0]
     return f"{safe_word}_{most_common}"
+
+
+# ── Nota (coluna 6 do base, opcional) ───────────────────────────────────────────
+# O base tem 6 colunas (0=index 1=begin 2=end 3=zht 4=pares 5=pt). A nota é uma
+# 7ª coluna gravada APENAS nas linhas que têm nota — linha sem nota continua com
+# 6 colunas. Isso evita um campo vazio no fim, que metade dos leitores do repo
+# não enxerga (fazem .strip() antes do split) e que vários escritores apagariam.
+NOTA_MIN = 0
+NOTA_MAX = 10
+NOTA_DEFAULT = 5
+NOTA_COL = 6
+
+
+def parse_nota(raw: str) -> Optional[int]:
+    """Nota da coluna 6 como int em 0..10, ou ``None`` se ausente/inválida."""
+    if raw is None:
+        return None
+    raw = raw.strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        return None
+    if NOTA_MIN <= value <= NOTA_MAX:
+        return value
+    return None
+
+
+def clamp_nota(value: int) -> int:
+    """Limita a nota à faixa válida."""
+    return max(NOTA_MIN, min(NOTA_MAX, int(value)))
+
+
+def base_path_for(asset: str) -> Path:
+    """Caminho do base do asset no warehouse."""
+    return WAREHOUSE / f"{asset}_base.txt"
+
+
+def _split_terminator(line: bytes):
+    """Separa a linha do seu terminador, preservando qual terminador era."""
+    for term in (b"\r\n", b"\n", b"\r"):
+        if line.endswith(term):
+            return line[:-len(term)], term
+    return line, b""
+
+
+def _backup_once(path: Path) -> None:
+    """Cópia pristina antes da PRIMEIRA escrita neste base.
+
+    O warehouse não está no git e 155 dos 165 episódios já tiveram o mp4
+    apagado, então não há de onde reconstruir. Um .bak por arquivo é barato e é
+    a única rede de segurança.
+    """
+    bak = path.with_suffix(".bak")   # amor100_base.txt → amor100_base.bak
+    if bak.exists():
+        return
+    try:
+        shutil.copy2(path, bak)
+    except Exception as e:  # noqa: BLE001 - backup é best-effort, não bloqueia
+        print(f"⚠️  não foi possível criar backup {bak.name}: {e}", flush=True)
+
+
+def set_notes(asset: str, notes: Dict[int, Optional[int]]) -> int:
+    """Grava notas no base do asset. ``notes`` = ``{line_num: nota|None}``.
+
+    Aplica TODAS as edições numa única reescrita e devolve quantas linhas
+    mudaram. ``None`` remove a nota da linha.
+
+    Invariante crítica: contagem de linhas, ordem e terminadores saem idênticos.
+    ``line_num`` é o índice FÍSICO da linha e é a única chave do cache de frames
+    (``warehouse/frames/<asset>/lineNNNN.jpg``); alterá-la remapearia em silêncio
+    os frames dos episódios cujo mp4 já foi apagado. Por isso o trabalho é feito
+    em bytes, substituindo apenas o elemento alvo da lista de linhas — as demais
+    linhas nunca são decodificadas nem reconstruídas.
+
+    A troca final é atômica (``os.replace``), então uma busca lendo em paralelo
+    enxerga o arquivo antigo ou o novo, nunca um pela metade.
+    """
+    path = base_path_for(asset)
+    if not notes or not path.exists():
+        return 0
+
+    # bytes.splitlines só quebra em \r, \n e \r\n — ao contrário de str, que
+    # também quebraria em \v, \f,  … e mudaria a contagem de linhas.
+    lines = path.read_bytes().splitlines(keepends=True)
+    total = len(lines)
+    changed = 0
+
+    for line_num, nota in notes.items():
+        if not (1 <= line_num <= total):
+            print(f"⚠️  nota ignorada: linha {line_num} fora de {path.name} "
+                  f"({total} linhas)", flush=True)
+            continue
+
+        original = lines[line_num - 1]
+        body, term = _split_terminator(original)
+        cols = body.split(b"\t")
+        if len(cols) < 6:
+            print(f"⚠️  nota ignorada: linha {line_num} de {path.name} tem "
+                  f"{len(cols)} coluna(s)", flush=True)
+            continue
+
+        if nota is None:
+            if len(cols) <= NOTA_COL:
+                continue                      # já não tinha nota
+            cols = cols[:NOTA_COL]            # remove a coluna
+        else:
+            value = str(clamp_nota(nota)).encode("ascii")
+            if len(cols) > NOTA_COL:
+                if cols[NOTA_COL] == value:
+                    continue                  # nada a fazer
+                cols[NOTA_COL] = value
+            else:
+                cols = cols + [b""] * (NOTA_COL - len(cols)) + [value]
+
+        new_line = b"\t".join(cols) + term
+        if new_line != original:
+            lines[line_num - 1] = new_line
+            changed += 1
+
+    if not changed:
+        return 0
+
+    _backup_once(path)
+
+    # O temp fica no mesmo diretório (os.replace exige mesmo filesystem) e o
+    # nome NÃO casa com o glob "*_base.txt" das buscas.
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_bytes(b"".join(lines))
+    os.replace(tmp, path)
+    return changed
 
 
 def _corrected_timestamp(timestamp_seconds: float) -> float:
@@ -196,6 +329,7 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
                         "portuguese": cols[5],
                         "pinyin": matched[1],
                         "word": word,
+                        "nota": parse_nota(cols[NOTA_COL]) if len(cols) > NOTA_COL else None,
                     })
         except Exception as e:  # noqa: BLE001 - varredura tolerante a arquivos ruins
             _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
@@ -268,6 +402,7 @@ def _scan_bases(log_cb: Optional[Callable[[str], None]] = None):
                         "chinese":           cols[3],
                         "translations_json": cols[4],
                         "portuguese":        cols[5],
+                        "nota": parse_nota(cols[NOTA_COL]) if len(cols) > NOTA_COL else None,
                     }
         except Exception as e:  # noqa: BLE001
             _log(f"⚠️  Erro ao ler {base_file.name}: {e}")

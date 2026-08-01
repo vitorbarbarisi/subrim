@@ -258,6 +258,11 @@ class App(tk.Tk):
         self._col_render_token = 0
         self._col_photo = None
         self._col_saving = False
+        # Nota (0-10) da frase selecionada. A gravação no base é serializada numa
+        # thread única, para que navegar em rajada vire poucas reescritas.
+        self._nota_q: queue.Queue = queue.Queue()
+        self._nota_typing = ""            # buffer de dígitos ("1" → "10")
+        self._nota_typing_at = 0.0        # time.monotonic() do último dígito
         # Cronômetro de leitura (tempo por caractere)
         self._timing_active = False
         self._timing_records: list = []   # (n_caracteres, segundos) por imagem lida
@@ -275,6 +280,7 @@ class App(tk.Tk):
         self._build_ui()
         self._schedule_refresh()
         self._poll_log()
+        self._nota_start_writer()
 
     def _setup_style(self):
         s = ttk.Style(self)
@@ -905,10 +911,10 @@ class App(tk.Tk):
         # Left: matches list
         left = ttk.Frame(pw)
         pw.add(left, weight=2)
-        cols = ("palavra", "asset", "time", "frase")
+        cols = ("palavra", "asset", "time", "frase", "nota")
         t = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
         self._col_headers = {"palavra": "Palavra", "asset": "Asset",
-                             "time": "Tempo", "frase": "Frase"}
+                             "time": "Tempo", "frase": "Frase", "nota": "Nota"}
         t.heading("palavra", text="Palavra", anchor=tk.W,
                   command=lambda: self._col_sort("palavra"))
         t.heading("asset", text="Asset",  anchor=tk.W,
@@ -917,10 +923,14 @@ class App(tk.Tk):
                   command=lambda: self._col_sort("time"))
         t.heading("frase", text="Frase",  anchor=tk.W,
                   command=lambda: self._col_sort("frase"))
+        t.heading("nota",  text="Nota",   anchor=tk.CENTER,
+                  command=lambda: self._col_sort("nota"))
         t.column("palavra", width=60,  anchor=tk.W,      stretch=False)
         t.column("asset", width=100, anchor=tk.W,      stretch=False)
         t.column("time",  width=64,  anchor=tk.CENTER, stretch=False)
+        # "frase" é a única que estica, então "nota" fica ancorada à direita.
         t.column("frase", width=220, anchor=tk.W,      stretch=True)
+        t.column("nota",  width=48,  anchor=tk.CENTER, stretch=False)
         vsb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=t.yview)
         t.configure(yscrollcommand=vsb.set)
         t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -949,9 +959,47 @@ class App(tk.Tk):
         self._timing_info = tk.StringVar(value="")
         ttk.Label(nav, textvariable=self._timing_info, foreground="#888").pack(side=tk.RIGHT, padx=8)
 
-        self._col_preview = ttk.Label(right, text="(preview r36s aparece aqui)",
+        # Imagem à esquerda, stepper da nota à direita.
+        mid = ttk.Frame(right)
+        mid.pack(fill=tk.BOTH, expand=True, pady=6)
+
+        self._col_preview = ttk.Label(mid, text="(preview r36s aparece aqui)",
                                       anchor=tk.CENTER, foreground="#888")
-        self._col_preview.pack(fill=tk.BOTH, expand=True, pady=6)
+        self._col_preview.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        nota_box = ttk.Frame(mid)
+        nota_box.pack(side=tk.RIGHT, fill=tk.Y, padx=(8, 0))
+        ttk.Label(nota_box, text="Nota:", foreground="#888").pack(anchor=tk.CENTER)
+
+        # Caixa focável: recebe as teclas só quando selecionada, para não roubar
+        # as setas da tabela (que navegam entre as frases).
+        self._nota_frame = tk.Frame(nota_box, highlightthickness=2,
+                                    highlightbackground="#c8c8c8",
+                                    highlightcolor="#c8c8c8",
+                                    takefocus=True, bg=self.cget("bg"))
+        self._nota_frame.pack(pady=(4, 6))
+        self._nota_var = tk.StringVar(value="—")
+        tk.Label(self._nota_frame, textvariable=self._nota_var, font=("", 26),
+                 width=2, anchor=tk.CENTER, bg=self.cget("bg")).pack(padx=10, pady=6)
+
+        btns = ttk.Frame(nota_box)
+        btns.pack()
+        ttk.Button(btns, text="∨", width=2,
+                   command=lambda: self._nota_bump(-1)).pack(side=tk.LEFT, padx=2)
+        ttk.Button(btns, text="∧", width=2,
+                   command=lambda: self._nota_bump(1)).pack(side=tk.LEFT, padx=2)
+
+        for w in (self._nota_frame, *self._nota_frame.winfo_children()):
+            w.bind("<Button-1>", lambda _: self._nota_frame.focus_set())
+        self._nota_frame.bind("<FocusIn>", self._nota_focus_in)
+        self._nota_frame.bind("<FocusOut>", self._nota_focus_out)
+        self._nota_frame.bind("<Up>",    lambda _: self._nota_bump(1)  or "break")
+        self._nota_frame.bind("<Down>",  lambda _: self._nota_bump(-1) or "break")
+        self._nota_frame.bind("<plus>",  lambda _: self._nota_bump(1)  or "break")
+        self._nota_frame.bind("<minus>", lambda _: self._nota_bump(-1) or "break")
+        for d in "0123456789":
+            self._nota_frame.bind(
+                f"<Key-{d}>", lambda _, d=d: self._nota_type_digit(d) or "break")
 
         # Caption: frase em chinês e tradução em português (selecionável para copiar)
         self._col_caption = tk.Text(right, height=4, font=("", 11), wrap=tk.WORD,
@@ -985,6 +1033,110 @@ class App(tk.Tk):
         if not WAREHOUSE.exists():
             return []
         return sorted(b.stem.replace("_base", "") for b in WAREHOUSE.glob("*_base.txt"))
+
+    # ── Nota: persistência serializada ──────────────────────────────────────────
+    def _nota_start_writer(self):
+        """Thread única que grava as notas no base, coalescendo rajadas.
+
+        Selecionar uma frase já grava, então navegar com as setas dispara muita
+        escrita. Após o primeiro item a thread espera uma janela curta e drena
+        tudo o que chegou, colapsando por (asset, linha) e agrupando por asset —
+        assim passar por 50 linhas do mesmo episódio vira UMA reescrita. Também
+        neutraliza o estado intermediário de digitar "1" e depois "0" (=10).
+        """
+        def _work():
+            import collection_builder as cb
+            while True:
+                try:
+                    item = self._nota_q.get()
+                    time.sleep(0.2)   # janela de coalescência
+                    pending = {}
+                    while True:
+                        asset, line_num, nota = item
+                        pending[(asset, line_num)] = nota
+                        try:
+                            item = self._nota_q.get_nowait()
+                        except queue.Empty:
+                            break
+
+                    by_asset: dict = {}
+                    for (asset, line_num), nota in pending.items():
+                        by_asset.setdefault(asset, {})[line_num] = nota
+
+                    for asset, notes in by_asset.items():
+                        try:
+                            cb.set_notes(asset, notes)
+                        except Exception as e:  # noqa: BLE001
+                            self._log_q.put(
+                                (f"Erro ao gravar nota em {asset}: {e}", "error"))
+                except Exception as e:  # noqa: BLE001 - a thread nunca deve morrer
+                    self._log_q.put((f"Erro na fila de notas: {e}", "error"))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _nota_persist(self, match: dict, nota):
+        """Atualiza o match em memória e enfileira a gravação no base."""
+        if match.get("nota") == nota:
+            return
+        match["nota"] = nota
+        self._nota_q.put((match["asset"], match["line_num"], nota))
+        # A linha da tabela reflete a nota na hora.
+        iid = str(self._col_index)
+        if self._col_tree.exists(iid):
+            vals = list(self._col_tree.item(iid, "values"))
+            if vals:
+                vals[-1] = "" if nota is None else str(nota)
+                self._col_tree.item(iid, values=vals)
+
+    def _nota_current_match(self):
+        """Match selecionado, ou None se não há seleção válida."""
+        if not self._col_matches:
+            return None
+        if not (0 <= self._col_index < len(self._col_matches)):
+            return None
+        return self._col_matches[self._col_index]
+
+    def _nota_show(self, nota):
+        """Atualiza só o visor do stepper."""
+        self._nota_var.set("—" if nota is None else str(nota))
+
+    def _nota_bump(self, delta: int):
+        """Incrementa/decrementa a nota da frase selecionada e persiste."""
+        m = self._nota_current_match()
+        if m is None:
+            return
+        import collection_builder as cb
+        base = m.get("nota")
+        if base is None:
+            base = cb.NOTA_DEFAULT
+        novo = cb.clamp_nota(base + delta)
+        self._nota_typing = ""
+        self._nota_persist(m, novo)
+        self._nota_show(novo)
+
+    def _nota_type_digit(self, digit: str):
+        """Dígito digitado: define a nota direto; "1" seguido de "0" vira 10."""
+        m = self._nota_current_match()
+        if m is None:
+            return
+        import collection_builder as cb
+        agora = time.monotonic()
+        # Só continua o número anterior se o dígito veio logo em seguida.
+        if self._nota_typing == "1" and digit == "0" and (agora - self._nota_typing_at) < 1.0:
+            self._nota_typing = "10"
+        else:
+            self._nota_typing = digit
+        self._nota_typing_at = agora
+        novo = cb.clamp_nota(int(self._nota_typing))
+        self._nota_persist(m, novo)
+        self._nota_show(novo)
+
+    def _nota_focus_in(self, _=None):
+        self._nota_frame.config(highlightbackground="#7048e8", highlightcolor="#7048e8")
+
+    def _nota_focus_out(self, _=None):
+        self._nota_typing = ""
+        self._nota_frame.config(highlightbackground="#c8c8c8", highlightcolor="#c8c8c8")
 
     def _col_reload_vocab(self):
         """Recarrega da word-api quais palavras estão dominadas.
@@ -1101,8 +1253,11 @@ class App(tk.Tk):
         self._col_tree.delete(*self._col_tree.get_children())
         for i, m in enumerate(matches):
             frase = (m["chinese"] or "").strip()
+            nota = m.get("nota")
             self._col_tree.insert("", tk.END, iid=str(i),
-                                  values=(m.get("word", ""), m["asset"], f"{m['avg_time']:.1f}s", frase[:60]))
+                                  values=(m.get("word", ""), m["asset"],
+                                          f"{m['avg_time']:.1f}s", frase[:60],
+                                          "" if nota is None else str(nota)))
         n = len(matches)
         if self._col_mode == "i+1":
             # word carrega a contagem de desconhecidas da frase ("0" ou "1")
@@ -1128,6 +1283,8 @@ class App(tk.Tk):
         if n:
             self._col_tree.selection_set("0")
             self._col_tree.focus("0")
+        else:
+            self._nota_show(None)
 
     def _col_on_select(self, _=None):
         sel = self._col_tree.selection()
@@ -1136,7 +1293,24 @@ class App(tk.Tk):
         self._col_index = int(sel[0])
         if self._timing_active:
             self._timing_mark(self._col_index)
+        self._nota_on_select()
         self._col_render_current()
+
+    def _nota_on_select(self):
+        """Mostra a nota da frase selecionada; sem nota, grava a padrão (5).
+
+        Selecionar é o gesto que registra a frase como avaliada. Idempotente:
+        quem já tem nota não é reescrito.
+        """
+        m = self._nota_current_match()
+        if m is None:
+            self._nota_show(None)
+            return
+        self._nota_typing = ""
+        if m.get("nota") is None:
+            import collection_builder as cb
+            self._nota_persist(m, cb.NOTA_DEFAULT)
+        self._nota_show(m.get("nota"))
 
     def _col_sort(self, col: str):
         """Ordena a lista de resultados pela coluna clicada (toggle asc/desc)."""
@@ -1148,6 +1322,8 @@ class App(tk.Tk):
             "asset":   lambda m: m.get("asset", ""),
             "time":    lambda m: m.get("avg_time", 0.0),
             "frase":   lambda m: (m.get("chinese") or "").strip(),
+            # sem nota vai para o fim na ordem crescente
+            "nota":    lambda m: m.get("nota") if m.get("nota") is not None else -1,
         }
         self._col_matches = sorted(self._col_matches, key=keyfns.get(col, lambda m: ""),
                                    reverse=reverse)

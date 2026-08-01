@@ -368,8 +368,10 @@ def main():
                                 end_time = float(columns[2].replace('s', ''))
                                 avg_time = (begin_time + end_time) / 2
                                 
-                                # Extrai a tradução da última coluna
-                                translation = columns[-1] if len(columns) > 5 else "N/A"
+                                # Tradução = coluna 5 (fixa). Era columns[-1], que
+                                # passou a devolver a Nota (coluna 6) nas linhas
+                                # avaliadas, em silêncio.
+                                translation = columns[5] if len(columns) > 5 else "N/A"
                                 
                                 # Extrai o pinyin da palavra
                                 pinyin = extract_pinyin(word, pairs_column)
