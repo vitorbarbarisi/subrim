@@ -238,6 +238,16 @@ class VideoBurner:
                 self.log(f"Falha no processor.py para {dir_name}", "ERROR")
                 return False
 
+        # O processor sai com 0 também quando PULA o diretório (para não abortar
+        # lotes), então sucesso no exit code não garante que existe um base. Sem
+        # essa checagem o erro só aparecia dois passos depois, como um
+        # "No base.txt file found" do adjust_base_times — mensagem que aponta
+        # para o lugar errado.
+        if not list(directory.glob("*base.txt")):
+            self.log(f"{dir_name} não tem base.txt após o processor — "
+                     f"nada a processar (falta o SRT?). Pulando o diretório.", "ERROR")
+            return False
+
         if not self.run_script("adjust_base_times.py", dir_name):
             self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
             return False
