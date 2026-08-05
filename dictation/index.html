@@ -1,0 +1,400 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ditado</title>
+<style>
+  :root {
+    --bg: #14141a;
+    --fg: #f2f2f5;
+    --dim: #8b8b96;
+    --line: #2c2c36;
+    --accent: #7048e8;
+    --bad: #e24b4a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
+  body {
+    font: 15px/1.4 -apple-system, system-ui, "Segoe UI", Roboto, sans-serif;
+    /* Sem rolagem elástica horizontal na página: o carrossel é quem rola. */
+    overflow-x: hidden;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  header {
+    display: flex; align-items: center; justify-content: space-between;
+    gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line);
+  }
+  #count { font-size: 13px; color: var(--dim); }
+  button {
+    font: inherit; font-size: 13px; color: var(--fg);
+    background: transparent; border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px;
+  }
+  button:disabled { opacity: .4; }
+
+  /* Carrossel: scroll-snap nativo = swipe de graça, sem JS de gesto. */
+  #track {
+    display: flex; overflow-x: auto; overflow-y: hidden;
+    scroll-snap-type: x mandatory;
+    -webkit-overflow-scrolling: touch;
+    scrollbar-width: none;
+    /* Impede que o gesto horizontal vire navegação de histórico no Chrome. */
+    overscroll-behavior-x: contain;
+    touch-action: pan-x;
+  }
+  #track::-webkit-scrollbar { display: none; }
+  .slide {
+    flex: 0 0 100%; min-width: 100%;
+    scroll-snap-align: center; scroll-snap-stop: always;
+    display: flex; align-items: center; justify-content: center;
+    background: #000;
+  }
+  .slide img { display: block; width: 100%; height: auto; }
+  .slide.done { outline: 2px solid var(--accent); outline-offset: -2px; }
+
+  nav {
+    display: flex; align-items: center; justify-content: center; gap: 18px;
+    padding: 6px 0; border-bottom: 1px solid var(--line);
+  }
+  nav button { min-width: 44px; }
+  #pos { font-size: 13px; color: var(--dim); min-width: 74px; text-align: center; }
+
+  form { padding: 10px 12px; }
+  #answer {
+    width: 100%; font: inherit; font-size: 17px; color: var(--fg);
+    background: #1c1c24; border: 1px solid var(--line);
+    border-radius: 10px; padding: 11px 12px;
+  }
+  #answer:focus { outline: none; border-color: var(--accent); }
+  #answer.ok { border-color: var(--accent); background: #1e1a2e; }
+  /* Feedback de erro: animação CSS pura, o compositor cuida — nada de JS por frame. */
+  #answer.bad {
+    border-color: var(--bad); background: #2a1719;
+    animation: shake .28s ease-in-out;
+  }
+  @keyframes shake {
+    0%, 100% { transform: translateX(0); }
+    25% { transform: translateX(-5px); }
+    75% { transform: translateX(5px); }
+  }
+
+  #msg { padding: 0 12px 12px; font-size: 13px; color: var(--dim); min-height: 18px; }
+
+  #boot { padding: 28px 20px; text-align: center; color: var(--dim); }
+  #boot p { margin: 0 0 14px; }
+  #boot input[type=file] { display: none; }
+  #boot label {
+    display: inline-block; font-size: 14px; color: var(--fg);
+    border: 1px solid var(--line); border-radius: 8px; padding: 9px 14px;
+  }
+  .hide { display: none !important; }
+</style>
+</head>
+<body>
+
+<div id="boot">
+  <p id="boot-msg">Carregando…</p>
+  <label for="pick">Carregar index.json</label>
+  <input id="pick" type="file" accept=".json,application/json">
+  <p style="margin-top:14px; font-size:12px;">Só na primeira vez neste aparelho.</p>
+</div>
+
+<div id="app" class="hide">
+  <header>
+    <span id="count">—</span>
+    <button id="export" type="button">Exportar</button>
+  </header>
+
+  <div id="track"></div>
+
+  <nav>
+    <button id="prev" type="button" aria-label="Anterior">‹</button>
+    <span id="pos">—</span>
+    <button id="next" type="button" aria-label="Próxima">›</button>
+  </nav>
+
+  <form id="form" autocomplete="off">
+    <input id="answer" type="text" placeholder="Digite a frase"
+           autocomplete="off" autocapitalize="off" autocorrect="off"
+           spellcheck="false" enterkeyhint="done" lang="zh">
+  </form>
+  <div id="msg"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  var SRC = "source/";
+  var JSON_URL = SRC + "index.json";
+
+  var el = {
+    boot: document.getElementById("boot"),
+    bootMsg: document.getElementById("boot-msg"),
+    pick: document.getElementById("pick"),
+    app: document.getElementById("app"),
+    track: document.getElementById("track"),
+    count: document.getElementById("count"),
+    pos: document.getElementById("pos"),
+    prev: document.getElementById("prev"),
+    next: document.getElementById("next"),
+    form: document.getElementById("form"),
+    answer: document.getElementById("answer"),
+    msg: document.getElementById("msg"),
+    exportBtn: document.getElementById("export")
+  };
+
+  var items = [];      // [{index, source, sentence, done}]
+  var at = 0;          // posição atual NO ARRAY (não é o campo index)
+  var storeKey = "";   // chave de progresso, isolada por coleção
+
+  // ── Persistência ────────────────────────────────────────────────────────────
+  // Toda página file:// compartilha o mesmo localStorage, então duas coleções em
+  // duas pastas colidiriam. A chave carrega uma impressão digital dos dados.
+  function fingerprint(list) {
+    var s = list.length + "|";
+    for (var i = 0; i < list.length; i++) s += list[i].source + " ";
+    var h = 5381;
+    for (var j = 0; j < s.length; j++) h = ((h * 33) ^ s.charCodeAt(j)) >>> 0;
+    return h.toString(36);
+  }
+
+  function ls(k, v) {                       // get/set tolerante (modo privado etc.)
+    try {
+      if (v === undefined) return localStorage.getItem(k);
+      localStorage.setItem(k, v);
+    } catch (e) { return null; }
+  }
+
+  // O progresso é indexado pelo NOME DO ARQUIVO, não pela posição: regerar a
+  // coleção em outra ordem não embaralha o que já foi feito.
+  function loadProgress() {
+    var raw = ls(storeKey);
+    if (!raw) return;
+    var done;
+    try { done = JSON.parse(raw); } catch (e) { return; }
+    if (!done) return;
+    for (var i = 0; i < items.length; i++) {
+      if (done[items[i].source]) items[i].done = true;
+    }
+  }
+
+  function saveProgress() {
+    var done = {};
+    for (var i = 0; i < items.length; i++) {
+      if (items[i].done) done[items[i].source] = 1;
+    }
+    ls(storeKey, JSON.stringify(done));
+  }
+
+  // ── Render ──────────────────────────────────────────────────────────────────
+  function build() {
+    // Substitui, não acumula: start() pode rodar de novo (ex.: o usuário escolhe
+    // um index.json depois de a página já ter carregado um), e sem isso os
+    // slides antigos ficariam pendurados junto dos novos.
+    el.track.textContent = "";
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < items.length; i++) {
+      var d = document.createElement("div");
+      d.className = "slide" + (items[i].done ? " done" : "");
+      var img = document.createElement("img");
+      img.src = SRC + items[i].source;
+      img.alt = "";
+      img.loading = "lazy";
+      img.decoding = "async";
+      d.appendChild(img);
+      frag.appendChild(d);
+    }
+    el.track.appendChild(frag);
+  }
+
+  function refresh() {
+    var n = 0;
+    for (var i = 0; i < items.length; i++) if (items[i].done) n++;
+    el.count.textContent = n + "/" + items.length + " feitas";
+    el.pos.textContent = (at + 1) + " / " + items.length;
+    el.prev.disabled = at <= 0;
+    el.next.disabled = at >= items.length - 1;
+    var slides = el.track.children;
+    for (var k = 0; k < slides.length; k++) {
+      slides[k].classList.toggle("done", !!items[k].done);
+    }
+  }
+
+  function goTo(i) {
+    if (i < 0 || i >= items.length) return;
+    at = i;
+    var slide = el.track.children[i];
+    if (slide) {
+      // Atribuição direta de scrollLeft, de propósito:
+      //  - scrollIntoView rolaria a PÁGINA junto, tirando o campo da tela;
+      //  - scrollTo({behavior:"smooth"}) foi observado como no-op em algum
+      //    ambiente, o que deixava o rótulo andar sem a imagem andar.
+      // A atribuição sempre chega ao destino; o scroll-snap dá o acabamento.
+      el.track.scrollLeft = slide.offsetLeft;
+    }
+    refresh();
+  }
+
+  // Enquanto o dedo arrasta, mantém `at` em sincronia com o que está na tela.
+  var scrollTimer = null;
+  el.track.addEventListener("scroll", function () {
+    if (scrollTimer) clearTimeout(scrollTimer);
+    scrollTimer = setTimeout(function () {
+      var w = el.track.clientWidth || 1;
+      var i = Math.round(el.track.scrollLeft / w);
+      if (i !== at && i >= 0 && i < items.length) { at = i; refresh(); }
+    }, 90);
+  }, { passive: true });
+
+  // ── Validação ───────────────────────────────────────────────────────────────
+  function flash(cls, text) {
+    el.answer.classList.remove("bad", "ok");
+    void el.answer.offsetWidth;              // reinicia a animação
+    el.answer.classList.add(cls);
+    el.msg.textContent = text || "";
+    setTimeout(function () { el.answer.classList.remove(cls); }, 900);
+  }
+
+  function submit() {
+    var cur = items[at];
+    if (!cur) return;
+    // Comparação literal, como pedido: nada de trim nem normalização.
+    if (el.answer.value === cur.sentence) {
+      if (!cur.done) { cur.done = true; saveProgress(); }
+      el.answer.value = "";
+      flash("ok", "");
+      var nxt = at + 1;                      // próximo índice da lista
+      if (nxt < items.length) goTo(nxt);
+      else { refresh(); el.msg.textContent = "Fim da coleção."; }
+    } else {
+      flash("bad", "");
+    }
+  }
+
+  el.form.addEventListener("submit", function (e) {
+    e.preventDefault();
+    submit();
+  });
+
+  // IME chinês: o primeiro Enter confirma o candidato do teclado. Tratá-lo como
+  // envio validaria texto pela metade — daí o guarda de isComposing.
+  el.answer.addEventListener("keydown", function (e) {
+    if (e.key !== "Enter" || e.isComposing || e.keyCode === 229) return;
+    e.preventDefault();
+    submit();
+  });
+
+  el.prev.addEventListener("click", function () { goTo(at - 1); });
+  el.next.addEventListener("click", function () { goTo(at + 1); });
+  document.addEventListener("keydown", function (e) {
+    if (e.target === el.answer) return;
+    if (e.key === "ArrowLeft") goTo(at - 1);
+    if (e.key === "ArrowRight") goTo(at + 1);
+  });
+
+  // ── Exportar ────────────────────────────────────────────────────────────────
+  el.exportBtn.addEventListener("click", function () {
+    var out = [];
+    for (var i = 0; i < items.length; i++) {
+      out.push({
+        index: items[i].index,
+        source: items[i].source,
+        sentence: items[i].sentence,
+        done: !!items[i].done
+      });
+    }
+    var blob = new Blob([JSON.stringify(out, null, 2)], {
+      type: "application/json;charset=utf-8"
+    });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement("a");
+    a.href = url;
+    a.download = "index.json";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
+  });
+
+  // ── Início ──────────────────────────────────────────────────────────────────
+  function parse(text) {
+    var data = JSON.parse(text);
+    if (!Array.isArray(data)) throw new Error("o index.json deve ser uma lista");
+    var out = [];
+    for (var i = 0; i < data.length; i++) {
+      var e = data[i] || {};
+      if (!e.source) continue;
+      out.push({
+        index: typeof e.index === "number" ? e.index : i + 1,
+        source: String(e.source),
+        sentence: typeof e.sentence === "string" ? e.sentence : "",
+        done: e.done === true
+      });
+    }
+    if (!out.length) throw new Error("nenhuma entrada utilizável no index.json");
+    return out;
+  }
+
+  function start(text, cacheIt) {
+    items = parse(text);
+    storeKey = "subrim.dictation." + fingerprint(items);
+    if (cacheIt) ls("subrim.dictation.data." + fingerprint(items), text);
+    loadProgress();
+    build();
+
+    // Abre na primeira não feita; se todas estiverem feitas, na primeira.
+    var first = 0;
+    for (var i = 0; i < items.length; i++) {
+      if (!items[i].done) { first = i; break; }
+    }
+    el.boot.classList.add("hide");
+    el.app.classList.remove("hide");
+    goTo(first);
+    el.answer.focus();
+  }
+
+  function fail(reason) {
+    el.bootMsg.textContent = reason;
+  }
+
+  // 1) fetch (funciona se servido por HTTP). 2) cache de uma escolha anterior.
+  // 3) o usuário escolhe o arquivo — único caminho possível em file://.
+  function boot() {
+    // Um cache anterior é reaproveitado sem depender de fetch.
+    for (var i = 0; i < localStorage.length; i++) {
+      var k = localStorage.key(i);
+      if (k && k.indexOf("subrim.dictation.data.") === 0) {
+        try { start(ls(k), false); return; } catch (e) { /* cache ruim, segue */ }
+      }
+    }
+    fetch(JSON_URL, { cache: "no-store" })
+      .then(function (r) {
+        if (!r.ok) throw new Error("HTTP " + r.status);
+        return r.text();
+      })
+      .then(function (t) { start(t, true); })
+      .catch(function () {
+        fail("Não deu para ler o index.json sozinho (arquivo local).");
+      });
+  }
+
+  el.pick.addEventListener("change", function () {
+    var f = el.pick.files && el.pick.files[0];
+    if (!f) return;
+    var fr = new FileReader();
+    fr.onload = function () {
+      try { start(String(fr.result), true); }
+      catch (e) { fail("index.json inválido: " + e.message); }
+    };
+    fr.onerror = function () { fail("Falha ao ler o arquivo."); };
+    fr.readAsText(f, "utf-8");
+  });
+
+  try { boot(); } catch (e) { fail("Erro ao iniciar: " + e.message); }
+})();
+</script>
+</body>
+</html>
