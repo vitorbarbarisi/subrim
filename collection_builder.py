@@ -11,6 +11,7 @@ A coleção é salva em ``warehouse/collections/<chave>_<formato>/``, num format
 por vez: ``original`` (resolução do vídeo) ou ``r36s`` (640x480, legenda maior).
 """
 
+import json
 import os
 import re
 import shutil
@@ -66,6 +67,36 @@ def pinyin_to_ascii(pinyin: str) -> str:
     decomposed = unicodedata.normalize("NFD", pinyin)
     no_accents = "".join(c for c in decomposed if unicodedata.category(c) != "Mn")
     return re.sub(r"[^a-z]", "", no_accents.lower())
+
+
+# Só ideogramas CJK. Os ranges são os mesmos que subrim_manager._count_chars usa:
+# U+4E00–9FFF (CJK Unified), U+3400–4DBF (Extensão A), U+F900–FAFF (Compatibilidade).
+#
+# Escapes explícitos DE PROPÓSITO: o _count_chars escreve esse range com literais,
+# e o "豈" dele é o ideograma de COMPATIBILIDADE U+F900, não o 豈 comum U+8C48.
+# Copiar aquela linha à mão normaliza o caractere e quebra o range em silêncio.
+CJK_ONLY_RE = re.compile(r"[^一-鿿㐀-䶿豈-﫿]")
+
+
+def clean_chinese_only(text: str) -> str:
+    """Mantém só os ideogramas CJK da frase.
+
+    Descarta pontuação (``，。？！…「」、·``), espaço, ``♪``, latim, dígitos,
+    cirílico, kana, hangul e o ``U+FFFD`` de mojibake que existe em algumas bases.
+
+    Ex.: ``"有什麼作用？"`` → ``"有什麼作用"``;
+    ``"\\&&♪ -矛盾 \\&&♪ -別這樣"`` → ``"矛盾別這樣"``.
+    """
+    return CJK_ONLY_RE.sub("", text or "")
+
+
+def has_clean_sentence(match: dict) -> bool:
+    """True se a frase do match sobra depois da limpeza.
+
+    Frase que zera (legenda só com ``♪`` ou pontuação) não vira imagem nem
+    entrada no índice — não há nada a ler nela.
+    """
+    return bool(clean_chinese_only(match.get("chinese", "")))
 
 
 def collection_folder_name(word: str, matches: List[dict]) -> str:
@@ -662,6 +693,13 @@ def save_collection(word: str, matches: List[dict], mode: str = "r36s",
     A ordem de ``matches`` é preservada no prefixo numérico do arquivo — é a
     ordem da tabela da GUI. Não reordenar aqui.
 
+    Junto das imagens grava um ``index.json`` para a aplicação JS que roda no
+    celular: uma lista de ``{index, source, sentence, done}``, onde ``sentence``
+    é a frase limpa (só ideogramas) e ``done`` começa sempre ``false``.
+
+    Frases que zeram na limpeza (legenda só com ``♪`` ou pontuação) não geram
+    imagem nem entrada.
+
     Retorna o diretório da coleção.
     """
     if mode not in SAVE_MODES:
@@ -670,8 +708,12 @@ def save_collection(word: str, matches: List[dict], mode: str = "r36s",
     out_dir = COLLECTIONS / f"{collection_folder_name(word, matches)}_{mode}"
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    total = len(matches)
-    for i, match in enumerate(matches, 1):
+    # Filtra ANTES de numerar, para o prefixo (001_, 002_…) ficar contíguo.
+    usable = [m for m in matches if has_clean_sentence(m)]
+
+    entries: List[dict] = []
+    total = len(usable)
+    for i, match in enumerate(usable, 1):
         name = f"{i:03d}_{match['asset']}_line{match['line_num']:04d}.png"
         out_path = out_dir / name
 
@@ -683,7 +725,19 @@ def save_collection(word: str, matches: List[dict], mode: str = "r36s",
         add_subtitles_to_frame(out_path, match["chinese"], match["translations_json"],
                                match["portuguese"], resize=(mode == "r36s"))
 
+        # Só entra no índice o que virou imagem de fato.
+        entries.append({
+            "index": i,
+            "source": name,
+            "sentence": clean_chinese_only(match["chinese"]),
+            "done": False,
+        })
+
         if progress_cb:
             progress_cb(i, total, f"✓ {name}")
+
+    # ensure_ascii=False: sem isso o chinês vira \uXXXX no arquivo.
+    (out_dir / "index.json").write_text(
+        json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return out_dir

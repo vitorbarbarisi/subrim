@@ -1568,13 +1568,39 @@ class App(tk.Tk):
 
         Nota 0 é o que a exclusão da lista grava — o descarte explícito do
         usuário. Frases SEM nota (None, nunca visitadas) não são filtradas.
+
+        Frases que zeram na limpeza de caracteres (só ``♪``/pontuação) também
+        saem: o save não as gera, então contá-las aqui faria o pop-up prometer
+        mais imagens do que ele entrega.
         """
+        cb = self._col_import()
         groups: dict = {}
         for m in self._col_matches:
             if skip_zero and m.get("nota") == 0:
                 continue
+            if cb and not cb.has_clean_sentence(m):
+                continue
             groups.setdefault(m.get("word", ""), []).append(m)
         return [(w, ms) for w, ms in groups.items() if w]
+
+    def _col_save_discarded(self, skip_zero: bool) -> list:
+        """Motivos de descarte, em texto, para o pop-up e o log dizerem o mesmo.
+
+        São dois motivos distintos (nota 0 e frase sem chinês) e misturá-los num
+        único número rotulado "nota 0" seria mentir sobre o que foi descartado.
+        """
+        cb = self._col_import()
+        n_zero = (sum(1 for m in self._col_matches if m.get("nota") == 0)
+                  if skip_zero else 0)
+        n_sem_cjk = sum(1 for m in self._col_matches
+                        if cb and not cb.has_clean_sentence(m)
+                        and not (skip_zero and m.get("nota") == 0))
+        motivos = []
+        if n_zero:
+            motivos.append(f"{n_zero} com nota 0")
+        if n_sem_cjk:
+            motivos.append(f"{n_sem_cjk} sem texto chinês")
+        return motivos
 
     def _col_save(self):
         """Abre o pop-up de formato. A gravação em si é o _col_save_run."""
@@ -1597,12 +1623,12 @@ class App(tk.Tk):
         if not groups:
             return
         n_total = sum(len(ms) for _, ms in groups)
-        ignoradas = len(self._col_matches) - sum(len(ms) for _, ms in groups)
 
         self._col_saving = True
         self._col_save_btn.config(state=tk.DISABLED)
         self._nb.select(4)
-        extra = f" · {ignoradas} com nota 0 ignorada(s)" if ignoradas else ""
+        motivos = self._col_save_discarded(skip_zero)
+        extra = f" · ignoradas: {', '.join(motivos)}" if motivos else ""
         self._log_line(
             f"💾 Salvando {len(groups)} coleção(ões) ({n_total} frases) "
             f"em {mode}{extra}…", "cmd")
@@ -2301,13 +2327,15 @@ class SaveCollectionDialog(tk.Toplevel):
 
         if not groups:
             self._summary.set("Nada a salvar com esse filtro.")
-            self._dest.set("Todas as frases da lista estão com nota 0.")
+            self._dest.set("Nenhuma frase da lista sobrou (nota 0 ou sem texto chinês).")
             self._save_btn.config(state=tk.DISABLED)
             return
 
         n_total = sum(len(ms) for _, ms in groups)
-        ignoradas = len(self.app._col_matches) - n_total
-        extra = f"  ({ignoradas} com nota 0 ignorada(s))" if ignoradas else ""
+        # Mesmo detalhamento do log: nota 0 e "sem texto chinês" são motivos
+        # diferentes e o rótulo não pode chamar os dois de nota 0.
+        motivos = self.app._col_save_discarded(self._skip_zero.get())
+        extra = f"  (ignoradas: {', '.join(motivos)})" if motivos else ""
         self._summary.set(f"{n_total} imagem(ns) em {len(groups)} coleção(ões){extra}")
 
         nomes = [f"{cb.collection_folder_name(w, ms)}_{mode}" for w, ms in groups]
