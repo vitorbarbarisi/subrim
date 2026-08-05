@@ -148,6 +148,9 @@
   <div id="msg"></div>
 </div>
 
+<!-- DICTATION_DATA: make_bundle.py substitui esta linha por um <script> que
+     define window.__DICTATION__ com as imagens embutidas. Não remover. -->
+
 <script>
 (function () {
   "use strict";
@@ -227,7 +230,7 @@
       var d = document.createElement("div");
       d.className = "slide" + (items[i].done ? " done" : "");
       var img = document.createElement("img");
-      img.src = SRC + items[i].source;
+      img.src = items[i].img || (SRC + items[i].source);
       img.alt = "";
       img.loading = "lazy";
       img.decoding = "async";
@@ -364,8 +367,9 @@
   });
 
   // ── Início ──────────────────────────────────────────────────────────────────
-  function parse(text) {
-    var data = JSON.parse(text);
+  // Aceita o texto do index.json OU uma lista já pronta (modo bundle).
+  function parse(textOrList) {
+    var data = typeof textOrList === "string" ? JSON.parse(textOrList) : textOrList;
     if (!Array.isArray(data)) throw new Error("o index.json deve ser uma lista");
     var out = [];
     for (var i = 0; i < data.length; i++) {
@@ -375,7 +379,10 @@
         index: typeof e.index === "number" ? e.index : i + 1,
         source: String(e.source),
         sentence: typeof e.sentence === "string" ? e.sentence : "",
-        done: e.done === true
+        done: e.done === true,
+        // No bundle a imagem vem embutida como data URI; sem ela, resolve por
+        // caminho relativo (que só funciona em http:// ou file://).
+        img: typeof e.img === "string" && e.img ? e.img : null
       });
     }
     if (!out.length) throw new Error("nenhuma entrada utilizável no index.json");
@@ -407,6 +414,14 @@
   // 1) fetch (funciona se servido por HTTP). 2) cache de uma escolha anterior.
   // 3) o usuário escolhe o arquivo — único caminho possível em file://.
   function boot() {
+    // 0) Bundle: dados E imagens embutidos neste próprio arquivo. É o único
+    // caminho que funciona quando o Android abre a página via content://, onde
+    // não existe diretório contra o qual um caminho relativo resolva.
+    // Não cacheia: os data URIs estourariam a cota do localStorage.
+    if (window.__DICTATION__) {
+      start(window.__DICTATION__, false);
+      return;
+    }
     // Um cache anterior é reaproveitado sem depender de fetch.
     for (var i = 0; i < localStorage.length; i++) {
       var k = localStorage.key(i);
