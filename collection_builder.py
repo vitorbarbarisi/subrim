@@ -7,8 +7,8 @@ extrai o frame do vídeo original na minutagem correspondente e queima a legenda
 rica (chinês + pinyin + tradução), reaproveitando o renderizador do
 ``video_screenshoter_r36s``.
 
-A coleção é salva em ``warehouse/collections/<palavra>/`` com duas resoluções:
-``original/`` (resolução do vídeo) e ``r36s/`` (640x480, legenda maior).
+A coleção é salva em ``warehouse/collections/<chave>_<formato>/``, num formato só
+por vez: ``original`` (resolução do vídeo) ou ``r36s`` (640x480, legenda maior).
 """
 
 import os
@@ -644,37 +644,44 @@ def render_preview(match: dict, mode: str = "r36s"):
             return img.copy()
 
 
-def save_collection(word: str, matches: List[dict],
-                    progress_cb: Optional[Callable[[int, int, str], None]] = None) -> Path:
-    """Persiste a coleção em ``warehouse/collections/<word>_<pinyin>/`` nas 2 resoluções.
+SAVE_MODES = ("original", "r36s")
 
-    A pasta recebe o pinyin (sem acento) como sufixo (ex.: ``當_dang``).
-    Cada frase vira uma imagem em ``original/`` e outra em ``r36s/``.
+
+def save_collection(word: str, matches: List[dict], mode: str = "r36s",
+                    progress_cb: Optional[Callable[[int, int, str], None]] = None) -> Path:
+    """Persiste a coleção em ``warehouse/collections/<chave>_<mode>/``.
+
+    ``mode`` é ``"original"`` (resolução do vídeo) ou ``"r36s"`` (640x480, legenda
+    maior) — um só por chamada. A chave é ``collection_folder_name`` (ex.:
+    ``當_dang``), então a pasta fica ``當_dang_r36s``.
+
+    O formato vai no NOME da pasta, e não numa subpasta ``original/``/``r36s/``
+    fixa: subpasta com nome fixo colide quando duas coleções são copiadas para o
+    mesmo destino.
+
+    A ordem de ``matches`` é preservada no prefixo numérico do arquivo — é a
+    ordem da tabela da GUI. Não reordenar aqui.
+
     Retorna o diretório da coleção.
     """
-    out_dir = COLLECTIONS / collection_folder_name(word, matches)
-    orig_dir = out_dir / "original"
-    r36s_dir = out_dir / "r36s"
-    orig_dir.mkdir(parents=True, exist_ok=True)
-    r36s_dir.mkdir(parents=True, exist_ok=True)
+    if mode not in SAVE_MODES:
+        raise ValueError(f"mode inválido: {mode!r} (esperado um de {SAVE_MODES})")
+
+    out_dir = COLLECTIONS / f"{collection_folder_name(word, matches)}_{mode}"
+    out_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(matches)
     for i, match in enumerate(matches, 1):
         name = f"{i:03d}_{match['asset']}_line{match['line_num']:04d}.png"
-        orig_path = orig_dir / name
-        r36s_path = r36s_dir / name
+        out_path = out_dir / name
 
-        if not _render_frame_to(match, orig_path):
+        if not _render_frame_to(match, out_path):
             if progress_cb:
                 progress_cb(i, total, f"⚠️  Falha ao extrair frame de {match['asset']} (linha {match['line_num']})")
             continue
 
-        # Reaproveita o mesmo frame para as duas resoluções
-        shutil.copy(orig_path, r36s_path)
-        add_subtitles_to_frame(orig_path, match["chinese"], match["translations_json"],
-                               match["portuguese"], resize=False)
-        add_subtitles_to_frame(r36s_path, match["chinese"], match["translations_json"],
-                               match["portuguese"], resize=True)
+        add_subtitles_to_frame(out_path, match["chinese"], match["translations_json"],
+                               match["portuguese"], resize=(mode == "r36s"))
 
         if progress_cb:
             progress_cb(i, total, f"✓ {name}")

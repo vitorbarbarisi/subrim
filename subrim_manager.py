@@ -258,6 +258,9 @@ class App(tk.Tk):
         self._col_render_token = 0
         self._col_photo = None
         self._col_saving = False
+        # Últimas escolhas do pop-up de salvar (reabre nelas na mesma sessão).
+        self._col_save_mode = "r36s"
+        self._col_skip_zero = True
         # Nota (0-10) da frase selecionada. A gravação no base é serializada numa
         # thread única, para que navegar em rajada vire poucas reescritas.
         self._nota_q: queue.Queue = queue.Queue()
@@ -1015,10 +1018,10 @@ class App(tk.Tk):
         # Bottom: save
         bottom = ttk.Frame(outer)
         bottom.pack(fill=tk.X, pady=(6, 0))
-        self._col_save_btn = ttk.Button(bottom, text="💾 Salvar coleção",
+        self._col_save_btn = ttk.Button(bottom, text="💾 Salvar coleção…",
                                         command=self._col_save, state=tk.DISABLED)
         self._col_save_btn.pack(side=tk.LEFT)
-        ttk.Label(bottom, text="→ warehouse/collections/<palavra>/ (original + r36s)",
+        ttk.Label(bottom, text="→ warehouse/collections/<palavra>_<formato>/",
                   foreground="#888").pack(side=tk.LEFT, padx=10)
 
     def _col_import(self):
@@ -1556,32 +1559,53 @@ class App(tk.Tk):
         self._col_photo = ImageTk.PhotoImage(img)
         self._col_preview.config(image=self._col_photo, text="")
 
+    def _col_save_groups(self, skip_zero: bool):
+        """Grupos (palavra → matches) na ORDEM da tabela, opcionalmente sem as nota 0.
+
+        A ordem importa: o prefixo numérico do arquivo salvo (``001_``, ``002_``…)
+        sai daqui, então ela reflete a ordenação escolhida pelo usuário na tabela.
+        NÃO reordenar.
+
+        Nota 0 é o que a exclusão da lista grava — o descarte explícito do
+        usuário. Frases SEM nota (None, nunca visitadas) não são filtradas.
+        """
+        groups: dict = {}
+        for m in self._col_matches:
+            if skip_zero and m.get("nota") == 0:
+                continue
+            groups.setdefault(m.get("word", ""), []).append(m)
+        return [(w, ms) for w, ms in groups.items() if w]
+
     def _col_save(self):
+        """Abre o pop-up de formato. A gravação em si é o _col_save_run."""
         cb = self._col_import()
         if not cb or not self._col_matches or self._col_saving:
             return
+        SaveCollectionDialog(self)
 
-        # Agrupa os matches por palavra → uma coleção (pasta) por palavra.
-        groups: dict = {}
-        for m in self._col_matches:
-            groups.setdefault(m.get("word", ""), []).append(m)
-        groups = [(w, ms) for w, ms in groups.items() if w]
+    def _col_save_run(self, mode: str, skip_zero: bool):
+        """Grava as coleções no formato escolhido (chamado pelo pop-up)."""
+        cb = self._col_import()
+        if not cb or self._col_saving:
+            return
+
+        # Lembra as escolhas para o próximo save da sessão.
+        self._col_save_mode = mode
+        self._col_skip_zero = skip_zero
+
+        groups = self._col_save_groups(skip_zero)
         if not groups:
             return
-
         n_total = sum(len(ms) for _, ms in groups)
-        folders = [cb.collection_folder_name(w, ms) for w, ms in groups]
-        shown = ", ".join(folders[:8]) + ("…" if len(folders) > 8 else "")
-        if not messagebox.askyesno(
-                "Salvar coleções",
-                f"Gerar {n_total} imagem(ns) em {len(groups)} coleção(ões) (uma pasta por palavra)?\n"
-                f"→ warehouse/collections/: {shown}"):
-            return
+        ignoradas = len(self._col_matches) - sum(len(ms) for _, ms in groups)
 
         self._col_saving = True
         self._col_save_btn.config(state=tk.DISABLED)
         self._nb.select(4)
-        self._log_line(f"💾 Salvando {len(groups)} coleção(ões) ({n_total} frases)…", "cmd")
+        extra = f" · {ignoradas} com nota 0 ignorada(s)" if ignoradas else ""
+        self._log_line(
+            f"💾 Salvando {len(groups)} coleção(ões) ({n_total} frases) "
+            f"em {mode}{extra}…", "cmd")
 
         def _progress(i, total, msg):
             self._log_q.put((f"  [{i}/{total}] {msg}", "info"))
@@ -1592,7 +1616,7 @@ class App(tk.Tk):
             for w, ms in groups:
                 try:
                     self._log_q.put((f"💾 Coleção '{w}' ({len(ms)} frases)…", "cmd"))
-                    out = cb.save_collection(w, ms, progress_cb=_progress)
+                    out = cb.save_collection(w, ms, mode=mode, progress_cb=_progress)
                     self._log_q.put((f"✓ Coleção salva em {out}", "success"))
                     last_out = out
                     ok_count += 1
@@ -2217,6 +2241,84 @@ class App(tk.Tk):
                 self._ds_refresh()
             self.after(3000 if running else 12000, _tick)
         self.after(12000, _tick)
+
+
+# ─── Dialog: Salvar coleção (Coleções) ──────────────────────────────────────────
+class SaveCollectionDialog(tk.Toplevel):
+    """Escolha do formato (original OU r36s) e do filtro de nota 0 antes de salvar.
+
+    Substitui a confirmação simples de antes: como já mostra a contagem e o
+    destino, confirmar duas vezes seria redundante.
+    """
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.app = app
+        self.title("Salvar coleção")
+        self.geometry("460x300")
+        self.resizable(False, True)
+        self.grab_set()
+
+        f = ttk.Frame(self, padding=18)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text="Salvar coleção", font=("", 11, "bold")).pack(anchor=tk.W)
+        ttk.Separator(f, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+
+        self._mode = tk.StringVar(value=app._col_save_mode)
+        ttk.Label(f, text="Formato:").pack(anchor=tk.W)
+        ttk.Radiobutton(f, text="Original — resolução do vídeo",
+                        variable=self._mode, value="original",
+                        command=self._refresh).pack(anchor=tk.W, padx=(12, 0))
+        ttk.Radiobutton(f, text="R36S — 640x480, legenda maior",
+                        variable=self._mode, value="r36s",
+                        command=self._refresh).pack(anchor=tk.W, padx=(12, 0))
+
+        self._skip_zero = tk.BooleanVar(value=app._col_skip_zero)
+        ttk.Checkbutton(f, text="Ignorar frases com nota 0",
+                        variable=self._skip_zero,
+                        command=self._refresh).pack(anchor=tk.W, pady=(10, 0))
+
+        self._summary = tk.StringVar()
+        ttk.Label(f, textvariable=self._summary).pack(anchor=tk.W, pady=(10, 0))
+        self._dest = tk.StringVar()
+        ttk.Label(f, textvariable=self._dest, foreground="#888",
+                  font=("", 9), wraplength=410,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
+
+        btns = ttk.Frame(f)
+        btns.pack(fill=tk.X, pady=(14, 0))
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        self._save_btn = ttk.Button(btns, text="Salvar", command=self._save)
+        self._save_btn.pack(side=tk.RIGHT)
+
+        self._refresh()
+
+    def _refresh(self, _=None):
+        """Recalcula contagem e destino conforme formato e filtro escolhidos."""
+        cb = self.app._col_import()
+        mode = self._mode.get()
+        groups = self.app._col_save_groups(self._skip_zero.get())
+
+        if not groups:
+            self._summary.set("Nada a salvar com esse filtro.")
+            self._dest.set("Todas as frases da lista estão com nota 0.")
+            self._save_btn.config(state=tk.DISABLED)
+            return
+
+        n_total = sum(len(ms) for _, ms in groups)
+        ignoradas = len(self.app._col_matches) - n_total
+        extra = f"  ({ignoradas} com nota 0 ignorada(s))" if ignoradas else ""
+        self._summary.set(f"{n_total} imagem(ns) em {len(groups)} coleção(ões){extra}")
+
+        nomes = [f"{cb.collection_folder_name(w, ms)}_{mode}" for w, ms in groups]
+        shown = ", ".join(nomes[:6]) + ("…" if len(nomes) > 6 else "")
+        self._dest.set(f"→ warehouse/collections/{shown}")
+        self._save_btn.config(state=tk.NORMAL)
+
+    def _save(self):
+        mode, skip_zero = self._mode.get(), self._skip_zero.get()
+        self.destroy()
+        self.app._col_save_run(mode, skip_zero)
 
 
 # ─── Dialog: Asset Filter (Coleções) ────────────────────────────────────────────
