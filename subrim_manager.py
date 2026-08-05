@@ -1292,8 +1292,9 @@ class App(tk.Tk):
                                           "" if nota is None else str(nota)))
         n = len(matches)
         if self._col_mode == "i+1":
-            # word carrega a contagem de desconhecidas da frase ("0" ou "1")
-            n0 = sum(1 for m in matches if m.get("word") == "0")
+            # A contagem de desconhecidas vem de n_unknown; "word" é sempre "0"
+            # (o termo buscado), para o modo virar uma pasta só ao salvar.
+            n0 = sum(1 for m in matches if m.get("n_unknown") == 0)
             status = f"{n} frase(s) — {n0} sem desconhecidas, {n - n0} com 1 desconhecida"
         elif self._col_mode == "all":
             n_assets = len({m.get("asset", "") for m in matches})

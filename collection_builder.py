@@ -451,8 +451,10 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
     caractere) e dominadas contam como conhecidas — nos dois casos não há ajuda
     a ser exibida no render.
 
-    O campo ``word`` de cada match indica o nº de desconhecidas da frase
-    (ex.: "0" ou "1") e é usado na coluna Palavra da GUI.
+    ``word`` recebe ``"0"`` em todos os matches — o termo que ativa o modo, como
+    em ``search_all``. É o que agrupa a coleção ao salvar, então o modo inteiro
+    vira UMA pasta ``0_<formato>``. O nº de desconhecidas da frase vai em
+    ``n_unknown`` (0 ou 1), usado só para o resumo na GUI.
     """
     def _log(msg: str) -> None:
         if log_cb:
@@ -471,7 +473,8 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
         if n_unknown > max_unknown:
             continue
         rec["pinyin"] = ""
-        rec["word"] = str(n_unknown)   # "0" ou "1"
+        rec["n_unknown"] = n_unknown   # 0 ou 1 — só para o resumo na GUI
+        rec["word"] = "0"              # termo da busca: agrupa tudo numa pasta só
         results.append(rec)
 
     _log(f"✓ i+1: {len(results)} frase(s) com ≤{max_unknown} palavra(s) desconhecida(s).")
