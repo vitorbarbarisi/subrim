@@ -1,26 +1,33 @@
 #!/usr/bin/env python3
-"""Empacota uma coleção num ÚNICO .html autocontido, para abrir no celular.
+"""Empacota uma coleção em .html autocontidos, para abrir no celular.
 
     python3 dictation/make_bundle.py warehouse/collections/0_r36s
-    python3 dictation/make_bundle.py <pasta> --start 200 --count 80 --out ditado.html
+
+Gera quantos arquivos forem necessários para cobrir TODAS as entradas do
+``index.json``, em blocos de ``--per-file`` (padrão 150), dentro de
+``dictation/``:
+
+    dictation/0_r36s_ditado_01.html
+    dictation/0_r36s_ditado_02.html
+    ...
 
 Por que existe: o Chrome do Android abre um arquivo local via ``content://``, que
 é um identificador OPACO de um documento — não um caminho dentro de uma pasta.
 Nenhum caminho relativo (``source/x.png``) resolve a partir dali, então a página
-+ pasta de imagens simplesmente não funciona nesse cenário. Embutindo tudo num
-arquivo só, não sobra nenhuma referência externa: funciona em ``content://``,
++ pasta de imagens simplesmente não funciona nesse cenário. Embutindo tudo em
+cada arquivo, não sobra nenhuma referência externa: funciona em ``content://``,
 ``file://``, servido por HTTP, e offline.
 
-O bundle reaproveita ``dictation/index.html`` como template — a lógica do app
+Os bundles reaproveitam ``dictation/index.html`` como template — a lógica do app
 não é duplicada aqui. A única coisa injetada é ``window.__DICTATION__``.
 
 Custo: base64 infla ~33%, então o script re-encoda para JPEG (padrão q88, ~6x
 menor que o PNG e visualmente equivalente nas legendas). ``--png`` mantém os
 bytes originais.
 
-O progresso (done) continua no localStorage do navegador, e a chave é uma
-impressão digital dos nomes dos arquivos — então o progresso é compartilhado
-entre o bundle e a mesma coleção aberta pela pasta.
+O progresso (done) fica no localStorage, com chave derivada dos nomes dos
+arquivos de CADA bundle — então cada arquivo controla o seu próprio bloco, e o
+"Exportar" de um bundle traz só as entradas dele.
 """
 
 import argparse
@@ -51,8 +58,41 @@ def encode_image(path: Path, quality: int, keep_png: bool) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def build(folder: Path, out: Path, start: int, count: int,
-          quality: int, keep_png: bool) -> int:
+def write_bundle(chunk: list, folder: Path, out: Path, template: str,
+                 quality: int, keep_png: bool) -> tuple:
+    """Grava um bundle. Devolve (n_imagens, bytes, faltando)."""
+    items = []
+    faltando = []
+    for i, e in enumerate(chunk, 1):
+        src = e.get("source") or ""
+        img_path = folder / src
+        if not img_path.exists():
+            faltando.append(src)
+            continue
+        items.append({
+            "index": e.get("index", i),
+            "source": src,
+            "sentence": e.get("sentence", ""),
+            "done": bool(e.get("done", False)),
+            "img": encode_image(img_path, quality, keep_png),
+        })
+
+    if not items:
+        return (0, 0, faltando)
+
+    # json.dumps produz JS válido. Escapa "<" para nenhum conteúdo poder fechar
+    # a tag <script> por acidente.
+    payload = json.dumps(items, ensure_ascii=False).replace("<", "\\u003c")
+    injected = f"<script>window.__DICTATION__={payload};</script>"
+
+    before, _, rest = template.partition(MARKER)
+    _, _, after = rest.partition("-->")
+    out.write_text(before + injected + after, encoding="utf-8")
+    return (len(items), out.stat().st_size, faltando)
+
+
+def build(folder: Path, out_dir: Path, per_file: int, quality: int,
+          keep_png: bool, max_files: int) -> int:
     index_json = folder / "index.json"
     if not index_json.exists():
         print(f"❌ {index_json} não encontrado.", file=sys.stderr)
@@ -62,81 +102,71 @@ def build(folder: Path, out: Path, start: int, count: int,
     if not TEMPLATE.exists():
         print(f"❌ template ausente: {TEMPLATE}", file=sys.stderr)
         return 1
-
-    entries = json.loads(index_json.read_text(encoding="utf-8"))
-    total = len(entries)
-
-    # start é 1-based para casar com o campo "index" que o usuário vê.
-    lo = max(0, start - 1)
-    chunk = entries[lo:lo + count] if count > 0 else entries[lo:]
-    if not chunk:
-        print(f"❌ faixa vazia: --start {start} --count {count} de {total} entradas.",
-              file=sys.stderr)
+    if per_file < 1:
+        print("❌ --per-file precisa ser >= 1.", file=sys.stderr)
         return 1
 
-    print(f"📖 {index_json} — {total} entradas; empacotando {len(chunk)} "
-          f"(de #{chunk[0].get('index')} a #{chunk[-1].get('index')})")
-    if len(chunk) < total:
-        print(f"   ⚠️  {total - len(chunk)} entrada(s) fora do bundle "
-              f"(use --start/--count para outra faixa)")
-
-    out_items = []
-    faltando = []
-    for i, e in enumerate(chunk, 1):
-        src = e.get("source") or ""
-        img_path = folder / src
-        if not img_path.exists():
-            faltando.append(src)
-            continue
-        out_items.append({
-            "index": e.get("index", i),
-            "source": src,
-            "sentence": e.get("sentence", ""),
-            "done": bool(e.get("done", False)),
-            "img": encode_image(img_path, quality, keep_png),
-        })
-        if i % 25 == 0 or i == len(chunk):
-            print(f"   [{i}/{len(chunk)}] {src}")
-
-    if faltando:
-        print(f"   ⚠️  {len(faltando)} imagem(ns) do índice não existem na pasta "
-              f"e ficaram fora: {faltando[:5]}")
-    if not out_items:
-        print("❌ nenhuma imagem encontrada — nada a empacotar.", file=sys.stderr)
-        return 1
-
-    # json.dumps produz JS válido. Escapa "<" para nenhum conteúdo poder fechar
-    # a tag <script> por acidente.
-    payload = json.dumps(out_items, ensure_ascii=False).replace("<", "\\u003c")
-    injected = f"<script>window.__DICTATION__={payload};</script>"
-
-    html = TEMPLATE.read_text(encoding="utf-8")
-    if MARKER not in html:
+    template = TEMPLATE.read_text(encoding="utf-8")
+    if MARKER not in template:
         print(f"❌ marcador {MARKER!r} não achado em {TEMPLATE.name}.", file=sys.stderr)
         return 1
-    # Substitui o comentário-marcador (que se estende até o fim da linha dele).
-    before, _, rest = html.partition(MARKER)
-    _, _, after = rest.partition("-->")
-    html = before + injected + after
 
-    out.write_text(html, encoding="utf-8")
-    mb = out.stat().st_size / (1024 * 1024)
-    print(f"\n✅ {out}  ({mb:.1f} MB, {len(out_items)} imagens)")
-    if mb > WARN_MB:
-        print(f"   ⚠️  acima de {WARN_MB} MB — o Chrome do Android pode demorar ou "
-              f"falhar ao abrir. Reduza com --count.")
+    entries = json.loads(index_json.read_text(encoding="utf-8"))
+    if not entries:
+        print(f"❌ {index_json} está vazio.", file=sys.stderr)
+        return 1
+
+    chunks = [entries[i:i + per_file] for i in range(0, len(entries), per_file)]
+    # Largura do número vem do total, não do recorte: assim os nomes não mudam
+    # se você reexecutar com --max-files.
+    width = max(2, len(str(len(chunks))))
+    total_chunks = len(chunks)
+    if max_files > 0:
+        chunks = chunks[:max_files]
+
+    out_dir.mkdir(parents=True, exist_ok=True)
+    print(f"📖 {index_json} — {len(entries)} entradas")
+    print(f"   {total_chunks} arquivo(s) de até {per_file} imagens → {out_dir}/")
+    if len(chunks) < total_chunks:
+        print(f"   ⚠️  --max-files {max_files}: gerando só os {len(chunks)} primeiros")
+
+    escritos, total_bytes, faltando_geral = 0, 0, []
+    for n, chunk in enumerate(chunks, 1):
+        out = out_dir / f"{folder.name}_ditado_{n:0{width}d}.html"
+        n_img, size, faltando = write_bundle(chunk, folder, out, template,
+                                             quality, keep_png)
+        faltando_geral += faltando
+        if not n_img:
+            print(f"   [{n}/{len(chunks)}] {out.name}: nenhuma imagem encontrada — pulado")
+            continue
+        escritos += 1
+        total_bytes += size
+        mb = size / (1024 * 1024)
+        flag = "  ⚠️  grande" if mb > WARN_MB else ""
+        print(f"   [{n}/{len(chunks)}] {out.name}  {n_img} imagens, {mb:.1f} MB{flag}")
+
+    if faltando_geral:
+        print(f"\n⚠️  {len(faltando_geral)} imagem(ns) do índice não existem na pasta "
+              f"e ficaram fora: {faltando_geral[:5]}")
+    if not escritos:
+        print("❌ nada foi gerado.", file=sys.stderr)
+        return 1
+
+    print(f"\n✅ {escritos} arquivo(s) em {out_dir}/ "
+          f"({total_bytes / (1024 * 1024):.1f} MB no total)")
     return 0
 
 
 def main() -> int:
     p = argparse.ArgumentParser(
-        description="Empacota uma coleção num único .html autocontido.")
+        description="Empacota uma coleção em .html autocontidos (blocos de --per-file).")
     p.add_argument("folder", help="pasta da coleção (a que contém index.json)")
-    p.add_argument("--out", help="arquivo de saída (padrão: <pasta>_ditado.html)")
-    p.add_argument("--start", type=int, default=1,
-                   help="primeira entrada, 1-based (padrão: 1)")
-    p.add_argument("--count", type=int, default=150,
-                   help="quantas entradas empacotar; 0 = todas (padrão: 150)")
+    p.add_argument("--out-dir", default=str(HERE),
+                   help="onde gravar os .html (padrão: a própria pasta dictation/)")
+    p.add_argument("--per-file", type=int, default=150,
+                   help="imagens por arquivo (padrão: 150)")
+    p.add_argument("--max-files", type=int, default=0,
+                   help="gera no máximo N arquivos; 0 = todos (padrão: 0)")
     p.add_argument("--quality", type=int, default=88,
                    help="qualidade do JPEG, 1-95 (padrão: 88)")
     p.add_argument("--png", action="store_true",
@@ -147,8 +177,7 @@ def main() -> int:
     if not folder.is_dir():
         print(f"❌ pasta não encontrada: {folder}", file=sys.stderr)
         return 1
-    out = Path(a.out) if a.out else folder.parent / f"{folder.name}_ditado.html"
-    return build(folder, out, a.start, a.count, a.quality, a.png)
+    return build(folder, Path(a.out_dir), a.per_file, a.quality, a.png, a.max_files)
 
 
 if __name__ == "__main__":

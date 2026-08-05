@@ -8,14 +8,26 @@ Independente do resto do repo: sem build, sem dependência de runtime. É um `in
 
 ## Qual dos dois modos usar
 
-**No celular, use o bundle.** É um arquivo `.html` único, com as imagens embutidas:
+**No celular, use os bundles.** São arquivos `.html` autocontidos, com as imagens embutidas:
 
 ```bash
-python3 dictation/make_bundle.py warehouse/collections/0_r36s --count 150
+python3 dictation/make_bundle.py warehouse/collections/0_r36s
 ```
 
-Isso gera `warehouse/collections/0_r36s_ditado.html`. Copie **esse arquivo só** para o celular e
-abra. Não precisa de mais nada ao lado.
+Isso cobre **todas** as entradas do `index.json`, em blocos de 150, gravando aqui em `dictation/`:
+
+```
+dictation/0_r36s_ditado_01.html   (index 1..150)
+dictation/0_r36s_ditado_02.html   (index 151..300)
+...
+```
+
+Copie para o celular **só os arquivos que você vai usar** — cada um funciona sozinho, sem nada ao
+lado. Cada bundle tem seu próprio progresso, e o **Exportar** dele traz só as entradas daquele
+bloco.
+
+Atenção ao volume: 150 imagens r36s dão ~8 MB por arquivo, então uma coleção de 8.692 imagens
+gera 58 arquivos e ~460 MB. Os bundles são gitignored (`dictation/*_ditado_*.html`).
 
 **Por que o bundle é necessário.** Quando você abre um arquivo local no Chrome do Android, a URL
 da página é um `content://` — um identificador *opaco* de um documento no MediaStore, não um
@@ -39,20 +51,23 @@ O mesmo `index.html` atende aos dois modos: se houver dados embutidos ele os usa
 ```
 python3 dictation/make_bundle.py <pasta-da-coleção> [opções]
 
---out ARQUIVO      saída (padrão: <pasta>_ditado.html)
---start N          primeira entrada, 1-based (padrão: 1)
---count N          quantas empacotar; 0 = todas (padrão: 150)
+--out-dir DIR      onde gravar (padrão: dictation/)
+--per-file N       imagens por arquivo (padrão: 150)
+--max-files N      gera no máximo N arquivos; 0 = todos (padrão: 0)
 --quality Q        qualidade do JPEG, 1-95 (padrão: 88)
 --png              embute o PNG original em vez de re-encodar
 ```
 
 As imagens são re-encodadas para JPEG q88, que ficou visualmente equivalente ao PNG nas legendas
 e ~6x menor (271 KB → 47 KB numa imagem r36s típica). Isso importa porque base64 ainda infla o
-resultado em ~33%: 150 imagens r36s dão um arquivo de ~10 MB, contra ~55 MB com `--png`.
+resultado em ~33%: com `--png` cada arquivo passaria de 40 MB.
 
-O `--count` tem padrão 150 de propósito — uma coleção pode ter dezenas de milhares de imagens, e
-empacotar tudo geraria um arquivo que o Chrome do Android não abre. O script avisa quantas
-entradas ficaram de fora e alerta se o resultado passar de 60 MB.
+O `--per-file` existe porque um arquivo único com uma coleção inteira o Chrome do Android não
+abre. O script alerta se algum arquivo passar de 60 MB. O `--max-files` serve para gerar só os
+primeiros blocos, sem esperar a coleção toda.
+
+A numeração dos nomes é fixada pelo total de blocos, não pelo recorte — reexecutar com
+`--max-files` não renomeia os arquivos já gerados.
 
 ## Controles
 

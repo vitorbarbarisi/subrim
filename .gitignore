@@ -4,6 +4,9 @@ r36s_viewer
 # ...exceto o ícone do app (gerado por tools/make_icon.py, mas versionado)
 !subrim_icon.png
 
+# Bundles gerados por dictation/make_bundle.py (grandes, e derivados de uma coleção)
+dictation/*_ditado_*.html
+
 # Ignore warehouse media files
 warehouse/*
 
