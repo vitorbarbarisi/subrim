@@ -22,10 +22,10 @@
     -webkit-text-size-adjust: 100%;
   }
 
-  header {
+  footer {
     display: flex; align-items: center; justify-content: space-between;
-    gap: 10px; padding: 8px 12px; border-bottom: 1px solid var(--line);
-    /* Acima do carrossel, para o menu suspenso não ficar por baixo dele. */
+    gap: 10px; padding: 8px 12px; border-top: 1px solid var(--line);
+    /* Acima do conteúdo, para o menu suspenso não ficar por baixo dele. */
     position: relative; z-index: 20;
   }
   #count { font-size: 13px; color: var(--dim); }
@@ -43,7 +43,8 @@
     font-size: 18px; line-height: 1; padding: 6px 10px; min-width: 40px;
   }
   #menu {
-    position: absolute; right: 0; top: calc(100% + 6px);
+    /* Abre para CIMA: o menu fica no rodapé, então para baixo sairia da tela. */
+    position: absolute; right: 0; bottom: calc(100% + 6px);
     background: #1c1c24; border: 1px solid var(--line);
     border-radius: 10px; padding: 4px; min-width: 190px;
   }
@@ -121,17 +122,6 @@
 </div>
 
 <div id="app" class="hide">
-  <header>
-    <span id="count">—</span>
-    <div id="menu-wrap">
-      <button id="menu-btn" type="button" aria-label="Mais opções"
-              aria-expanded="false" aria-haspopup="true">⋮</button>
-      <div id="menu" class="hide" role="menu">
-        <button id="export" type="button" role="menuitem">Exportar index.json</button>
-      </div>
-    </div>
-  </header>
-
   <div id="track"></div>
 
   <nav>
@@ -146,6 +136,17 @@
            spellcheck="false" enterkeyhint="done" lang="zh">
   </form>
   <div id="msg"></div>
+
+  <footer>
+    <span id="count">—</span>
+    <div id="menu-wrap">
+      <button id="menu-btn" type="button" aria-label="Mais opções"
+              aria-expanded="false" aria-haspopup="true">⋮</button>
+      <div id="menu" class="hide" role="menu">
+        <button id="export" type="button" role="menuitem">Exportar index.json</button>
+      </div>
+    </div>
+  </footer>
 </div>
 
 <!-- DICTATION_DATA: make_bundle.py substitui esta linha por um <script> que
