@@ -40,6 +40,7 @@ DEFAULT_BASE_URL = "http://localhost:7998/word-api"
 MASTERED_LEVEL = 3   # confidence_level que significa "dominada"
 
 _mastered: frozenset | None = None   # cache de processo
+_vocab: dict | None = None           # cache do vocabulário completo (só GUI)
 _warned = False                      # aviso de API fora do ar sai só uma vez
 
 
@@ -114,10 +115,56 @@ def mastered_words(force: bool = False) -> frozenset:
     return _mastered
 
 
+def _fetch_vocabulary() -> dict:
+    """``GET /search?q=`` → ``{palavra: (pinyin, tradução)}`` do vocabulário todo."""
+    url = f"{base_url()}/search?" + urllib.parse.urlencode({"q": ""})
+    with urllib.request.urlopen(url, timeout=_timeout()) as resp:
+        payload = json.loads(resp.read().decode("utf-8", errors="replace"))
+
+    if not isinstance(payload, list):
+        raise ValueError(f"resposta inesperada de {url}: {type(payload).__name__}")
+
+    out: dict = {}
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        word = (item.get("word") or "").strip()
+        if not word:
+            continue
+        out[word] = ((item.get("pinyin") or "").strip(),
+                     (item.get("translation") or "").strip())
+    return out
+
+
+def vocabulary(force: bool = False) -> dict:
+    """``{palavra: (pinyin, tradução)}`` do vocabulário inteiro, memoizado.
+
+    Usado pela GUI para preencher pinyin/tradução das palavras cuja entrada no
+    base está nua ou malformada. Falha ABERTA: em erro devolve o cache anterior
+    (ou dict vazio) e avisa uma vez — nenhuma tela deve quebrar pela API.
+
+    Cache SEPARADO do ``_mastered`` de propósito. O ``set_mastered`` é o
+    ``initializer`` dos workers de ``process_chunks`` e é picklado por processo;
+    o vocabulário completo (~34k entradas) não deve entrar nesse caminho.
+    """
+    global _vocab
+    if _vocab is not None and not force:
+        return _vocab
+    try:
+        _vocab = _fetch_vocabulary()
+    except Exception as e:  # noqa: BLE001 - a tabela nunca deve quebrar pela API
+        _warn_once(f"⚠️  word-api indisponível ({base_url()}): {e}\n"
+                   "   Pinyin/tradução não serão preenchidos pela API.")
+        if _vocab is None:
+            _vocab = {}
+    return _vocab
+
+
 def reload_mastered() -> int:
     """Recarrega o vocabulário e devolve o total de dominadas (botão da GUI)."""
-    global _warned
+    global _warned, _vocab
     _warned = False   # permite avisar de novo se a API caiu desde a última carga
+    _vocab = None     # o botão também invalida o vocabulário completo
     return len(mastered_words(force=True))
 
 

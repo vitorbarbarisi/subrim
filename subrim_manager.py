@@ -45,69 +45,180 @@ def _wh_readable_name(stem: str) -> str:
     return name.title()
 
 
-def _wh_analyse(base_path: Path, mastered=None) -> dict:
+# Uma "palavra" precisa ter ao menos um caractere com conteúdo (CJK, letra ou
+# dígito). Sem isso, pontuação solta que sobra do parsing — `,`「」!。♪ — entrava
+# na tabela como se fosse vocabulário.
+_WH_WORD_OK = re.compile(r"[0-9A-Za-z㐀-䶿一-鿿豈-﫿]")
+
+
+def _wh_split_items(arr: str) -> list:
+    """Itens de um array de pares do base, tolerante a arrays malformados.
+
+    O array é escrito com f-string à mão (não ``json.dumps``), então há duas
+    malformações reais no corpus, e cada uma quebra uma estratégia diferente:
+
+    - tradução com aspa — ``["「 (「): "", "嘰嘰喳喳 (jī ji zhā zhā): tagarelice", …]``
+      — varrer pares de aspas dessincroniza e perde tudo depois do primeiro item;
+      dividir pelo separador ``", "`` acerta.
+    - aspa fechando cedo — ``… "佔 (zhàn)": pegar, "便宜 (pián yi)": vantagem]`` —
+      aí é o inverso: o separador não aparece entre os dois últimos pares, então o
+      split junta ambos num item e perde uma palavra; varrer aspas acerta.
+
+    Como nenhuma domina, geramos as duas e ficamos com a que rende mais itens
+    aproveitáveis. Perder palavra chinesa num contador de vocabulário é o pior
+    resultado possível, então vale o custo de parsear duas vezes.
+    """
+    arr = arr.strip()
+    if not arr.startswith("["):
+        return []
+    try:
+        data = json.loads(arr)
+        if isinstance(data, list):
+            return [str(x) for x in data]
+    except Exception:  # noqa: BLE001 - array malformado é o caso comum aqui
+        pass
+
+    inner = arr[1:-1] if arr.endswith("]") else arr[1:]
+    por_separador = [c.strip().strip('"') for c in inner.split('", "')]
+    por_aspas = re.findall(r'"([^"]*)"', arr)
+
+    def _score(items):
+        """(itens com pinyin E tradução, com pinyin, válidos) — maior é melhor."""
+        ambos = com_py = validos = 0
+        for it in items:
+            p = _wh_parse_item(it)
+            if not p:
+                continue
+            validos += 1
+            if p[1]:
+                com_py += 1
+                if p[2]:
+                    ambos += 1
+        return (ambos, com_py, validos)
+
+    melhor = max((por_separador, por_aspas), key=_score)
+    return [c for c in melhor if c.strip()]
+
+
+def _wh_parse_item(item: str):
+    """``(palavra, pinyin, tradução)`` de um item, ou ``None`` se não der.
+
+    Cobre as formas malformadas que existem de verdade no corpus, além da
+    canônica — sem isso elas caem como "entrada nua" e aparecem na tabela como
+    Conhecida=Sim mesmo tendo pinyin e tradução no arquivo.
+    """
+    # Aspas soltas sobram das malformações do array; nenhuma palavra as contém, e
+    # sem tirar isso a palavra sai deformada (ex.: `[OSMAR]"` em vez de `[OSMAR]`).
+    item = item.strip().strip('"').strip()
+    if not item:
+        return None
+
+    pats = (
+        r'^([^\s("]+)\s*\(([^)]*)\)\s*:\s*(.*)$',   # 當 (dāng): quando
+        r'^([^\s("]+)\s*\(([^):]*)\s*:\s*(.*)$',    # 匯票 (huì piào: ordens…  (sem ")")
+        r'^([^\s("]+)\s*\(([^)]*)\)\s*$',           # daughter (nǚ ér)  (sem tradução)
+    )
+    for i, pat in enumerate(pats):
+        m = re.match(pat, item)
+        if m:
+            word = m.group(1)
+            pinyin = m.group(2).strip()
+            trad = m.group(3).strip() if i < 2 else ""
+            break
+    else:
+        m = re.match(r'^([^\s(:"]+)\s*:\s*(.*)$', item)   # HELENA: Helena
+        if m:
+            word, pinyin, trad = m.group(1), "", m.group(2).strip()
+        else:
+            m = re.match(r'^([^\s(:"]+)', item)           # entrada nua
+            if not m:
+                return None
+            word, pinyin, trad = m.group(1), "", ""
+
+    if not word or not _WH_WORD_OK.search(word):
+        return None
+    return (word, pinyin, trad)
+
+
+def _wh_analyse(base_path: Path, mastered=None, vocab=None) -> dict:
     """Analisa um base.txt do warehouse e retorna estatísticas de palavras.
 
-    ``mastered`` é o conjunto de palavras dominadas na word-api (ver word_vocab).
-    Deve ser carregado pelo chamador — esta função roda em thread e não deve
-    fazer I/O de rede. Se vier ``None``, usa o cache já carregado no processo.
+    ``mastered`` (conjunto de dominadas) e ``vocab`` (``{palavra: (pinyin,
+    tradução)}``) devem ser carregados pelo chamador — esta função roda em thread
+    e não deve fazer I/O de rede. Se vierem ``None``, usa o cache do processo.
 
     Uma palavra é "conhecida" quando não há ajuda a exibir no render: o base não
     tem pinyin/tradução para ela (entrada nua) OU ela já é dominada na word-api.
+
+    Pinyin e tradução exibidos vêm do PRÓPRIO base (é a tradução no contexto
+    daquele episódio); quando a mesma palavra aparece com traduções diferentes,
+    vale a mais frequente. Se o base não tiver, cai para o vocabulário da API e a
+    entrada é marcada com ``from_api`` — a GUI colore essas linhas, para não
+    ficar ambíguo de onde veio o dado.
 
     Retorna:
       total_words   – palavras distintas no array
       known         – palavras conhecidas (sem ajuda a exibir)
       unknown       – palavras a aprender (com pinyin+tradução e não dominadas)
-      freq          – lista [(palavra, count, is_conhecida)] por frequência desc
+      freq          – lista de dicts (word, count, conhecida, pinyin, traducao,
+                      from_api) por frequência desc
     """
     if mastered is None:
         mastered = word_vocab.mastered_words()
-    from collections import defaultdict
+    if vocab is None:
+        vocab = word_vocab.vocabulary()
+
+    from collections import Counter, defaultdict
     word_count: dict = defaultdict(int)
-    # conjunto de pares distintos para contar conhecido/desconhecido
-    word_meta: dict = {}   # palavra → (has_pinyin, has_translation)
+    word_meta: dict = {}                      # palavra → (has_pinyin, has_translation)
+    pys: dict = defaultdict(Counter)          # palavra → Counter de pinyin
+    trs: dict = defaultdict(Counter)          # palavra → Counter de traduções
 
     try:
         with open(base_path, "r", encoding="utf-8") as f:
             for line in f:
-                parts = line.rstrip("\n").split("\t")
+                parts = line.rstrip("\r\n").split("\t")
                 if len(parts) < 5:
                     continue
-                arr = parts[4].strip()
-                if not arr.startswith("["):
-                    continue
-                # extrai itens do array JSON-like
-                for item in re.findall(r'"([^"]*)"', arr):
-                    item = item.strip()
-                    if not item:
+                for item in _wh_split_items(parts[4]):
+                    parsed = _wh_parse_item(item)
+                    if not parsed:
                         continue
-                    m = re.match(r'^([^\s\(]+)\s*\(([^)]*)\)\s*:\s*(.+)$', item)
-                    if m:
-                        word, pinyin, translation = m.group(1), m.group(2), m.group(3)
-                        has_py = bool(pinyin.strip())
-                        has_tr = bool(translation.strip())
-                    else:
-                        # entrada nua (palavra dominada sem pinyin/trad)
-                        bare = re.match(r'^([^\s\(:]+)', item)
-                        if not bare:
-                            continue
-                        word = bare.group(1)
-                        has_py, has_tr = False, False
-                    if word:
-                        word_count[word] += 1
-                        # known = sem pinyin OU sem tradução
-                        existing = word_meta.get(word, (has_py, has_tr))
-                        word_meta[word] = (existing[0] or has_py, existing[1] or has_tr)
+                    word, pinyin, trad = parsed
+                    word_count[word] += 1
+                    if pinyin:
+                        pys[word][pinyin] += 1
+                    if trad:
+                        trs[word][trad] += 1
+                    has_py, has_tr = bool(pinyin), bool(trad)
+                    existing = word_meta.get(word, (False, False))
+                    word_meta[word] = (existing[0] or has_py, existing[1] or has_tr)
     except Exception:
         pass
 
-    # conhecida = sem ajuda a exibir no render (entrada nua) OU dominada na API
-    freq = [
-        (word, word_count[word],
-         word_vocab.is_known(word, word_meta[word][0], word_meta[word][1], mastered))
-        for word in sorted(word_count.keys(), key=lambda w: -word_count[w])
-    ]
+    def _top(counter):
+        return counter.most_common(1)[0][0] if counter else ""
+
+    freq = []
+    for word in sorted(word_count.keys(), key=lambda w: -word_count[w]):
+        has_py, has_tr = word_meta[word]
+        pinyin, trad = _top(pys[word]), _top(trs[word])
+        from_api = False
+        if not pinyin or not trad:
+            api_py, api_tr = vocab.get(word, ("", ""))
+            if not pinyin and api_py:
+                pinyin, from_api = api_py, True
+            if not trad and api_tr:
+                trad, from_api = api_tr, True
+        freq.append({
+            "word": word,
+            "count": word_count[word],
+            "conhecida": word_vocab.is_known(word, has_py, has_tr, mastered),
+            "pinyin": pinyin,
+            "traducao": trad,
+            "from_api": from_api,
+        })
+
     known = sum(1 for w, (hp, ht) in word_meta.items()
                 if word_vocab.is_known(w, hp, ht, mastered))
     unknown = len(word_meta) - known
@@ -483,25 +594,62 @@ class App(tk.Tk):
         ttk.Label(right, text="Palavras por frequência:", font=("", 10, "bold")).pack(
             anchor=tk.W, pady=(14, 4))
 
+        # Filtro por Conhecida + quantas linhas estão visíveis.
+        fbar = ttk.Frame(right)
+        fbar.pack(fill=tk.X, pady=(0, 4))
+        ttk.Label(fbar, text="Conhecida:", foreground="#888").pack(side=tk.LEFT)
+        self._wh_freq_filter = tk.StringVar(value="todas")
+        for rot, val in (("Todas", "todas"), ("Sim", "sim"), ("Não", "nao")):
+            ttk.Radiobutton(fbar, text=rot, value=val,
+                            variable=self._wh_freq_filter,
+                            command=self._wh_freq_refresh_view).pack(side=tk.LEFT, padx=(6, 0))
+        self._wh_freq_shown = tk.StringVar(value="")
+        ttk.Label(fbar, textvariable=self._wh_freq_shown,
+                  foreground="#888", font=("", 9)).pack(side=tk.RIGHT)
+
         freq_f = ttk.Frame(right)
         freq_f.pack(fill=tk.BOTH, expand=True)
-        fcols = ("word", "count", "conhecida")
+        # Ordem: conteúdo da palavra à esquerda, metadados no fim.
+        fcols = ("word", "pinyin", "traducao", "count", "conhecida")
         ft = ttk.Treeview(freq_f, columns=fcols, show="headings", selectmode="extended")
         ft.heading("word",      text="Palavra",      anchor=tk.W)
+        ft.heading("pinyin",    text="Pinyin",       anchor=tk.W)
+        ft.heading("traducao",  text="Tradução",     anchor=tk.W)
         ft.heading("count",     text="Ocorrências",  anchor=tk.CENTER)
         ft.heading("conhecida", text="Conhecida",    anchor=tk.CENTER)
-        ft.column("word",      width=120, anchor=tk.W,      stretch=True)
-        ft.column("count",     width=90,  anchor=tk.CENTER, stretch=False)
+        ft.column("word",      width=90,  anchor=tk.W,      stretch=False)
+        ft.column("pinyin",    width=110, anchor=tk.W,      stretch=False)
+        # "traducao" é o texto livre: absorve a sobra e mantém as duas últimas
+        # colunas ancoradas à direita com largura fixa.
+        ft.column("traducao",  width=170, anchor=tk.W,      stretch=True)
+        ft.column("count",     width=80,  anchor=tk.CENTER, stretch=False)
         ft.column("conhecida", width=80,  anchor=tk.CENTER, stretch=False)
+        # Linhas cujo pinyin/tradução vieram da word-api (entrada nua no base).
+        ft.tag_configure("from_api", foreground="#2980B9")
         fvsb = ttk.Scrollbar(freq_f, orient=tk.VERTICAL, command=ft.yview)
         ft.configure(yscrollcommand=fvsb.set)
         ft.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         fvsb.pack(side=tk.RIGHT, fill=tk.Y)
         ft.bind("<Button-1>", self._wh_freq_on_header_click)
+        # Cópia: Ctrl+C, ⌘C e o evento virtual da plataforma.
         ft.bind("<Control-c>", self._wh_freq_copy_selection)
+        ft.bind("<Command-c>", self._wh_freq_copy_selection)
+        ft.bind("<<Copy>>",    self._wh_freq_copy_selection)
+        # Menu de contexto. No Tk do Aqua o botão direito chega como Button-2
+        # (Button-3 é o do meio) — o inverso de X11/Windows — e Control+clique é
+        # o clique secundário histórico do macOS. Os três são gestos de menu.
+        for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+            ft.bind(seq, self._wh_freq_context_menu)
         self._wh_freq_tree = ft
         self._wh_freq_sort_col = "count"   # coluna de ordenação atual
         self._wh_freq_sort_reverse = True  # decrescente por padrão
+
+        self._wh_freq_menu = tk.Menu(self, tearoff=0)
+        self._wh_freq_menu.add_command(label="Copiar",
+                                       command=self._wh_freq_copy_selection)
+
+        ttk.Label(right, text="Azul = pinyin/tradução vindos da word-api",
+                  foreground="#888", font=("", 9)).pack(anchor=tk.W, pady=(3, 0))
 
         self._wh_refresh()
 
@@ -598,12 +746,13 @@ class App(tk.Tk):
         self._wh_detail.set("Analisando…")
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
 
-        # Maestria lida aqui, na thread da GUI (usa o cache da sessão), para que
-        # a thread de análise não faça I/O de rede.
+        # Maestria e vocabulário lidos aqui, na thread da GUI (usam o cache da
+        # sessão), para que a thread de análise não faça I/O de rede.
         mastered = word_vocab.mastered_words()
+        vocab = word_vocab.vocabulary()
 
         def _work():
-            stats = _wh_analyse(bf, mastered)
+            stats = _wh_analyse(bf, mastered, vocab)
             detail = (
                 f"Arquivo : {bf.name}\n"
                 f"Vídeo   : {video_line}\n"
@@ -743,20 +892,40 @@ class App(tk.Tk):
         self._wh_freq_refresh_view()
 
     def _wh_freq_refresh_view(self):
-        """Recarrega a visualização da tabela respeitando a ordenação atual."""
+        """Recarrega a tabela respeitando ordenação e filtro atuais."""
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
-        if not hasattr(self, '_wh_freq_data'):
+        if not hasattr(self, "_wh_freq_data"):
             return
-        # Ordena pelos critérios atuais
+
+        # Filtro por Conhecida. Lê o bool de _wh_freq_data, não o "Sim"/"Não" da
+        # tela — a string é só apresentação.
+        modo = self._wh_freq_filter.get()
+        dados = self._wh_freq_data
+        if modo == "sim":
+            dados = [r for r in dados if r["conhecida"]]
+        elif modo == "nao":
+            dados = [r for r in dados if not r["conhecida"]]
+
+        # .get para uma coluna nova sem chave aqui não derrubar a tabela.
         sort_key = {
-            "word": lambda x: x[0],
-            "count": lambda x: x[1],
-            "conhecida": lambda x: (not x[2], x[0]),  # Desconhecidas primeiro (False antes True)
-        }[self._wh_freq_sort_col]
-        sorted_data = sorted(self._wh_freq_data, key=sort_key, reverse=self._wh_freq_sort_reverse)
-        for word, count, is_conhecida in sorted_data:
-            conhecida_str = "Sim" if is_conhecida else "Não"
-            self._wh_freq_tree.insert("", tk.END, values=(word, count, conhecida_str))
+            "word":      lambda r: r["word"],
+            "pinyin":    lambda r: (r["pinyin"] == "", r["pinyin"]),
+            "traducao":  lambda r: (r["traducao"] == "", r["traducao"]),
+            "count":     lambda r: r["count"],
+            # Desconhecidas primeiro (False antes de True), empate alfabético
+            "conhecida": lambda r: (not r["conhecida"], r["word"]),
+        }.get(self._wh_freq_sort_col, lambda r: r["count"])
+        dados = sorted(dados, key=sort_key, reverse=self._wh_freq_sort_reverse)
+
+        for r in dados:
+            self._wh_freq_tree.insert(
+                "", tk.END,
+                values=(r["word"], r["pinyin"], r["traducao"], r["count"],
+                        "Sim" if r["conhecida"] else "Não"),
+                tags=("from_api",) if r["from_api"] else ())
+
+        total = len(self._wh_freq_data)
+        self._wh_freq_shown.set(f"mostrando {len(dados)} de {total}" if total else "")
 
     def _wh_freq_on_header_click(self, event):
         """Detecta clique no header da tabela de frequência para ordenar."""
@@ -766,7 +935,8 @@ class App(tk.Tk):
         col_index = self._wh_freq_tree.identify_column(event.x)
         # Mapeia índice de coluna para nome
         col_name = self._wh_freq_tree.heading(col_index)["text"]
-        col_map = {"Palavra": "word", "Ocorrências": "count", "Conhecida": "conhecida"}
+        col_map = {"Palavra": "word", "Pinyin": "pinyin", "Tradução": "traducao",
+                   "Ocorrências": "count", "Conhecida": "conhecida"}
         col = col_map.get(col_name)
         if not col:
             return
@@ -775,25 +945,51 @@ class App(tk.Tk):
             self._wh_freq_sort_reverse = not self._wh_freq_sort_reverse
         else:
             self._wh_freq_sort_col = col
-            self._wh_freq_sort_reverse = True  # decrescente por padrão (exceto "Palavra")
-            if col == "word":
-                self._wh_freq_sort_reverse = False  # alfabético crescente
+            self._wh_freq_sort_reverse = True  # decrescente por padrão
+            if col in ("word", "pinyin", "traducao"):
+                self._wh_freq_sort_reverse = False  # texto: alfabético crescente
         self._wh_freq_refresh_view()
 
     def _wh_freq_copy_selection(self, _=None):
-        """Copia as palavras selecionadas para a área de transferência (Ctrl+C)."""
-        sel = self._wh_freq_tree.selection()
+        """Copia as palavras selecionadas, uma por linha (Ctrl+C, ⌘C ou o menu)."""
+        sel = set(self._wh_freq_tree.selection())
         if not sel:
             return
+        # Percorre a ORDEM EXIBIDA (get_children) e não a ordem de clique que o
+        # selection() devolveria. str() porque o Tk converte valores que parecem
+        # número de volta para int — palavras como "71" existem no corpus e
+        # faziam o join estourar TypeError.
         words = []
-        for iid in sel:
-            values = self._wh_freq_tree.item(iid)["values"]
-            if values:
-                words.append(values[0])
+        for iid in self._wh_freq_tree.get_children():
+            if iid in sel:
+                values = self._wh_freq_tree.item(iid)["values"]
+                if values:
+                    words.append(str(values[0]))
         if words:
-            text = "\n".join(words)
             self.clipboard_clear()
-            self.clipboard_append(text)
+            self.clipboard_append("\n".join(words))
+            self._log_q.put((f"📋 {len(words)} palavra(s) copiada(s).", "info"))
+
+    def _wh_freq_context_menu(self, event):
+        """Menu flutuante com 'Copiar' no botão direito (ou Control+clique)."""
+        row = self._wh_freq_tree.identify_row(event.y)
+        if not row:
+            return "break"   # cabeçalho ou área vazia: não abre menu
+        # Clicar fora da seleção passa a seleção para a linha clicada; clicar
+        # dentro preserva a multi-seleção. Sem isso o Copiar agiria sobre algo
+        # que o usuário não vê selecionado.
+        if row not in self._wh_freq_tree.selection():
+            self._wh_freq_tree.selection_set(row)
+        self._wh_freq_tree.focus(row)
+
+        n = len(self._wh_freq_tree.selection())
+        self._wh_freq_menu.entryconfigure(
+            0, label="Copiar palavra" if n <= 1 else f"Copiar {n} palavras")
+        try:
+            self._wh_freq_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._wh_freq_menu.grab_release()
+        return "break"       # Control+clique não deve cair no <Button-1>
 
     # ── Downloads & Scraping Tab ───────────────────────────────────────────────
     def _build_downloads_tab(self):
