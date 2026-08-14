@@ -373,6 +373,7 @@ class App(tk.Tk):
         self._log_q: queue.Queue = queue.Queue()
         self._proc = None
         self._proc_lock = threading.Lock()
+        self._proc_on_done = None   # callback de encadeamento do _launch
         self._selected = None
 
         # DeepSeek debug viewer
@@ -397,6 +398,7 @@ class App(tk.Tk):
         # Últimas escolhas do pop-up de salvar (reabre nelas na mesma sessão).
         self._col_save_mode = "r36s"
         self._col_skip_zero = True
+        self._col_make_bundle = False
         # Nota (0-10) da frase selecionada. A gravação no base é serializada numa
         # thread única, para que navegar em rajada vire poucas reescritas.
         self._nota_q: queue.Queue = queue.Queue()
@@ -1860,7 +1862,7 @@ class App(tk.Tk):
             return
         SaveCollectionDialog(self)
 
-    def _col_save_run(self, mode: str, skip_zero: bool):
+    def _col_save_run(self, mode: str, skip_zero: bool, make_bundle: bool = False):
         """Grava as coleções no formato escolhido (chamado pelo pop-up)."""
         cb = self._col_import()
         if not cb or self._col_saving:
@@ -1869,6 +1871,7 @@ class App(tk.Tk):
         # Lembra as escolhas para o próximo save da sessão.
         self._col_save_mode = mode
         self._col_skip_zero = skip_zero
+        self._col_make_bundle = make_bundle
 
         groups = self._col_save_groups(skip_zero)
         if not groups:
@@ -1888,31 +1891,67 @@ class App(tk.Tk):
             self._log_q.put((f"  [{i}/{total}] {msg}", "info"))
 
         def _work():
-            last_out = None
-            ok_count = 0
+            # Guarda TODAS as pastas, não só a última: com várias coleções o
+            # ditado precisa empacotar cada uma.
+            saidas = []
             for w, ms in groups:
                 try:
                     self._log_q.put((f"💾 Coleção '{w}' ({len(ms)} frases)…", "cmd"))
                     out = cb.save_collection(w, ms, mode=mode, progress_cb=_progress)
                     self._log_q.put((f"✓ Coleção salva em {out}", "success"))
-                    last_out = out
-                    ok_count += 1
+                    saidas.append(out)
                 except Exception as e:  # noqa: BLE001
                     self._log_q.put((f"Erro ao salvar coleção '{w}': {e}", "error"))
-            self.after(0, lambda: self._col_save_done(last_out, ok_count, len(groups)))
+            self.after(0, lambda: self._col_save_done(saidas, len(groups), make_bundle))
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _col_save_done(self, out, ok_count: int = 0, total: int = 0):
+    def _col_save_done(self, saidas: list, total: int = 0, make_bundle: bool = False):
         self._col_saving = False
         self._col_save_btn.config(state=tk.NORMAL if self._col_matches else tk.DISABLED)
-        if out is not None:
-            # Abre a pasta de coleções (pai), já que pode haver várias.
-            open_dir = out.parent if total > 1 else out
-            if messagebox.askyesno(
-                    "Concluído",
-                    f"{ok_count}/{total} coleção(ões) salva(s).\nAbrir a pasta?"):
-                subprocess.Popen(["open", str(open_dir)])
+        if not saidas:
+            return
+
+        if make_bundle:
+            # Sem o prompt de abrir pasta aqui: o askyesno bloqueia a thread do
+            # Tk, que é justamente quem drena o log — o streaming do ditado
+            # congelaria atrás do modal.
+            self._log_line(f"🎴 {len(saidas)} coleção(ões) salva(s) — gerando o ditado…", "cmd")
+            self._col_bundle_chain(list(saidas))
+            return
+
+        # Abre a pasta de coleções (pai), já que pode haver várias.
+        open_dir = saidas[-1].parent if total > 1 else saidas[-1]
+        if messagebox.askyesno(
+                "Concluído",
+                f"{len(saidas)}/{total} coleção(ões) salva(s).\nAbrir a pasta?"):
+            subprocess.Popen(["open", str(open_dir)])
+
+    def _col_bundle_chain(self, pendentes: list):
+        """Roda o make_bundle.py em cada pasta, UMA POR VEZ.
+
+        O _launch aceita um processo por vez; disparar todas em paralelo cairia
+        na guarda e perderia silenciosamente todas menos a primeira. Daí o
+        encadeamento pelo on_done.
+        """
+        if not pendentes:
+            self._log_line("🎴 Ditado gerado para todas as coleções.", "success")
+            return
+        pasta = pendentes.pop(0)
+        with self._proc_lock:
+            ocupado = self._proc is not None and self._proc.poll() is None
+        if ocupado:
+            self._log_line(
+                f"⚠️  Ditado NÃO gerado para {pasta.name}: já há um processo em "
+                f"execução. Rode depois: python3 dictation/make_bundle.py "
+                f"warehouse/collections/{pasta.name}", "warning")
+            return
+        self._launch(
+            [sys.executable, str(REPO / "dictation" / "make_bundle.py"), str(pasta)],
+            label=f"Ditado: {pasta.name}",
+            pause_rate=0.0,
+            on_done=lambda: self._col_bundle_chain(pendentes),
+        )
 
     # ── Log Tab ────────────────────────────────────────────────────────────────
     def _build_log_tab(self):
@@ -2392,12 +2431,19 @@ class App(tk.Tk):
         return rate if rate > 0 else 0.0
 
     # ── Process management ─────────────────────────────────────────────────────
-    def _launch(self, cmd: list, label: str = "", pause_rate: float = None):
+    def _launch(self, cmd: list, label: str = "", pause_rate: float = None,
+                on_done=None):
+        """``on_done`` (opcional) roda na thread do Tk quando o processo termina.
+
+        É o que permite encadear execuções — sem ele não haveria como saber que
+        um bundle acabou para começar o próximo.
+        """
         with self._proc_lock:
             if self._proc and self._proc.poll() is None:
                 messagebox.showwarning("Processo em execução",
                                        "Aguarde ou pare o processo atual antes de iniciar outro.")
                 return
+        self._proc_on_done = on_done
 
         self._nb.select(4)
         self._log_line(f"$ {' '.join(str(c) for c in cmd)}", "cmd")
@@ -2432,10 +2478,12 @@ class App(tk.Tk):
                 if not line:
                     continue
                 lo = line.lower()
+                # Os glifos ❌/⚠️/✅ são o vocabulário dos scripts do repo; sem
+                # eles a saída do make_bundle sairia toda como "info".
                 tag = (
-                    "error"   if any(k in lo for k in ("error", "erro", "exception", "traceback")) else
-                    "warning" if any(k in lo for k in ("warn", "aviso", "skip")) else
-                    "success" if any(k in line for k in ("[OK]", "✓", "Done", "done", "DONE",
+                    "error"   if "❌" in line or any(k in lo for k in ("error", "erro", "exception", "traceback")) else
+                    "warning" if "⚠️" in line or any(k in lo for k in ("warn", "aviso", "skip")) else
+                    "success" if any(k in line for k in ("[OK]", "✓", "✅", "Done", "done", "DONE",
                                                           "Completo", "merged", "completed")) else
                     "info"
                 )
@@ -2453,6 +2501,14 @@ class App(tk.Tk):
         self._status_var.set("Pronto")
         self._log_label.set("")
         self._stop_btn.config(state=tk.DISABLED)
+        # Encadeamento (ex.: próximo bundle de ditado). Zera antes de chamar,
+        # senão um on_done que dispara outro _launch se reencadearia sozinho.
+        seguinte, self._proc_on_done = getattr(self, "_proc_on_done", None), None
+        if seguinte:
+            try:
+                seguinte()
+            except Exception as e:  # noqa: BLE001
+                self._log_line(f"Erro ao continuar depois do processo: {e}", "error")
         self._refresh_assets()
         self._refresh_sources()
 
@@ -2532,9 +2588,12 @@ class SaveCollectionDialog(tk.Toplevel):
         super().__init__(app)
         self.app = app
         self.title("Salvar coleção")
-        self.geometry("460x300")
+        # Largura travada (resizable False no eixo x), então quem resolve texto
+        # longo é o wraplength dos labels — não o tamanho da janela.
+        self.geometry("520x420")
         self.resizable(False, True)
         self.grab_set()
+        self._wrap = 470   # largura útil: 520 - 2*18 de padding, com folga
 
         f = ttk.Frame(self, padding=18)
         f.pack(fill=tk.BOTH, expand=True)
@@ -2555,11 +2614,28 @@ class SaveCollectionDialog(tk.Toplevel):
                         variable=self._skip_zero,
                         command=self._refresh).pack(anchor=tk.W, pady=(10, 0))
 
+        # Ditado: NÃO ligado ao _refresh, que refaz duas passadas O(n) sobre os
+        # matches (custa caro com dezenas de milhares). Este checkbox não muda a
+        # contagem, só a linha de estimativa.
+        self._make_bundle = tk.BooleanVar(value=app._col_make_bundle)
+        self._bundle_chk = ttk.Checkbutton(f, text="Gerar também ditado",
+                                           variable=self._make_bundle,
+                                           command=self._refresh_bundle)
+        self._bundle_chk.pack(anchor=tk.W, pady=(6, 0))
+        self._bundle_info = tk.StringVar()
+        ttk.Label(f, textvariable=self._bundle_info, foreground="#888",
+                  font=("", 9), wraplength=self._wrap,
+                  justify=tk.LEFT).pack(anchor=tk.W, padx=(20, 0))
+
         self._summary = tk.StringVar()
-        ttk.Label(f, textvariable=self._summary).pack(anchor=tk.W, pady=(10, 0))
+        # wraplength aqui é o conserto do texto cortado: sem ele o resumo com as
+        # duas razões de descarte e contagens de 5 dígitos passava da largura e
+        # era simplesmente truncado à direita.
+        ttk.Label(f, textvariable=self._summary, wraplength=self._wrap,
+                  justify=tk.LEFT).pack(anchor=tk.W, pady=(10, 0))
         self._dest = tk.StringVar()
         ttk.Label(f, textvariable=self._dest, foreground="#888",
-                  font=("", 9), wraplength=410,
+                  font=("", 9), wraplength=self._wrap,
                   justify=tk.LEFT).pack(anchor=tk.W, pady=(2, 0))
 
         btns = ttk.Frame(f)
@@ -2577,12 +2653,15 @@ class SaveCollectionDialog(tk.Toplevel):
         groups = self.app._col_save_groups(self._skip_zero.get())
 
         if not groups:
+            self._n_total = 0
             self._summary.set("Nada a salvar com esse filtro.")
             self._dest.set("Nenhuma frase da lista sobrou (nota 0 ou sem texto chinês).")
             self._save_btn.config(state=tk.DISABLED)
+            self._refresh_bundle()
             return
 
         n_total = sum(len(ms) for _, ms in groups)
+        self._n_total = n_total   # o _refresh_bundle reusa sem repetir a varredura
         # Mesmo detalhamento do log: nota 0 e "sem texto chinês" são motivos
         # diferentes e o rótulo não pode chamar os dois de nota 0.
         motivos = self.app._col_save_discarded(self._skip_zero.get())
@@ -2593,11 +2672,42 @@ class SaveCollectionDialog(tk.Toplevel):
         shown = ", ".join(nomes[:6]) + ("…" if len(nomes) > 6 else "")
         self._dest.set(f"→ warehouse/collections/{shown}")
         self._save_btn.config(state=tk.NORMAL)
+        self._refresh_bundle()
+
+    def _refresh_bundle(self, _=None):
+        """Habilita/desabilita o ditado e mostra a estimativa do bundle.
+
+        No formato Original o bundle não serve: as imagens são de resolução cheia
+        e cada arquivo passaria dos 60 MB que o Chrome do Android aguenta.
+        """
+        if self._mode.get() == "original":
+            self._bundle_chk.config(state=tk.DISABLED)
+            self._bundle_info.set("Só no formato R36S — no Original cada arquivo "
+                                  "passaria de 60 MB e o Chrome do celular não abre.")
+            return
+
+        self._bundle_chk.config(state=tk.NORMAL)
+        if not self._make_bundle.get() or not getattr(self, "_n_total", 0):
+            self._bundle_info.set("")
+            return
+
+        # Medido nas coleções r36s reais: ~60 KB por imagem em base64 e ~6 ms
+        # para re-encodar. Serve para o passo de minutos e gigabytes não ser
+        # uma surpresa depois de clicar em Salvar.
+        n = self._n_total
+        arquivos = -(-n // 150)          # ceil
+        gb = n * 60 / 1024 / 1024
+        minutos = n * 0.006 / 60
+        self._bundle_info.set(
+            f"≈ {arquivos} arquivo(s) em dictation/, ~{gb:.1f} GB, ~{max(1, round(minutos))} min")
 
     def _save(self):
         mode, skip_zero = self._mode.get(), self._skip_zero.get()
+        # Checkbox desabilitado no Tk MANTÉM o valor da variável, então marcar no
+        # R36S e trocar para Original geraria o bundle sem isto.
+        make_bundle = self._make_bundle.get() and mode != "original"
         self.destroy()
-        self.app._col_save_run(mode, skip_zero)
+        self.app._col_save_run(mode, skip_zero, make_bundle)
 
 
 # ─── Dialog: Asset Filter (Coleções) ────────────────────────────────────────────
