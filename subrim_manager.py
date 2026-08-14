@@ -140,6 +140,31 @@ def _wh_parse_item(item: str):
     return (word, pinyin, trad)
 
 
+def _dedupe_sentences(matches: list, clean) -> tuple:
+    """Remove frases repetidas, preservando a ordem. → ``(mantidas, n_ocultas)``.
+
+    ``clean`` é a normalização da frase (``collection_builder.clean_chinese_only``,
+    injetada para esta função não depender do import pesado do módulo). Compara só
+    os ideogramas, então ``"我沒有。"`` e ``"我沒有..."`` são a mesma frase — é a
+    mesma noção de frase que o app de ditado usa.
+
+    Sobrevive a PRIMEIRA ocorrência da ordem recebida (asset, depois linha).
+
+    Frase cuja normalização é vazia — legenda só com ``♪``, pontuação ou mojibake
+    — NUNCA deduplica: são milhares no corpus e colidiriam todas num único balde,
+    sumindo de uma vez.
+    """
+    vistos, out = set(), []
+    for m in matches:
+        key = clean(m.get("chinese", ""))
+        if key:
+            if key in vistos:
+                continue
+            vistos.add(key)
+        out.append(m)
+    return out, len(matches) - len(out)
+
+
 def _wh_analyse(base_path: Path, mastered=None, vocab=None) -> dict:
     """Analisa um base.txt do warehouse e retorna estatísticas de palavras.
 
@@ -1100,6 +1125,10 @@ class App(tk.Tk):
         self._col_vocab_btn = ttk.Button(top, text="↻ Vocab",
                                          command=self._col_reload_vocab)
         self._col_vocab_btn.pack(side=tk.LEFT, padx=(6, 0))
+        # Vale na PRÓXIMA busca, como o ⚙ Filtro — não refiltra o resultado atual.
+        self._col_hide_dups = tk.BooleanVar(value=False)
+        ttk.Checkbutton(top, text="Ocultar duplicadas",
+                        variable=self._col_hide_dups).pack(side=tk.LEFT, padx=(12, 0))
         self._col_status = tk.StringVar(
             value="Palavras (ex.: 著,當,與)  ·  0 = frases i+1  ·  1 = todas as frases")
         ttk.Label(top, textvariable=self._col_status, foreground="#888").pack(side=tk.LEFT, padx=12)
@@ -1422,6 +1451,8 @@ class App(tk.Tk):
             return
 
         asset_filter = self._col_asset_filter  # None = todos
+        hide_dups = self._col_hide_dups.get()
+        self._col_hidden_dups = 0
 
         self._col_status.set("Buscando…")
         self._col_tree.delete(*self._col_tree.get_children())
@@ -1447,8 +1478,26 @@ class App(tk.Tk):
             self._log_q.put((msg, tag))
 
         def _apply_filter(matches):
+            """Filtra por asset e, se pedido, remove frases repetidas.
+
+            Os três modos passam por aqui — inclusive o de palavra, que chama
+            isto inline dentro do _col_show_results. Fazer o dedup junto (e não
+            num segundo passo) é o que garante que nenhum ramo fique de fora.
+
+            Ordem importa: asset ANTES do dedup. No inverso, uma frase de um
+            asset excluído pelo filtro poderia consumir a ocorrência e esconder a
+            única cópia visível.
+
+            Duplicatas são linhas distintas de bases distintas: ocultar uma não a
+            apaga. Dar nota na cópia visível grava só na linha dela — as gêmeas
+            escondidas mantêm a nota que tinham.
+            """
             if asset_filter:
                 matches = [m for m in matches if m.get("asset") in asset_filter]
+            if not hide_dups:
+                return matches
+            matches, self._col_hidden_dups = _dedupe_sentences(
+                matches, cb.clean_chinese_only)
             return matches
 
         if self._col_mode == "i+1":
@@ -1498,6 +1547,11 @@ class App(tk.Tk):
         else:
             n_words = len({m.get("word", "") for m in matches})
             status = f"{n} frase(s) em {n_words} palavra(s)"
+        # Sem isso o efeito de "ocultar duplicadas" seria invisível. Vale para os
+        # três modos, e sobrevive a ordenar/excluir porque mora em self.
+        ocultas = getattr(self, "_col_hidden_dups", 0)
+        if ocultas:
+            status += f"  ·  {ocultas} duplicada(s) oculta(s)"
         self._col_status.set(status if n else "Nenhuma frase encontrada")
         self._col_save_btn.config(state=tk.NORMAL if n else tk.DISABLED)
         # Cronômetro: nova busca encerra qualquer sessão ativa e (re)habilita o botão.
