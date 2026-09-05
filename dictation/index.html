@@ -88,9 +88,12 @@
     border-radius: 10px; padding: 11px 12px;
   }
   #answer:focus { outline: none; border-color: var(--accent); }
-  #answer.ok { border-color: var(--accent); background: #1e1a2e; }
-  /* Feedback de erro: animação CSS pura, o compositor cuida — nada de JS por frame. */
-  #answer.bad {
+  #answer[readonly] { border-color: var(--line); }
+  #answer.ok, .opt.ok { border-color: var(--accent); background: #1e1a2e; }
+  /* Feedback de erro: animação CSS pura, o compositor cuida — nada de JS por frame.
+     Uma regra só para os dois casos: no jogo 1 quem erra é o campo, nos jogos 2
+     e 3 é o botão tocado — e errar tem de ser a mesma coisa nos três. */
+  #answer.bad, .opt.bad {
     border-color: var(--bad); background: #2a1719;
     animation: shake .28s ease-in-out;
   }
@@ -99,6 +102,22 @@
     25% { transform: translateX(-5px); }
     75% { transform: translateX(5px); }
   }
+
+  /* Grid de opções dos jogos 2 e 3.
+     max-height em vez de transformar o body em coluna flex: assim o grid nunca
+     engole a página, e — mais importante — nunca aparece com altura zero quando
+     a imagem é alta. O documento continua rolando como sempre. */
+  #grid {
+    display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px;
+    padding: 4px 12px 12px;
+    max-height: 38vh; max-height: 38dvh; overflow-y: auto;
+  }
+  .opt { min-height: 44px; font-size: 16px; padding: 8px 12px; }
+  /* Jogo 3: um ideograma sozinho a 16px é ilegível no celular — e, ao contrário
+     do pinyin, aqui o traço É a informação. Cabe crescer porque o rótulo tem
+     sempre um caractere só. */
+  .opt.char { font-size: 30px; line-height: 1.15; min-width: 58px; padding: 6px 10px; }
+  .opt.gone { display: none; }
 
   #msg { padding: 0 12px 12px; font-size: 13px; color: var(--dim); min-height: 18px; }
 
@@ -136,6 +155,7 @@
            spellcheck="false" enterkeyhint="done" lang="zh">
   </form>
   <div id="msg"></div>
+  <div id="grid" class="hide"></div>
 
   <footer>
     <span id="count">—</span>
@@ -172,12 +192,13 @@
     form: document.getElementById("form"),
     answer: document.getElementById("answer"),
     msg: document.getElementById("msg"),
+    grid: document.getElementById("grid"),
     exportBtn: document.getElementById("export"),
     menuBtn: document.getElementById("menu-btn"),
     menu: document.getElementById("menu")
   };
 
-  var items = [];      // [{index, source, sentence, done}]
+  var items = [];      // [{index, source, sentence, done, game, words|chars, opts}]
   var at = 0;          // posição atual NO ARRAY (não é o campo index)
   var storeKey = "";   // chave de progresso, isolada por coleção
 
@@ -256,6 +277,7 @@
 
   function goTo(i) {
     if (i < 0 || i >= items.length) return;
+    stashDraft();
     at = i;
     var slide = el.track.children[i];
     if (slide) {
@@ -266,7 +288,7 @@
       // A atribuição sempre chega ao destino; o scroll-snap dá o acabamento.
       el.track.scrollLeft = slide.offsetLeft;
     }
-    refresh();
+    syncCurrent();
   }
 
   // Enquanto o dedo arrasta, mantém `at` em sincronia com o que está na tela.
@@ -276,32 +298,161 @@
     scrollTimer = setTimeout(function () {
       var w = el.track.clientWidth || 1;
       var i = Math.round(el.track.scrollLeft / w);
-      if (i !== at && i >= 0 && i < items.length) { at = i; refresh(); }
+      if (i !== at && i >= 0 && i < items.length) { stashDraft(); at = i; syncCurrent(); }
     }, 90);
   }, { passive: true });
 
   // ── Validação ───────────────────────────────────────────────────────────────
-  function flash(cls, text) {
-    el.answer.classList.remove("bad", "ok");
-    void el.answer.offsetWidth;              // reinicia a animação
-    el.answer.classList.add(cls);
-    el.msg.textContent = text || "";
-    setTimeout(function () { el.answer.classList.remove(cls); }, 900);
+  // O alvo é parâmetro porque quem erra muda de jogo para jogo: no 1 é o campo,
+  // no 2 e no 3 é o botão tocado. O feedback em si é o mesmo nos três.
+  function flash(node, cls) {
+    node.classList.remove("bad", "ok");
+    void node.offsetWidth;                   // reinicia a animação
+    node.classList.add(cls);
+    el.msg.textContent = "";
+    setTimeout(function () { node.classList.remove(cls); }, 900);
   }
+
+  // ── Grids dos jogos 2 e 3 ───────────────────────────────────────────────
+  // As quatro funções abaixo são a única coisa que separa os dois jogos: um
+  // trabalha em palavras rotuladas por pinyin, o outro em caracteres soltos.
+  function pieces(cur) {
+    return cur.game === 2 ? cur.words.length : cur.sentence.length;
+  }
+
+  function optCount(cur) {
+    return cur.game === 2 ? cur.opts.length : cur.chars.length;
+  }
+
+  function optLabel(cur, i) {
+    return cur.game === 2 ? cur.opts[i].p : cur.chars[i];
+  }
+
+  // O que o botão escreve se for a vez dele; null no distrator.
+  function optWrites(cur, i) {
+    return cur.game === 2 ? (cur.opts[i].w || null) : cur.chars[i];
+  }
+
+  function expected(cur) {
+    return cur.game === 2
+      ? (cur.words[cur.step] || null)
+      : (cur.sentence.charAt(cur.step) || null);
+  }
+
+  function buildGrid() {
+    var cur = items[at];
+    el.grid.textContent = "";
+    if (!cur || cur.game === 1) {
+      el.grid.classList.add("hide");
+      el.answer.readOnly = false;
+      el.answer.placeholder = "Digite a frase";
+      return;
+    }
+    // readonly nos jogos de montar: o teclado do Android subiria por cima do
+    // grid, e o que fosse digitado à mão sairia de sincronia com os botões.
+    el.answer.readOnly = true;
+    el.answer.placeholder = "";
+    // Vindo de um jogo 1, o campo está com o foco: sem largá-lo o teclado
+    // continuaria de pé, cobrindo justamente o grid que se vai usar agora.
+    el.answer.blur();
+    var frag = document.createDocumentFragment();
+    for (var i = 0; i < optCount(cur); i++) {
+      var b = document.createElement("button");
+      b.type = "button";
+      b.className = "opt" + (cur.game === 3 ? " char" : "")
+                  + (cur.used.indexOf(i) >= 0 ? " gone" : "");
+      b.textContent = optLabel(cur, i);
+      b.setAttribute("data-i", i);
+      frag.appendChild(b);
+    }
+    el.grid.appendChild(frag);
+    el.grid.classList.remove("hide");
+  }
+
+  // Guarda o que está no campo ANTES de trocar de frase. Só o jogo 1 precisa:
+  // nos outros o campo é reconstruído a partir de `step`.
+  function stashDraft() {
+    var cur = items[at];
+    if (cur && cur.game === 1) cur.draft = el.answer.value;
+  }
+
+  // Repõe o campo com o que pertence à frase atual — e só com isso. O campo é
+  // um por página, mas o conteúdo é de cada frase: sem isto, a frase que o jogo
+  // 3 acabou de montar continuaria no campo do jogo 1 seguinte, que abriria já
+  // "preenchido" com a resposta de outra imagem.
+  function restoreAnswer() {
+    var cur = items[at];
+    if (!cur) return;
+    if (cur.game === 1) {
+      el.answer.value = cur.draft || "";
+      // O jogo 1 é digitar: chegar nele já com o cursor no campo poupa um toque,
+      // e é o que faz o teclado subir sozinho depois do avanço automático.
+      el.answer.focus();
+      el.answer.select();
+      return;
+    }
+    el.answer.value = cur.game === 2
+      ? cur.words.slice(0, cur.step).join("")
+      : cur.sentence.slice(0, cur.step);
+  }
+
+  function syncCurrent() {
+    refresh();
+    buildGrid();
+    restoreAnswer();
+  }
+
+  function pick(i, btn) {
+    var cur = items[at];
+    if (!cur || cur.game === 1) return;
+    var want = expected(cur);
+    var gives = optWrites(cur, i);
+    // Compara por VALOR, não por identidade: uma palavra (ou caractere) que se
+    // repete na frase pode ser resolvida por qualquer um dos seus botões.
+    if (!want || gives !== want) {
+      flash(btn, "bad");
+      return;
+    }
+
+    cur.used.push(i);
+    cur.step++;
+    btn.classList.add("gone");
+    el.answer.value += gives;
+    flash(el.answer, "ok");
+    if (cur.step < pieces(cur)) return;
+
+    if (!cur.done) { cur.done = true; saveProgress(); }
+    refresh();
+    // Pausa curta antes de virar a página: sem ela o acerto final mal aparece,
+    // e é justamente ele o prêmio.
+    var nxt = at + 1;
+    setTimeout(function () {
+      if (nxt < items.length) goTo(nxt);
+      else { syncCurrent(); el.msg.textContent = "Fim da coleção."; }
+    }, 350);
+  }
+
+  el.grid.addEventListener("click", function (e) {
+    var b = e.target && e.target.closest ? e.target.closest(".opt") : null;
+    if (!b || b.classList.contains("gone")) return;
+    pick(parseInt(b.getAttribute("data-i"), 10), b);
+  });
 
   function submit() {
     var cur = items[at];
     if (!cur) return;
+    if (cur.game !== 1) return;              // nos jogos de montar não há o que enviar
     // Comparação literal, como pedido: nada de trim nem normalização.
     if (el.answer.value === cur.sentence) {
       if (!cur.done) { cur.done = true; saveProgress(); }
       el.answer.value = "";
-      flash("ok", "");
+      cur.draft = "";                        // acertou: o rascunho morreu junto
+      flash(el.answer, "ok");
       var nxt = at + 1;                      // próximo índice da lista
       if (nxt < items.length) goTo(nxt);
       else { refresh(); el.msg.textContent = "Fim da coleção."; }
     } else {
-      flash("bad", "");
+      flash(el.answer, "bad");
     }
   }
 
@@ -376,15 +527,31 @@
     for (var i = 0; i < data.length; i++) {
       var e = data[i] || {};
       if (!e.source) continue;
-      out.push({
+      var it = {
         index: typeof e.index === "number" ? e.index : i + 1,
         source: String(e.source),
         sentence: typeof e.sentence === "string" ? e.sentence : "",
         done: e.done === true,
         // No bundle a imagem vem embutida como data URI; sem ela, resolve por
         // caminho relativo (que só funciona em http:// ou file://).
-        img: typeof e.img === "string" && e.img ? e.img : null
-      });
+        img: typeof e.img === "string" && e.img ? e.img : null,
+        game: 1,
+        step: 0,          // pedaços já colocados nesta frase
+        used: [],         // índices de opts já gastos
+        draft: ""         // o que foi digitado aqui (só jogo 1)
+      };
+      // Os jogos 2 e 3 dependem de dados que só o make_bundle monta. Sem eles
+      // — index.json antigo, servido por pasta — o item cai no jogo 1, que é o
+      // que a página sempre soube fazer.
+      if (e.game === 2 && e.opts && e.opts.length && e.words && e.words.length) {
+        it.game = 2;
+        it.words = e.words;
+        it.opts = e.opts;
+      } else if (e.game === 3 && e.chars && e.chars.length) {
+        it.game = 3;
+        it.chars = e.chars;
+      }
+      out.push(it);
     }
     if (!out.length) throw new Error("nenhuma entrada utilizável no index.json");
     return out;
@@ -404,8 +571,7 @@
     }
     el.boot.classList.add("hide");
     el.app.classList.remove("hide");
-    goTo(first);
-    el.answer.focus();
+    goTo(first);   // o foco, quando cabe, sai do restoreAnswer
   }
 
   function fail(reason) {
