@@ -43,7 +43,38 @@ _PAIR_RE = re.compile(r'"([^"\s(]+)\s*\(([^)]+)\)')
 _CJK_ONLY_RE = re.compile(r"[^一-鿿㐀-䶿豈-﫿]")
 
 PAIRS_COL = 4
+PT_COL = 5
 ZHT_COL = 3
+
+
+def warehouse_dir(warehouse: Path = None) -> Path:
+    """Pasta do warehouse — por padrão a irmã de ``dictation/``."""
+    if warehouse is None:
+        warehouse = Path(__file__).resolve().parent.parent / "warehouse"
+    return warehouse
+
+
+def iter_base_rows(warehouse: Path = None):
+    """Percorre todos os ``*_base.txt``, devolvendo ``(asset, colunas)``.
+
+    Uma linha só é devolvida se tiver as 6 colunas do contrato
+    (``index begin end zht pares pt``). Mora aqui, e não em cada consumidor,
+    porque o ditado já tem dois módulos lendo os mesmos 209 arquivos — o
+    léxico dos jogos 2/5 e o banco de traduções do jogo 4.
+    """
+    warehouse = warehouse_dir(warehouse)
+    if not warehouse.is_dir():
+        return
+    for base in sorted(warehouse.glob("*_base.txt")):
+        asset = base.stem[:-len("_base")] if base.stem.endswith("_base") else base.stem
+        try:
+            text = base.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for line in text.splitlines():
+            cols = line.split("\t")
+            if len(cols) > PT_COL:
+                yield asset, cols
 
 # ── Pinyin ──────────────────────────────────────────────────────────────────
 # Os quatro tons combinantes. O trema do "ü" (U+0308) NÃO entra aqui: ele faz
@@ -272,27 +303,14 @@ class Lexicon:
     @staticmethod
     def _scan_warehouse(warehouse: Path = None) -> dict:
         """``palavra -> pinyin mais frequente`` agregando todos os ``*_base.txt``."""
-        if warehouse is None:
-            warehouse = Path(__file__).resolve().parent.parent / "warehouse"
-        if not warehouse.is_dir():
-            return {}
-
         tally = {}
-        for base in sorted(warehouse.glob("*_base.txt")):
-            try:
-                text = base.read_text(encoding="utf-8", errors="replace")
-            except OSError:
-                continue
-            for line in text.splitlines():
-                cols = line.split("\t")
-                if len(cols) <= PAIRS_COL:
+        for _asset, cols in iter_base_rows(warehouse):
+            for word, pinyin in parse_pairs(cols[PAIRS_COL]):
+                word = clean_chinese_only(word)   # já garante a chave CJK
+                if not word or not is_clean_pinyin(pinyin):
                     continue
-                for word, pinyin in parse_pairs(cols[PAIRS_COL]):
-                    word = clean_chinese_only(word)   # já garante a chave CJK
-                    if not word or not is_clean_pinyin(pinyin):
-                        continue
-                    counts = tally.setdefault(word, {})
-                    counts[pinyin] = counts.get(pinyin, 0) + 1
+                counts = tally.setdefault(word, {})
+                counts[pinyin] = counts.get(pinyin, 0) + 1
 
         return {w: max(c.items(), key=lambda kv: kv[1])[0] for w, c in tally.items()}
 

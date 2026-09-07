@@ -29,10 +29,15 @@ O progresso (done) fica no localStorage, com chave derivada dos nomes dos
 arquivos de CADA bundle — então cada arquivo controla o seu próprio bloco, e o
 "Exportar" de um bundle traz só as entradas dele.
 
-Os três jogos (digitar / montar por pinyin / montar por caractere) se alternam a
-cada frase, então um bloco de 150 sai 50/50/50. O que os jogos 2 e 3 precisam —
-segmentação, pinyin, distratores, embaralhamento — é resolvido AQUI e viaja
-embutido: a página não tem rede quando roda no celular. Ver ``wordgrid.py``.
+Os cinco jogos se alternam a cada frase, então um bloco de 150 sai 30 de cada.
+Tudo que eles precisam — segmentação, pinyin, distratores, traduções erradas,
+decomposições, embaralhamento — é resolvido AQUI e viaja embutido: a página não
+tem rede quando roda no celular. Ver ``wordgrid.py``, ``translations.py`` e
+``hanzi_decomp.py``.
+
+Cada jogo embute a imagem que NÃO mostra a sua resposta: o jogo 3 usa a variante
+``so_traducao/`` e o jogo 4 a ``so_mandarim/``, gravadas pelo "salvar coleção".
+Continua sendo uma imagem por frase — o tamanho do bundle não muda.
 """
 
 import argparse
@@ -43,13 +48,16 @@ import random
 import sys
 from pathlib import Path
 
+import hanzi_decomp
+import translations
 import wordgrid
 
 HERE = Path(__file__).resolve().parent
 TEMPLATE = HERE / "index.html"
 MARKER = "<!-- DICTATION_DATA:"
 
-N_GAMES = 3
+# Qual variante de imagem cada jogo embute. Ausente = a imagem completa.
+GAME_IMAGE = {3: "source_pt", 4: "source_zh"}
 
 # Acima disso o Chrome do Android começa a engasgar para abrir o arquivo.
 WARN_MB = 60
@@ -68,26 +76,81 @@ def encode_image(path: Path, quality: int, keep_png: bool) -> str:
     return "data:image/jpeg;base64," + base64.b64encode(buf.getvalue()).decode("ascii")
 
 
-def assign_games(items: list, lex, games: bool = True) -> list:
-    """Alterna 1, 2, 3 pelos itens e anexa o que cada jogo precisa.
+class Deps:
+    """O que os jogos precisam, carregado uma vez por execução.
+
+    Também decide QUAIS jogos esta coleção suporta. Uma coleção salva sem as
+    variantes de imagem não tem como jogar 3 nem 4; alternar 1..5 assim mandaria
+    60% das frases para o jogo 1. O rodízio passa a ser só sobre os jogos
+    possíveis — 1, 2 e 5 nesse caso — e a saída diz o motivo.
+    """
+
+    def __init__(self, entries: list, folder: Path, enabled: bool = True):
+        self.lex = None
+        self.bank = None
+        self.decomps = {}
+        self.games = [1]
+        self.notas = []
+        if not enabled:
+            return
+
+        self.lex = wordgrid.Lexicon.load()
+        if self.lex:
+            self.games.append(2)
+        else:
+            self.notas.append("sem léxico: o jogo 2 sai de cena")
+
+        if any((e.get("source_pt") and (folder / e["source_pt"]).exists())
+               for e in entries):
+            self.games.append(3)
+        else:
+            self.notas.append("sem so_traducao/: o jogo 3 sai de cena")
+
+        tem_pt = any((e.get("portuguese") or "").strip() for e in entries)
+        self.bank = translations.Bank.load() if tem_pt else None
+        if tem_pt and self.bank and any(
+                (e.get("source_zh") and (folder / e["source_zh"]).exists())
+                for e in entries):
+            self.games.append(4)
+        else:
+            self.notas.append("sem so_mandarim/ ou sem traduções: o jogo 4 sai de cena")
+
+        # Buscar TODOS os caracteres de uma vez: só depois de saber se alguma
+        # decomposição existe é que dá para decidir se o jogo 5 vale a pena. Sem
+        # nenhuma ele viraria o jogo 3 com a imagem que mostra a resposta.
+        chars = {c for e in entries for c in (e.get("sentence") or "")}
+        if chars:
+            self.decomps = hanzi_decomp.decompositions(sorted(chars))
+        if any(self.decomps.values()):
+            self.games.append(5)
+        else:
+            self.notas.append("nenhuma decomposição: o jogo 5 sai de cena")
+
+    def describe(self) -> str:
+        return "jogos disponíveis: " + "/".join(str(g) for g in self.games)
+
+
+def assign_games(items: list, deps: Deps) -> list:
+    """Alterna os jogos disponíveis pelos itens e anexa o que cada um precisa.
 
     A distribuição usa a posição na lista JÁ FILTRADA (as entradas sem imagem
-    saíram antes), que é o que garante o 50/50/50 num bloco de 150.
+    saíram antes), que é o que garante o 30/30/30/30/30 num bloco de 150.
 
-    Um item que não dá para montar — frase de um caractere só, ou com um
-    caractere fora do léxico — é REBAIXADO para o jogo 1 em vez de sumir.
-    ``games=False`` rebaixa todos. Devolve a contagem por jogo.
+    Um item que não dá para montar — frase de um caractere só, sem tradução com
+    pontuação parecida, sem pinyin para alguma palavra — é REBAIXADO para o
+    jogo 1 em vez de sumir. Devolve a contagem por jogo (índice 0 = jogo 1).
     """
-    counts = [0] * N_GAMES
+    counts = [0] * 5
+    ciclo = deps.games
     for i, item in enumerate(items):
-        game = (i % N_GAMES) + 1 if games else 1
+        game = ciclo[i % len(ciclo)]
         # Semente pelo nome do arquivo: reempacotar a mesma coleção devolve
         # exatamente o mesmo bundle, o que torna diffs e bugs reproduzíveis.
         rng = random.Random(item["source"])
         sentence = item["sentence"]
 
-        if game == 2 and lex:
-            built = lex.word_game(sentence, rng)
+        if game == 2:
+            built = deps.lex.word_game(sentence, rng) if deps.lex else None
             if built:
                 item["words"] = built["words"]
                 item["opts"] = built["opts"]
@@ -99,8 +162,24 @@ def assign_games(items: list, lex, games: bool = True) -> list:
                 item["chars"] = chars
             else:
                 game = 1
-        elif game != 1:
-            game = 1                          # jogo 2 sem léxico
+        elif game == 4:
+            options = (deps.bank.options(item.get("portuguese", ""), rng)
+                       if deps.bank else None)
+            if options:
+                item["options"] = options
+                # A certa também vai limpa: é assim que ela aparece no botão, e
+                # é por igualdade de texto que a página confere o clique.
+                item["answer"] = translations.clean_pt(item["portuguese"])
+            else:
+                game = 1
+        elif game == 5:
+            chars = wordgrid.char_game(sentence, rng)
+            # Sem decomposição o botão mostra o caractere inteiro, como pedido.
+            if chars:
+                item["chars"] = chars
+                item["decomps"] = [deps.decomps.get(c) or c for c in chars]
+            else:
+                game = 1
 
         item["game"] = game
         counts[game - 1] += 1
@@ -108,28 +187,47 @@ def assign_games(items: list, lex, games: bool = True) -> list:
 
 
 def write_bundle(chunk: list, folder: Path, out: Path, template: str,
-                 quality: int, keep_png: bool, lex, games: bool = True) -> tuple:
+                 quality: int, keep_png: bool, deps: Deps) -> tuple:
     """Grava um bundle. Devolve (n_imagens, bytes, faltando, contagem_por_jogo)."""
     items = []
     faltando = []
     for i, e in enumerate(chunk, 1):
         src = e.get("source") or ""
-        img_path = folder / src
-        if not img_path.exists():
+        if not (folder / src).exists():
             faltando.append(src)
             continue
         items.append({
             "index": e.get("index", i),
             "source": src,
             "sentence": e.get("sentence", ""),
+            "portuguese": (e.get("portuguese") or "").strip(),
             "done": bool(e.get("done", False)),
-            "img": encode_image(img_path, quality, keep_png),
+            # Os caminhos das variantes ficam guardados fora do payload: servem
+            # para escolher a imagem e não têm por que viajar até o celular.
+            "_src": {k: e.get(v) for k, v in GAME_IMAGE.items() if e.get(v)},
         })
 
     if not items:
-        return (0, 0, faltando, [0] * N_GAMES)
+        return (0, 0, faltando, [0] * 5)
 
-    counts = assign_games(items, lex, games)
+    # Os jogos são atribuídos ANTES de codificar: cada jogo embute uma imagem
+    # diferente, e codificar tudo para depois escolher desperdiçaria o base64.
+    counts = assign_games(items, deps)
+
+    for item in items:
+        variante = item.pop("_src").get(item["game"])
+        caminho = folder / variante if variante else folder / item["source"]
+        if not caminho.exists():
+            # A variante sumiu do disco entre o índice e agora: joga o jogo 1
+            # com a imagem completa, em vez de gerar um item sem imagem.
+            counts[item["game"] - 1] -= 1
+            item["game"] = 1
+            counts[0] += 1
+            caminho = folder / item["source"]
+        item["img"] = encode_image(caminho, quality, keep_png)
+        # Serviu para montar as opções do jogo 4 e não tem leitor na página: o
+        # que ela compara é `answer`, já limpo.
+        del item["portuguese"]
 
     # json.dumps produz JS válido. Escapa "<" para nenhum conteúdo poder fechar
     # a tag <script> por acidente.
@@ -181,25 +279,26 @@ def build(folder: Path, out_dir: Path, per_file: int, quality: int,
     if len(chunks) < total_chunks:
         print(f"   ⚠️  --max-files {max_files}: gerando só os {len(chunks)} primeiros")
 
-    # Uma carga só para a execução inteira: a word-api é uma chamada de rede e a
-    # varredura do warehouse lê 200+ arquivos.
-    lex = None
+    # Uma carga só para a execução inteira: são duas varreduras de 200+ arquivos
+    # e uma consulta por caractere na hanzi-api.
     if no_games:
         print("   --no-games: tudo sai como jogo 1 (digitar)")
-    else:
-        lex = wordgrid.Lexicon.load()
-        if lex:
-            print(f"   léxico: {len(lex)} palavras (jogos 1, 2 e 3)")
-        else:
-            print("   ⚠️  léxico vazio: sem word-api e sem warehouse, o jogo 2 "
-                  "não tem como ser montado — essas frases saem como jogo 1")
+    deps = Deps(entries, folder, enabled=not no_games)
+    if not no_games:
+        print(f"   {deps.describe()}")
+        if deps.lex:
+            print(f"   léxico: {len(deps.lex)} palavras"
+                  + (f", traduções: {len(deps.bank)}" if deps.bank else "")
+                  + (f", decomposições: {sum(1 for v in deps.decomps.values() if v)}"
+                     f"/{len(deps.decomps)} caracteres" if deps.decomps else ""))
+        for nota in deps.notas:
+            print(f"   ⚠️  {nota}")
 
     escritos, total_bytes, faltando_geral = 0, 0, []
     for n, chunk in enumerate(chunks, 1):
         out = out_dir / f"{folder.name}_ditado_{n:0{width}d}.html"
         n_img, size, faltando, jogos = write_bundle(chunk, folder, out, template,
-                                                    quality, keep_png, lex,
-                                                    not no_games)
+                                                    quality, keep_png, deps)
         faltando_geral += faltando
         if not n_img:
             print(f"   [{n}/{len(chunks)}] {out.name}: nenhuma imagem encontrada — pulado")
@@ -210,11 +309,12 @@ def build(folder: Path, out_dir: Path, per_file: int, quality: int,
         flag = "  ⚠️  grande" if mb > WARN_MB else ""
         print(f"   [{n}/{len(chunks)}] {out.name}  {n_img} imagens, {mb:.1f} MB{flag}")
         if not no_games:
-            # Rebaixadas = as que iriam para o jogo 2 ou 3, não deram, e por
-            # isso engordaram o jogo 1 acima do terço que lhe cabia.
-            rebaixadas = jogos[0] - -(-n_img // N_GAMES)
-            extra = f", {rebaixadas} rebaixada(s)" if rebaixadas else ""
-            print(f"        jogos {jogos[0]}/{jogos[1]}/{jogos[2]}{extra}")
+            # Rebaixadas = as que iriam para outro jogo, não deram, e por isso
+            # engordaram o jogo 1 acima da fatia que lhe cabia no rodízio.
+            por_jogo = -(-n_img // len(deps.games))
+            rebaixadas = jogos[0] - (por_jogo if 1 in deps.games else 0)
+            extra = f", {rebaixadas} rebaixada(s)" if rebaixadas > 0 else ""
+            print("        jogos " + "/".join(str(x) for x in jogos) + extra)
 
     if faltando_geral:
         print(f"\n⚠️  {len(faltando_geral)} imagem(ns) do índice não existem na pasta "

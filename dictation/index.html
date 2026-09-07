@@ -110,6 +110,7 @@
   #grid {
     display: flex; flex-wrap: wrap; align-content: flex-start; gap: 8px;
     padding: 4px 12px 12px;
+    /* Teto inicial; fitGrid() ajusta ao espaço que sobra de verdade. */
     max-height: 38vh; max-height: 38dvh; overflow-y: auto;
   }
   .opt { min-height: 44px; font-size: 16px; padding: 8px 12px; }
@@ -117,6 +118,17 @@
      do pinyin, aqui o traço É a informação. Cabe crescer porque o rótulo tem
      sempre um caractere só. */
   .opt.char { font-size: 30px; line-height: 1.15; min-width: 58px; padding: 6px 10px; }
+  /* Jogos 4 e 5: o rótulo é uma frase inteira (uma tradução, ou a decomposição
+     com as glossárias), então cada opção ocupa a linha toda e alinha à
+     esquerda — lado a lado elas viram um bloco ilegível. */
+  .opt.wide { flex: 1 1 100%; text-align: left; font-size: 14px; line-height: 1.3; }
+  /* Jogo 5 no mesmo corpo do jogo 3: o que se lê no botão são ideogramas, e um
+     radical a 14px não dá para distinguir de outro. Depois de .opt.wide, para
+     ganhar dela o tamanho da fonte. */
+  .opt.decomp { font-size: 30px; line-height: 1.25; }
+  /* A glossária explica o componente, não é o componente: em corpo cheio ela
+     dobrava a altura do botão e o grid virava três telas de rolagem. */
+  .opt.decomp .gloss { font-size: 14px; color: var(--dim); }
   .opt.gone { display: none; }
 
   #msg { padding: 0 12px 12px; font-size: 13px; color: var(--dim); min-height: 18px; }
@@ -313,9 +325,10 @@
     setTimeout(function () { node.classList.remove(cls); }, 900);
   }
 
-  // ── Grids dos jogos 2 e 3 ───────────────────────────────────────────────
-  // As quatro funções abaixo são a única coisa que separa os dois jogos: um
-  // trabalha em palavras rotuladas por pinyin, o outro em caracteres soltos.
+  // ── Grids dos jogos 2 a 5 ───────────────────────────────────────────────
+  // As funções abaixo são a única coisa que separa os jogos de montar: o 2
+  // trabalha em palavras rotuladas por pinyin, o 3 em caracteres, e o 5 é o 3
+  // com outro rótulo. O 4 é de clique único e não passa por elas.
   function pieces(cur) {
     return cur.game === 2 ? cur.words.length : cur.sentence.length;
   }
@@ -325,7 +338,9 @@
   }
 
   function optLabel(cur, i) {
-    return cur.game === 2 ? cur.opts[i].p : cur.chars[i];
+    if (cur.game === 2) return cur.opts[i].p;
+    if (cur.game === 5) return cur.decomps[i];   // sem decomposição vem o caractere
+    return cur.chars[i];
   }
 
   // O que o botão escreve se for a vez dele; null no distrator.
@@ -339,9 +354,40 @@
       : (cur.sentence.charAt(cur.step) || null);
   }
 
+  // Classe extra do botão, por jogo: caractere grande no 3, linha inteira no 5.
+  function optClass(cur) {
+    if (cur.game === 3) return " char";
+    if (cur.game === 5) return " wide decomp";
+    return "";
+  }
+
+  // Monta o rótulo do jogo 5 em dois corpos. O campo vem como
+  // "日 (sol/tempo) + 寺 (templo/instituição)": o que está entre parênteses é
+  // explicação e vai pequeno; o resto — componentes e "+" — é o que se lê.
+  // Sem parênteses (o fallback do caractere puro) o laço não acha nada e o
+  // rótulo inteiro sai grande, que é o certo.
+  function fillDecomp(btn, label) {
+    var re = /\(([^)]*)\)/g;
+    var pos = 0, m, span;
+    while ((m = re.exec(label))) {
+      if (m.index > pos) {
+        btn.appendChild(document.createTextNode(label.slice(pos, m.index)));
+      }
+      span = document.createElement("span");
+      span.className = "gloss";
+      span.textContent = m[0];
+      btn.appendChild(span);
+      pos = m.index + m[0].length;
+    }
+    if (pos < label.length) {
+      btn.appendChild(document.createTextNode(label.slice(pos)));
+    }
+  }
+
   function buildGrid() {
     var cur = items[at];
     el.grid.textContent = "";
+    el.grid.style.maxHeight = "";
     if (!cur || cur.game === 1) {
       el.grid.classList.add("hide");
       el.answer.readOnly = false;
@@ -355,19 +401,51 @@
     // Vindo de um jogo 1, o campo está com o foco: sem largá-lo o teclado
     // continuaria de pé, cobrindo justamente o grid que se vai usar agora.
     el.answer.blur();
+
     var frag = document.createDocumentFragment();
-    for (var i = 0; i < optCount(cur); i++) {
-      var b = document.createElement("button");
-      b.type = "button";
-      b.className = "opt" + (cur.game === 3 ? " char" : "")
-                  + (cur.used.indexOf(i) >= 0 ? " gone" : "");
-      b.textContent = optLabel(cur, i);
-      b.setAttribute("data-i", i);
-      frag.appendChild(b);
+    var i, b;
+    if (cur.game === 4) {
+      // Clique único: cinco traduções, uma por linha. Não há `step` nem botão
+      // que some — o item se resolve ou não com um toque.
+      for (i = 0; i < cur.options.length; i++) {
+        b = document.createElement("button");
+        b.type = "button";
+        b.className = "opt wide";
+        b.textContent = cur.options[i];
+        b.setAttribute("data-i", i);
+        frag.appendChild(b);
+      }
+    } else {
+      for (i = 0; i < optCount(cur); i++) {
+        b = document.createElement("button");
+        b.type = "button";
+        b.className = "opt" + optClass(cur)
+                    + (cur.used.indexOf(i) >= 0 ? " gone" : "");
+        if (cur.game === 5) fillDecomp(b, optLabel(cur, i));
+        else b.textContent = optLabel(cur, i);
+        b.setAttribute("data-i", i);
+        frag.appendChild(b);
+      }
     }
     el.grid.appendChild(frag);
     el.grid.classList.remove("hide");
+    fitGrid();
   }
+
+  // Altura do grid medida, não chutada. Uma fração fixa da tela (38dvh) não sabe
+  // quão alta é a imagem: a mesma regra que sobrava numa legenda de uma linha
+  // empurrava o rodapé para fora da tela numa de duas — e o contador some
+  // justamente nos jogos cujos botões ocupam mais espaço.
+  function fitGrid() {
+    if (el.grid.classList.contains("hide")) return;
+    var topo = el.grid.getBoundingClientRect().top;
+    var rodape = document.querySelector("footer").offsetHeight;
+    var sobra = window.innerHeight - topo - rodape - 8;
+    el.grid.style.maxHeight = Math.max(110, Math.round(sobra)) + "px";
+  }
+
+  // Girar o aparelho muda tudo que fitGrid mediu.
+  window.addEventListener("resize", fitGrid);
 
   // Guarda o que está no campo ANTES de trocar de frase. Só o jogo 1 precisa:
   // nos outros o campo é reconstruído a partir de `step`.
@@ -383,6 +461,11 @@
   function restoreAnswer() {
     var cur = items[at];
     if (!cur) return;
+    if (cur.game === 4) {
+      // O jogo 4 não monta nada: o campo só recebe a tradução ao acertar.
+      el.answer.value = cur.done ? cur.answer : "";
+      return;
+    }
     if (cur.game === 1) {
       el.answer.value = cur.draft || "";
       // O jogo 1 é digitar: chegar nele já com o cursor no campo poupa um toque,
@@ -402,9 +485,33 @@
     restoreAnswer();
   }
 
+  // Fecha a frase: marca feita, deixa o acerto aparecer e vira a página. A
+  // pausa curta é o prêmio — sem ela o último acerto mal é visto.
+  function finish() {
+    var cur = items[at];
+    if (!cur.done) { cur.done = true; saveProgress(); }
+    refresh();
+    var nxt = at + 1;
+    setTimeout(function () {
+      if (nxt < items.length) goTo(nxt);
+      else { syncCurrent(); el.msg.textContent = "Fim da coleção."; }
+    }, 350);
+  }
+
   function pick(i, btn) {
     var cur = items[at];
     if (!cur || cur.game === 1) return;
+
+    // Jogo 4: um toque resolve a frase, então não há `step` nem botão que some.
+    if (cur.game === 4) {
+      if (cur.options[i] !== cur.answer) { flash(btn, "bad"); return; }
+      el.answer.value = cur.answer;        // confirmação antes de virar a página
+      flash(el.answer, "ok");
+      btn.classList.add("ok");
+      finish();
+      return;
+    }
+
     var want = expected(cur);
     var gives = optWrites(cur, i);
     // Compara por VALOR, não por identidade: uma palavra (ou caractere) que se
@@ -420,16 +527,7 @@
     el.answer.value += gives;
     flash(el.answer, "ok");
     if (cur.step < pieces(cur)) return;
-
-    if (!cur.done) { cur.done = true; saveProgress(); }
-    refresh();
-    // Pausa curta antes de virar a página: sem ela o acerto final mal aparece,
-    // e é justamente ele o prêmio.
-    var nxt = at + 1;
-    setTimeout(function () {
-      if (nxt < items.length) goTo(nxt);
-      else { syncCurrent(); el.msg.textContent = "Fim da coleção."; }
-    }, 350);
+    finish();
   }
 
   el.grid.addEventListener("click", function (e) {
@@ -540,7 +638,7 @@
         used: [],         // índices de opts já gastos
         draft: ""         // o que foi digitado aqui (só jogo 1)
       };
-      // Os jogos 2 e 3 dependem de dados que só o make_bundle monta. Sem eles
+      // Os jogos 2 a 5 dependem de dados que só o make_bundle monta. Sem eles
       // — index.json antigo, servido por pasta — o item cai no jogo 1, que é o
       // que a página sempre soube fazer.
       if (e.game === 2 && e.opts && e.opts.length && e.words && e.words.length) {
@@ -550,6 +648,14 @@
       } else if (e.game === 3 && e.chars && e.chars.length) {
         it.game = 3;
         it.chars = e.chars;
+      } else if (e.game === 4 && e.options && e.options.length && e.answer) {
+        it.game = 4;
+        it.options = e.options;
+        it.answer = e.answer;
+      } else if (e.game === 5 && e.chars && e.chars.length && e.decomps) {
+        it.game = 5;
+        it.chars = e.chars;
+        it.decomps = e.decomps;
       }
       out.push(it);
     }

@@ -25,7 +25,9 @@ APP_NAME = "Subrim Manager"
 REPO      = Path(__file__).parent
 ASSETS    = REPO / "assets"
 SOURCE    = ASSETS / "source"
+TEXTS     = ASSETS / "text"          # txt do modo Texto (um arquivo = um asset)
 WAREHOUSE = REPO / "warehouse"
+TEXT_WAREHOUSE = WAREHOUSE / "text"  # bases gerados pelo text_pipeline.py
 FRAMES    = WAREHOUSE / "frames"   # cache de frames de episódios arquivados
 DEEPSEEK_LOG = REPO / "deepseek_debug.log"
 
@@ -46,9 +48,10 @@ def _wh_readable_name(stem: str) -> str:
 
 
 # Uma "palavra" precisa ter ao menos um caractere com conteúdo (CJK, letra ou
-# dígito). Sem isso, pontuação solta que sobra do parsing — `,`「」!。♪ — entrava
-# na tabela como se fosse vocabulário.
-_WH_WORD_OK = re.compile(r"[0-9A-Za-z㐀-䶿一-鿿豈-﫿]")
+# dígito). Sem isso, pontuação solta que sobra do parsing entrava na tabela
+# como se fosse vocabulário. A regra mora no word_vocab, que é o módulo comum
+# a esta tela e ao registro em sanitize_base: filtrar só aqui escondia o lixo
+# da tabela, mas continuava mandando-o para a API.
 
 
 def _wh_split_items(arr: str) -> list:
@@ -135,34 +138,9 @@ def _wh_parse_item(item: str):
                 return None
             word, pinyin, trad = m.group(1), "", ""
 
-    if not word or not _WH_WORD_OK.search(word):
+    if not word or not word_vocab.is_real_word(word):
         return None
     return (word, pinyin, trad)
-
-
-def _dedupe_sentences(matches: list, clean) -> tuple:
-    """Remove frases repetidas, preservando a ordem. → ``(mantidas, n_ocultas)``.
-
-    ``clean`` é a normalização da frase (``collection_builder.clean_chinese_only``,
-    injetada para esta função não depender do import pesado do módulo). Compara só
-    os ideogramas, então ``"我沒有。"`` e ``"我沒有..."`` são a mesma frase — é a
-    mesma noção de frase que o app de ditado usa.
-
-    Sobrevive a PRIMEIRA ocorrência da ordem recebida (asset, depois linha).
-
-    Frase cuja normalização é vazia — legenda só com ``♪``, pontuação ou mojibake
-    — NUNCA deduplica: são milhares no corpus e colidiriam todas num único balde,
-    sumindo de uma vez.
-    """
-    vistos, out = set(), []
-    for m in matches:
-        key = clean(m.get("chinese", ""))
-        if key:
-            if key in vistos:
-                continue
-            vistos.add(key)
-        out.append(m)
-    return out, len(matches) - len(out)
 
 
 def _wh_analyse(base_path: Path, mastered=None, vocab=None) -> dict:
@@ -328,11 +306,49 @@ def detect_status(path: Path) -> dict:
 def list_assets() -> list:
     if not ASSETS.exists():
         return []
+    # "text" é a pasta do modo Texto, não um asset de vídeo — sem esta exclusão
+    # ela aparecia na lista como um asset fantasma, eternamente "Vazio".
     dirs = sorted(
         d for d in ASSETS.iterdir()
-        if d.is_dir() and not d.name.endswith("_sub") and d.name != "source"
+        if d.is_dir() and not d.name.endswith("_sub")
+        and d.name not in ("source", "text")
     )
     return [detect_status(d) for d in dirs]
+
+
+def list_texts() -> list:
+    """Assets do modo Texto: um ``assets/text/*.txt`` por item.
+
+    "Arquivado" aqui significa exatamente ter o ``*_base.txt`` correspondente no
+    ``warehouse/text/`` — não há etapa de arquivamento separada, porque o
+    ``text_pipeline.py`` já escreve direto no destino final.
+    """
+    if not TEXTS.exists():
+        return []
+    out = []
+    for f in sorted(TEXTS.glob("*.txt")):
+        base = TEXT_WAREHOUSE / f"{f.stem}_base.txt"
+        n_frases = 0
+        if base.exists():
+            try:
+                n_frases = sum(1 for ln in base.read_text(encoding="utf-8").splitlines()
+                               if ln.strip())
+            except Exception:  # noqa: BLE001 - a lista nunca deve quebrar por I/O
+                n_frases = 0
+        try:
+            n_linhas = sum(1 for ln in f.read_text(encoding="utf-8").splitlines()
+                           if ln.strip())
+        except Exception:  # noqa: BLE001
+            n_linhas = 0
+        out.append({
+            "name":     f.stem,
+            "path":     f,
+            "base":     base,
+            "archived": base.exists(),
+            "linhas":   n_linhas,
+            "frases":   n_frases,
+        })
+    return out
 
 
 def list_sources() -> list:
@@ -370,6 +386,12 @@ class App(tk.Tk):
         self.geometry("1180x700")
         self.minsize(960, 600)
 
+        # Modo da janela: "video" (pipeline completo) ou "texto" (só base.txt).
+        # Define quais abas ficam visíveis e o escopo de Warehouse e Coleções.
+        self._mode = tk.StringVar(value="video")
+        self._text_mode = False   # espelho do _mode, seguro fora da thread do Tk
+        self._text_selected = None
+
         self._log_q: queue.Queue = queue.Queue()
         self._proc = None
         self._proc_lock = threading.Lock()
@@ -383,6 +405,10 @@ class App(tk.Tk):
 
         # Collections tab state
         self._col_matches: list = []
+        # Texto integral da última busca (normalizado). É o nome da pasta ao
+        # salvar — a coleção inteira vai para uma só. Vazio antes da 1ª busca,
+        # quando o botão Salvar ainda está desabilitado.
+        self._col_query = ""
         # Modo da última busca: "word" (por palavra), "i+1" (busca "0") ou
         # "all" (busca "1"). Define como o status dos resultados é formatado —
         # antes isso era inferido dos dados, o que confundia os modos.
@@ -399,6 +425,7 @@ class App(tk.Tk):
         self._col_save_mode = "r36s"
         self._col_skip_zero = True
         self._col_make_bundle = False
+        self._col_variants = False
         # Nota (0-10) da frase selecionada. A gravação no base é serializada numa
         # thread única, para que navegar em rajada vire poucas reescritas.
         self._nota_q: queue.Queue = queue.Queue()
@@ -435,25 +462,76 @@ class App(tk.Tk):
         bar = ttk.Frame(self, padding=(10, 5))
         bar.pack(fill=tk.X)
         ttk.Label(bar, text="Subrim Manager", font=("", 14, "bold")).pack(side=tk.LEFT)
+
         self._status_var = tk.StringVar(value="Pronto")
         ttk.Label(bar, textvariable=self._status_var, foreground="#777").pack(side=tk.RIGHT, padx=8)
         self._stop_btn = ttk.Button(bar, text="⏹  Parar", command=self._stop, state=tk.DISABLED)
         self._stop_btn.pack(side=tk.RIGHT)
+
+        # O toggle é empacotado por ÚLTIMO e com expand=True para ficar centrado
+        # na barra: o pack só distribui a sobra depois que os widgets de largura
+        # fixa das duas pontas já reservaram o espaço deles.
+        toggle = ttk.Frame(bar)
+        toggle.pack(side=tk.LEFT, expand=True)
+        for rot, val in (("Vídeo", "video"), ("Texto", "texto")):
+            ttk.Radiobutton(toggle, text=rot, value=val, variable=self._mode,
+                            style="Toolbutton",
+                            command=self._on_mode_change).pack(side=tk.LEFT)
+
         ttk.Separator(self, orient=tk.HORIZONTAL).pack(fill=tk.X)
 
         self._nb = ttk.Notebook(self)
         self._nb.pack(fill=tk.BOTH, expand=True, padx=6, pady=6)
+        # Ordem de criação = ordem final das abas em CADA modo. O Notebook.hide()
+        # tira a aba da vista mas guarda a posição, então esconder as que não
+        # pertencem ao modo já produz as duas sequências desejadas:
+        #   Vídeo → Assets · Warehouse · Downloads · Coleções · Log · DeepSeek
+        #   Texto → Assets · Warehouse · Coleções · Log
         self._build_assets_tab()
+        self._build_text_assets_tab()
         self._build_warehouse_tab()
         self._build_downloads_tab()
         self._build_collections_tab()
         self._build_log_tab()
         self._build_deepseek_tab()
+        self._apply_mode()
+
+    # ── Modo Vídeo / Texto ─────────────────────────────────────────────────────
+    def _is_text_mode(self) -> bool:
+        return self._text_mode
+
+    def _apply_mode(self):
+        """Mostra/esconde as abas do modo atual e reaponta o escopo das compartilhadas."""
+        self._text_mode = self._mode.get() == "texto"
+        texto = self._text_mode
+        # (aba, aparece_no_modo_texto)
+        for tab, in_text in ((self._tab_assets, False),
+                             (self._tab_text_assets, True),
+                             (self._tab_downloads, False),
+                             (self._tab_deepseek, False)):
+            if in_text == texto:
+                self._nb.add(tab)
+            else:
+                self._nb.hide(tab)
+
+        self._wh_archive_btn.config(state=tk.DISABLED)
+        self._wh_refresh()
+        self._col_clear_results()
+        if texto:
+            self._refresh_texts()
+        else:
+            self._refresh_assets()
+
+    def _on_mode_change(self):
+        self._apply_mode()
+        self._log_line(
+            f"🔀 Modo {'Texto' if self._is_text_mode() else 'Vídeo'}", "cmd")
 
     # ── Assets Tab ─────────────────────────────────────────────────────────────
     def _build_assets_tab(self):
         outer = ttk.Frame(self._nb)
         self._nb.add(outer, text="  Assets  ")
+        self._tab_assets = outer
 
         ctrl = ttk.Frame(outer, padding=(4, 6, 4, 2))
         ctrl.pack(fill=tk.X)
@@ -564,10 +642,139 @@ class App(tk.Tk):
 
         self._refresh_assets()
 
+    # ── Assets Tab (modo Texto) ────────────────────────────────────────────────
+    def _build_text_assets_tab(self):
+        """Assets do modo Texto: os ``assets/text/*.txt``.
+
+        Aba separada da de vídeo (e não uma versão parametrizada dela) porque as
+        duas telas são realmente diferentes: aqui não há fases, chunks, progresso
+        nem clean-up — só "tem base.txt ou não tem".
+        """
+        outer = ttk.Frame(self._nb)
+        self._nb.add(outer, text="  Assets  ")
+        self._tab_text_assets = outer
+
+        ctrl = ttk.Frame(outer, padding=(4, 6, 4, 2))
+        ctrl.pack(fill=tk.X)
+        ttk.Button(ctrl, text="↺", width=3, command=self._refresh_texts).pack(side=tk.LEFT)
+        ttk.Label(ctrl, text="assets/text/*.txt  →  warehouse/text/*_base.txt",
+                  foreground="#888").pack(side=tk.LEFT, padx=8)
+        self._txt_count_var = tk.StringVar()
+        ttk.Label(ctrl, textvariable=self._txt_count_var,
+                  foreground="#888").pack(side=tk.RIGHT, padx=6)
+
+        pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
+        pw.pack(fill=tk.BOTH, expand=True, padx=4, pady=(4, 0))
+
+        left = ttk.Frame(pw)
+        pw.add(left, weight=3)
+        cols = ("name", "status", "linhas", "frases")
+        t = ttk.Treeview(left, columns=cols, show="headings", selectmode="browse")
+        t.heading("name",   text="Texto",   anchor=tk.W)
+        t.heading("status", text="Status",  anchor=tk.CENTER)
+        t.heading("linhas", text="Linhas",  anchor=tk.CENTER)
+        t.heading("frases", text="Frases",  anchor=tk.CENTER)
+        t.column("name",   width=230, anchor=tk.W,      stretch=True)
+        t.column("status", width=120, anchor=tk.CENTER, stretch=False)
+        t.column("linhas", width=80,  anchor=tk.CENTER, stretch=False)
+        t.column("frases", width=80,  anchor=tk.CENTER, stretch=False)
+        vsb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=t.yview)
+        t.configure(yscrollcommand=vsb.set)
+        t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        t.tag_configure("archived", foreground="#27AE60")
+        t.tag_configure("pending",  foreground="#E67E22")
+        t.bind("<<TreeviewSelect>>", self._on_text_select)
+        self._txt_tree = t
+
+        detail = ttk.Frame(pw, padding=12)
+        pw.add(detail, weight=1)
+        ttk.Label(detail, text="Detalhes", font=("", 11, "bold")).pack(anchor=tk.W)
+        ttk.Separator(detail, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
+        self._txt_detail = tk.StringVar(value="← Selecione um texto")
+        ttk.Label(detail, textvariable=self._txt_detail, justify=tk.LEFT,
+                  wraplength=210, foreground="#555").pack(anchor=tk.W)
+
+        ttk.Separator(detail, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
+        self._txt_run_btn = ttk.Button(detail, text="▶  Gerar base.txt",
+                                       command=self._run_text_selected, state=tk.DISABLED)
+        self._txt_run_btn.pack(fill=tk.X, pady=(3, 1))
+        self._txt_force_btn = ttk.Button(detail, text="↺  Forçar reprocessamento",
+                                         command=self._force_text_selected, state=tk.DISABLED)
+        self._txt_force_btn.pack(fill=tk.X, pady=1)
+        self._txt_open_btn = ttk.Button(detail, text="📂  Abrir pasta",
+                                        command=self._open_text_folder, state=tk.DISABLED)
+        self._txt_open_btn.pack(fill=tk.X, pady=1)
+
+        self._refresh_texts()
+
+    def _refresh_texts(self, *_):
+        sel = self._text_selected["name"] if self._text_selected else None
+        self._txt_tree.delete(*self._txt_tree.get_children())
+        texts = list_texts()
+        for t in texts:
+            status = "Arquivado ✓" if t["archived"] else "Aguardando"
+            tag = "archived" if t["archived"] else "pending"
+            self._txt_tree.insert("", tk.END, iid=t["name"], tags=(tag,),
+                                  values=(t["name"], status, t["linhas"],
+                                          t["frases"] or "—"))
+        self._texts = {t["name"]: t for t in texts}
+        n_arq = sum(1 for t in texts if t["archived"])
+        self._txt_count_var.set(f"{n_arq}/{len(texts)} com base.txt")
+
+        if sel and sel in self._texts:
+            self._txt_tree.selection_set(sel)
+        else:
+            self._text_selected = None
+            self._txt_detail.set("← Selecione um texto")
+            for b in (self._txt_run_btn, self._txt_force_btn, self._txt_open_btn):
+                b.config(state=tk.DISABLED)
+
+    def _on_text_select(self, _=None):
+        sel = self._txt_tree.selection()
+        if not sel:
+            return
+        t = self._texts.get(sel[0])
+        if not t:
+            return
+        self._text_selected = t
+        estado = (f"base.txt com {t['frases']} frase(s)" if t["archived"]
+                  else "sem base.txt")
+        self._txt_detail.set(
+            f"{t['name']}.txt\n{t['linhas']} linha(s)\n{estado}")
+        self._txt_run_btn.config(
+            state=tk.DISABLED if t["archived"] else tk.NORMAL)
+        self._txt_force_btn.config(
+            state=tk.NORMAL if t["archived"] else tk.DISABLED)
+        self._txt_open_btn.config(state=tk.NORMAL)
+
+    def _run_text_selected(self):
+        if not self._text_selected:
+            return
+        name = self._text_selected["name"]
+        self._launch([sys.executable, str(REPO / "text_pipeline.py"), name],
+                     label=f"Texto: {name}", pause_rate=0.0)
+
+    def _force_text_selected(self):
+        if not self._text_selected:
+            return
+        name = self._text_selected["name"]
+        if messagebox.askyesno(
+                "Confirmar",
+                f"Reprocessar '{name}' do zero?\n"
+                f"O warehouse/text/{name}_base.txt atual será descartado."):
+            self._launch(
+                [sys.executable, str(REPO / "text_pipeline.py"), name, "--force"],
+                label=f"Texto (force): {name}", pause_rate=0.0)
+
+    def _open_text_folder(self):
+        subprocess.Popen(["open", str(TEXTS)])
+
     # ── Warehouse Tab ──────────────────────────────────────────────────────────
     def _build_warehouse_tab(self):
         outer = ttk.Frame(self._nb, padding=8)
         self._nb.add(outer, text="  Warehouse  ")
+        self._tab_warehouse = outer
 
         # barra superior
         ctrl = ttk.Frame(outer)
@@ -680,19 +887,35 @@ class App(tk.Tk):
 
         self._wh_refresh()
 
+    def _wh_root(self) -> Path:
+        """Diretório varrido pela aba Warehouse no modo atual."""
+        return TEXT_WAREHOUSE if self._is_text_mode() else WAREHOUSE
+
     def _wh_refresh(self):
         """Recarrega a lista de base.txt do warehouse, ordenada alfabeticamente por nome legível."""
         self._wh_tree.delete(*self._wh_tree.get_children())
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
         self._wh_freq_data = []
+        self._wh_selected_base = None
         self._wh_detail.set("Selecione um arquivo para ver os detalhes.")
 
-        if not WAREHOUSE.exists():
-            self._wh_count_var.set("warehouse/ não encontrada")
+        root = self._wh_root()
+        if not root.exists():
+            self._wh_count_var.set(f"{root.name}/ não encontrada")
             return
 
-        bases = sorted(WAREHOUSE.glob("*_base.txt"),
+        bases = sorted(root.glob("*_base.txt"),
                        key=lambda p: _wh_readable_name(p.stem).lower())
+        # No modo Texto todo base listado JÁ é o arquivo arquivado — não há vídeo
+        # nem cache de frames a considerar, então o status é sempre o mesmo.
+        if self._is_text_mode():
+            for bf in bases:
+                self._wh_tree.insert("", tk.END, iid=str(bf),
+                                     values=(_wh_readable_name(bf.stem), "Arquivado"),
+                                     tags=("archived",))
+            self._wh_count_var.set(f"{len(bases)} texto(s) arquivado(s)")
+            return
+
         for bf in bases:
             readable = _wh_readable_name(bf.stem)
             # vídeo correspondente: mesmo prefixo sem _base, extensão .mp4
@@ -760,14 +983,20 @@ class App(tk.Tk):
         prefix = bf.stem.replace("_base", "")
         self._wh_selected_base = bf
 
-        # vídeo
-        mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
-        if mp4:
-            video_line = mp4.name
-        elif _wh_is_archived(prefix):
-            video_line = f"— (arquivado: {len(list((FRAMES / prefix).glob('line*.jpg')))} frames)"
+        # Fonte: o mp4 no modo Vídeo, o txt de origem no modo Texto.
+        if self._is_text_mode():
+            origem = TEXTS / f"{prefix}.txt"
+            fonte_rot = "Texto  "
+            fonte_line = origem.name if origem.exists() else "— (txt removido)"
         else:
-            video_line = "—"
+            fonte_rot = "Vídeo  "
+            mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
+            if mp4:
+                fonte_line = mp4.name
+            elif _wh_is_archived(prefix):
+                fonte_line = f"— (arquivado: {len(list((FRAMES / prefix).glob('line*.jpg')))} frames)"
+            else:
+                fonte_line = "—"
 
         # análise (em thread para não travar a UI)
         self._wh_detail.set("Analisando…")
@@ -782,7 +1011,7 @@ class App(tk.Tk):
             stats = _wh_analyse(bf, mastered, vocab)
             detail = (
                 f"Arquivo : {bf.name}\n"
-                f"Vídeo   : {video_line}\n"
+                f"{fonte_rot} : {fonte_line}\n"
                 f"\n"
                 f"Palavras distintas : {stats['total_words']}\n"
                 f"  Conhecidas (nuas ou dominadas) : {stats['known']}\n"
@@ -829,7 +1058,7 @@ class App(tk.Tk):
 
         self._wh_archiving = True
         self._wh_archive_btn.config(state=tk.DISABLED)
-        self._nb.select(4)  # aba Log
+        self._nb.select(self._tab_log)
         n = len(targets)
         self._log_line(f"🗄  Arquivamento em lote: {n} episódio(s)…", "cmd")
 
@@ -1022,6 +1251,7 @@ class App(tk.Tk):
     def _build_downloads_tab(self):
         outer = ttk.Frame(self._nb, padding=8)
         self._nb.add(outer, text="  Downloads & Scraping  ")
+        self._tab_downloads = outer
 
         pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
         pw.pack(fill=tk.BOTH, expand=True)
@@ -1111,11 +1341,12 @@ class App(tk.Tk):
     def _build_collections_tab(self):
         outer = ttk.Frame(self._nb, padding=8)
         self._nb.add(outer, text="  Coleções  ")
+        self._tab_collections = outer
 
         # Search bar
         top = ttk.Frame(outer)
         top.pack(fill=tk.X, pady=(0, 6))
-        ttk.Label(top, text="Palavra(s) (vírgula):").pack(side=tk.LEFT)
+        ttk.Label(top, text="Termos ( , = ou · - = e ):").pack(side=tk.LEFT)
         self._col_word = tk.StringVar()
         e = ttk.Entry(top, textvariable=self._col_word, width=30, font=("", 14))
         e.pack(side=tk.LEFT, padx=6)
@@ -1132,7 +1363,7 @@ class App(tk.Tk):
         ttk.Checkbutton(top, text="Ocultar duplicadas",
                         variable=self._col_hide_dups).pack(side=tk.LEFT, padx=(12, 0))
         self._col_status = tk.StringVar(
-            value="Palavras (ex.: 著,當,與)  ·  0 = frases i+1  ·  1 = todas as frases")
+            value="著,當 = ou  ·  放-結束 = e  ·  0 = frases i+1  ·  1 = todas as frases")
         ttk.Label(top, textvariable=self._col_status, foreground="#888").pack(side=tk.LEFT, padx=12)
 
         pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
@@ -1264,10 +1495,11 @@ class App(tk.Tk):
             return None
 
     def _col_available_assets(self) -> list:
-        """Lista de assets disponíveis (a partir dos *_base.txt do warehouse)."""
-        if not WAREHOUSE.exists():
+        """Lista de assets disponíveis (a partir dos *_base.txt do warehouse do modo)."""
+        root = self._wh_root()
+        if not root.exists():
             return []
-        return sorted(b.stem.replace("_base", "") for b in WAREHOUSE.glob("*_base.txt"))
+        return sorted(b.stem.replace("_base", "") for b in root.glob("*_base.txt"))
 
     # ── Nota: persistência serializada ──────────────────────────────────────────
     def _nota_start_writer(self):
@@ -1300,7 +1532,7 @@ class App(tk.Tk):
 
                     for asset, notes in by_asset.items():
                         try:
-                            cb.set_notes(asset, notes)
+                            cb.set_notes(asset, notes, text=self._is_text_mode())
                         except Exception as e:  # noqa: BLE001
                             self._log_q.put(
                                 (f"Erro ao gravar nota em {asset}: {e}", "error"))
@@ -1441,18 +1673,34 @@ class App(tk.Tk):
         if not cb:
             return
         raw = self._col_word.get().strip()
-        # Aceita várias palavras separadas por vírgula (ex.: "著,當,與").
-        words, seen = [], set()
-        for w in raw.replace("，", ",").split(","):
-            w = w.strip()
-            if w and w not in seen:
-                seen.add(w)
-                words.append(w)
-        if not words:
-            messagebox.showwarning("Aviso", "Digite uma ou mais palavras (separadas por vírgula).")
+        # Dois níveis: vírgula separa buscas independentes cujos resultados são
+        # concatenados (OU, ex.: "著,當,與"); traço junta termos que precisam
+        # aparecer na MESMA frase (E, ex.: "放-結束").
+        #
+        # O traço largo "－" é normalizado como a vírgula larga "，" já era.
+        # Termos vazios ("放-", "-放", "放--結束") e repetidos ("放-放") somem aqui,
+        # então o resto do fluxo só vê grupos já limpos.
+        groups, seen = [], set()
+        for term in raw.replace("，", ",").split(","):
+            subs, sub_seen = [], set()
+            for s in term.replace("－", "-").split("-"):
+                s = s.strip()
+                if s and s not in sub_seen:
+                    sub_seen.add(s)
+                    subs.append(s)
+            if not subs:
+                continue
+            key = "-".join(subs)
+            if key not in seen:
+                seen.add(key)
+                groups.append(subs)
+        if not groups:
+            messagebox.showwarning(
+                "Aviso", "Digite um ou mais termos — vírgula = ou, traço = e (ex.: 著,放-結束).")
             return
 
         asset_filter = self._col_asset_filter  # None = todos
+        is_text = self._is_text_mode()
         hide_dups = self._col_hide_dups.get()
         self._col_hidden_dups = 0
 
@@ -1465,12 +1713,15 @@ class App(tk.Tk):
         for c, base in self._col_headers.items():
             self._col_tree.heading(c, text=base)
 
-        # Modos especiais por número (buscas de um único termo):
+        # Modos especiais por número:
         #   "0" → frases i+1 (0 ou 1 palavra desconhecida)
         #   "1" → TODAS as frases disponíveis (sem filtro de palavra)
-        if words == ["0"]:
+        # Os números valem em QUALQUER posição — sozinhos, como termo da vírgula
+        # ou dentro de um grupo com traço ("0-放" = i+1 que também contêm 放).
+        # O modo aqui só escolhe o texto do status; quem despacha é o _work.
+        if groups == [["0"]]:
             self._col_mode = "i+1"
-        elif words == ["1"]:
+        elif groups == [["1"]]:
             self._col_mode = "all"
         else:
             self._col_mode = "word"
@@ -1498,32 +1749,36 @@ class App(tk.Tk):
                 matches = [m for m in matches if m.get("asset") in asset_filter]
             if not hide_dups:
                 return matches
-            matches, self._col_hidden_dups = _dedupe_sentences(
-                matches, cb.clean_chinese_only)
+            matches, self._col_hidden_dups = cb.dedupe_sentences(matches)
             return matches
 
-        if self._col_mode == "i+1":
-            self._log_line("🔎 Buscando frases i+1 (≤1 palavra desconhecida)…", "cmd")
+        scope = (f"{len(asset_filter)} asset(s) do filtro" if asset_filter
+                 else "todos os assets")
+        self._col_query = ", ".join("-".join(g) for g in groups)
+        self._log_line(f"🔎 Buscando coleção: {self._col_query}", "cmd")
 
-            def _work():
-                matches = _apply_filter(cb.search_comprehensible(log_cb=_search_log, max_unknown=1))
-                self.after(0, lambda: self._col_show_results(matches))
-        elif self._col_mode == "all":
-            scope = (f"{len(asset_filter)} asset(s) do filtro" if asset_filter
-                     else "todos os assets")
-            self._log_line(f"🔎 Buscando TODAS as frases disponíveis ({scope})…", "cmd")
+        def _work():
+            """Um grupo de cada vez; os resultados são concatenados (vírgula = ou).
 
-            def _work():
-                matches = _apply_filter(cb.search_all(log_cb=_search_log))
-                self.after(0, lambda: self._col_show_results(matches))
-        else:
-            self._log_line(f"🔎 Buscando coleção: {', '.join(words)}", "cmd")
-
-            def _work():
-                matches = []
-                for w in words:
-                    matches.extend(cb.search(w, log_cb=_search_log))
-                self.after(0, lambda: self._col_show_results(_apply_filter(matches)))
+            Grupo de um termo só continua indo pela busca dedicada de hoje — é
+            ela que produz o diagnóstico por base. Só o grupo com traço (E) cai
+            no search_terms, que faz uma varredura avaliando todos os termos.
+            """
+            matches = []
+            for g in groups:
+                if g == ["0"]:
+                    _search_log("🔎 Frases i+1 (≤1 palavra desconhecida)…")
+                    matches.extend(cb.search_comprehensible(
+                        log_cb=_search_log, max_unknown=1, text=is_text))
+                elif g == ["1"]:
+                    _search_log(f"🔎 TODAS as frases disponíveis ({scope})…")
+                    matches.extend(cb.search_all(log_cb=_search_log, text=is_text))
+                elif len(g) == 1:
+                    matches.extend(cb.search(g[0], log_cb=_search_log, text=is_text))
+                else:
+                    matches.extend(cb.search_terms(
+                        g, log_cb=_search_log, max_unknown=1, text=is_text))
+            self.after(0, lambda: self._col_show_results(_apply_filter(matches)))
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -1533,9 +1788,11 @@ class App(tk.Tk):
         for i, m in enumerate(matches):
             frase = (m["chinese"] or "").strip()
             nota = m.get("nota")
+            pos = (str(m["line_num"]) if self._is_text_mode()
+                   else f"{m['avg_time']:.1f}s")
             self._col_tree.insert("", tk.END, iid=str(i),
                                   values=(m.get("word", ""), m["asset"],
-                                          f"{m['avg_time']:.1f}s", frase[:60],
+                                          pos, frase[:60],
                                           "" if nota is None else str(nota)))
         n = len(matches)
         if self._col_mode == "i+1":
@@ -1548,7 +1805,7 @@ class App(tk.Tk):
             status = f"{n} frase(s) (todas) em {n_assets} asset(s)"
         else:
             n_words = len({m.get("word", "") for m in matches})
-            status = f"{n} frase(s) em {n_words} palavra(s)"
+            status = f"{n} frase(s) em {n_words} termo(s)"
         # Sem isso o efeito de "ocultar duplicadas" seria invisível. Vale para os
         # três modos, e sobrevive a ordenar/excluir porque mora em self.
         ocultas = getattr(self, "_col_hidden_dups", 0)
@@ -1570,6 +1827,25 @@ class App(tk.Tk):
             self._col_tree.focus("0")
         else:
             self._nota_show(None)
+
+    def _col_clear_results(self):
+        """Zera a aba Coleções — os resultados são do escopo do modo anterior.
+
+        Chamado na troca de Vídeo/Texto: manter na tela frases de um warehouse e
+        salvar no outro produziria uma coleção com o frame errado (ou nenhum).
+        O filtro de assets também vai junto, porque os nomes não se repetem
+        entre os dois escopos.
+        """
+        self._col_asset_filter = None
+        self._col_update_filter_btn()
+        self._col_headers["time"] = "Linha" if self._is_text_mode() else "Tempo"
+        for c, base in self._col_headers.items():
+            self._col_tree.heading(c, text=base)
+        self._col_query = ""
+        self._col_hidden_dups = 0
+        self._col_show_results([])
+        self._col_status.set(
+            "著,當 = ou  ·  放-結束 = e  ·  0 = frases i+1  ·  1 = todas as frases")
 
     def _col_on_select(self, _=None):
         sel = self._col_tree.selection()
@@ -1605,7 +1881,8 @@ class App(tk.Tk):
         keyfns = {
             "palavra": lambda m: m.get("word", ""),
             "asset":   lambda m: m.get("asset", ""),
-            "time":    lambda m: m.get("avg_time", 0.0),
+            "time":    (lambda m: m.get("line_num", 0)) if self._is_text_mode() \
+                       else (lambda m: m.get("avg_time", 0.0)),
             "frase":   lambda m: (m.get("chinese") or "").strip(),
             # sem nota vai para o fim na ordem crescente
             "nota":    lambda m: m.get("nota") if m.get("nota") is not None else -1,
@@ -1812,48 +2089,47 @@ class App(tk.Tk):
         self._col_photo = ImageTk.PhotoImage(img)
         self._col_preview.config(image=self._col_photo, text="")
 
-    def _col_save_groups(self, skip_zero: bool):
-        """Grupos (palavra → matches) na ORDEM da tabela, opcionalmente sem as nota 0.
+    def _col_save_items(self, skip_zero: bool):
+        """Frases a salvar, na ORDEM da tabela, e os motivos de descarte.
 
-        A ordem importa: o prefixo numérico do arquivo salvo (``001_``, ``002_``…)
-        sai daqui, então ela reflete a ordenação escolhida pelo usuário na tabela.
-        NÃO reordenar.
+        → ``(itens, motivos)``. Uma lista só: a coleção inteira vai para UMA
+        pasta, então esta ordem é o prefixo numérico do arquivo salvo (``001_``,
+        ``002_``…) e reflete a ordenação escolhida pelo usuário. NÃO reordenar.
 
-        Nota 0 é o que a exclusão da lista grava — o descarte explícito do
-        usuário. Frases SEM nota (None, nunca visitadas) não são filtradas.
+        Três descartes, contados em separado porque são coisas diferentes, e o
+        pop-up e o log precisam dizer o mesmo:
 
-        Frases que zeram na limpeza de caracteres (só ``♪``/pontuação) também
-        saem: o save não as gera, então contá-las aqui faria o pop-up prometer
-        mais imagens do que ele entrega.
+        - nota 0: o que a exclusão da lista grava — o descarte explícito do
+          usuário. Frase SEM nota (None, nunca visitada) não é filtrada;
+        - frase que zera na limpeza de caracteres (só ``♪``/pontuação): o save
+          não a gera, então contá-la aqui faria o pop-up prometer mais imagens
+          do que entrega;
+        - frase repetida: a busca por vírgula devolve a mesma frase uma vez por
+          termo. O ``save_collection`` remove de todo jeito — a passada aqui é
+          para a contagem do pop-up bater com o que vai para o disco.
         """
         cb = self._col_import()
-        groups: dict = {}
+        itens, n_zero, n_sem_cjk = [], 0, 0
         for m in self._col_matches:
             if skip_zero and m.get("nota") == 0:
+                n_zero += 1
                 continue
             if cb and not cb.has_clean_sentence(m):
+                n_sem_cjk += 1
                 continue
-            groups.setdefault(m.get("word", ""), []).append(m)
-        return [(w, ms) for w, ms in groups.items() if w]
+            itens.append(m)
+        n_repetidas = 0
+        if cb:
+            itens, n_repetidas = cb.dedupe_sentences(itens)
 
-    def _col_save_discarded(self, skip_zero: bool) -> list:
-        """Motivos de descarte, em texto, para o pop-up e o log dizerem o mesmo.
-
-        São dois motivos distintos (nota 0 e frase sem chinês) e misturá-los num
-        único número rotulado "nota 0" seria mentir sobre o que foi descartado.
-        """
-        cb = self._col_import()
-        n_zero = (sum(1 for m in self._col_matches if m.get("nota") == 0)
-                  if skip_zero else 0)
-        n_sem_cjk = sum(1 for m in self._col_matches
-                        if cb and not cb.has_clean_sentence(m)
-                        and not (skip_zero and m.get("nota") == 0))
         motivos = []
         if n_zero:
             motivos.append(f"{n_zero} com nota 0")
         if n_sem_cjk:
             motivos.append(f"{n_sem_cjk} sem texto chinês")
-        return motivos
+        if n_repetidas:
+            motivos.append(f"{n_repetidas} repetida(s)")
+        return itens, motivos
 
     def _col_save(self):
         """Abre o pop-up de formato. A gravação em si é o _col_save_run."""
@@ -1862,8 +2138,9 @@ class App(tk.Tk):
             return
         SaveCollectionDialog(self)
 
-    def _col_save_run(self, mode: str, skip_zero: bool, make_bundle: bool = False):
-        """Grava as coleções no formato escolhido (chamado pelo pop-up)."""
+    def _col_save_run(self, mode: str, skip_zero: bool, make_bundle: bool = False,
+                      variants: bool = False):
+        """Grava a coleção INTEIRA numa pasta só (chamado pelo pop-up)."""
         cb = self._col_import()
         if not cb or self._col_saving:
             return
@@ -1872,72 +2149,65 @@ class App(tk.Tk):
         self._col_save_mode = mode
         self._col_skip_zero = skip_zero
         self._col_make_bundle = make_bundle
+        self._col_variants = variants
 
-        groups = self._col_save_groups(skip_zero)
-        if not groups:
+        itens, motivos = self._col_save_items(skip_zero)
+        if not itens:
             return
-        n_total = sum(len(ms) for _, ms in groups)
+        is_text = self._is_text_mode()
+        # O nome da pasta é a busca que produziu a coleção. O fallback só existe
+        # para não gerar pasta sem nome se o rótulo vier vazio por algum caminho.
+        label = self._col_query or "coleção"
 
         self._col_saving = True
         self._col_save_btn.config(state=tk.DISABLED)
-        self._nb.select(4)
-        motivos = self._col_save_discarded(skip_zero)
+        self._nb.select(self._tab_log)
         extra = f" · ignoradas: {', '.join(motivos)}" if motivos else ""
+        if variants:
+            extra += " · com variantes (3 imagens por frase)"
         self._log_line(
-            f"💾 Salvando {len(groups)} coleção(ões) ({n_total} frases) "
+            f"💾 Salvando a coleção '{label}' ({len(itens)} frases) "
             f"em {mode}{extra}…", "cmd")
 
         def _progress(i, total, msg):
             self._log_q.put((f"  [{i}/{total}] {msg}", "info"))
 
         def _work():
-            # Guarda TODAS as pastas, não só a última: com várias coleções o
-            # ditado precisa empacotar cada uma.
-            saidas = []
-            for w, ms in groups:
-                try:
-                    self._log_q.put((f"💾 Coleção '{w}' ({len(ms)} frases)…", "cmd"))
-                    out = cb.save_collection(w, ms, mode=mode, progress_cb=_progress)
-                    self._log_q.put((f"✓ Coleção salva em {out}", "success"))
-                    saidas.append(out)
-                except Exception as e:  # noqa: BLE001
-                    self._log_q.put((f"Erro ao salvar coleção '{w}': {e}", "error"))
-            self.after(0, lambda: self._col_save_done(saidas, len(groups), make_bundle))
+            try:
+                out = cb.save_collection(label, itens, mode=mode, progress_cb=_progress,
+                                         text=is_text, variants=variants)
+                self._log_q.put((f"✓ Coleção salva em {out}", "success"))
+            except Exception as e:  # noqa: BLE001
+                self._log_q.put((f"Erro ao salvar coleção '{label}': {e}", "error"))
+                out = None
+            self.after(0, lambda: self._col_save_done(out, make_bundle))
 
         threading.Thread(target=_work, daemon=True).start()
 
-    def _col_save_done(self, saidas: list, total: int = 0, make_bundle: bool = False):
+    def _col_save_done(self, saida, make_bundle: bool = False):
         self._col_saving = False
         self._col_save_btn.config(state=tk.NORMAL if self._col_matches else tk.DISABLED)
-        if not saidas:
+        if saida is None:
             return
 
         if make_bundle:
             # Sem o prompt de abrir pasta aqui: o askyesno bloqueia a thread do
             # Tk, que é justamente quem drena o log — o streaming do ditado
             # congelaria atrás do modal.
-            self._log_line(f"🎴 {len(saidas)} coleção(ões) salva(s) — gerando o ditado…", "cmd")
-            self._col_bundle_chain(list(saidas))
+            self._log_line(f"🎴 Coleção salva — gerando o ditado de {saida.name}…", "cmd")
+            self._col_bundle_run(saida)
             return
 
-        # Abre a pasta de coleções (pai), já que pode haver várias.
-        open_dir = saidas[-1].parent if total > 1 else saidas[-1]
-        if messagebox.askyesno(
-                "Concluído",
-                f"{len(saidas)}/{total} coleção(ões) salva(s).\nAbrir a pasta?"):
-            subprocess.Popen(["open", str(open_dir)])
+        if messagebox.askyesno("Concluído",
+                               f"Coleção salva em {saida.name}.\nAbrir a pasta?"):
+            subprocess.Popen(["open", str(saida)])
 
-    def _col_bundle_chain(self, pendentes: list):
-        """Roda o make_bundle.py em cada pasta, UMA POR VEZ.
+    def _col_bundle_run(self, pasta):
+        """Roda o make_bundle.py na pasta da coleção.
 
-        O _launch aceita um processo por vez; disparar todas em paralelo cairia
-        na guarda e perderia silenciosamente todas menos a primeira. Daí o
-        encadeamento pelo on_done.
+        Uma pasta, uma execução: o make_bundle fatia o index.json inteiro em
+        blocos de 150, então o ditado quebra considerando a coleção toda.
         """
-        if not pendentes:
-            self._log_line("🎴 Ditado gerado para todas as coleções.", "success")
-            return
-        pasta = pendentes.pop(0)
         with self._proc_lock:
             ocupado = self._proc is not None and self._proc.poll() is None
         if ocupado:
@@ -1950,13 +2220,13 @@ class App(tk.Tk):
             [sys.executable, str(REPO / "dictation" / "make_bundle.py"), str(pasta)],
             label=f"Ditado: {pasta.name}",
             pause_rate=0.0,
-            on_done=lambda: self._col_bundle_chain(pendentes),
         )
 
     # ── Log Tab ────────────────────────────────────────────────────────────────
     def _build_log_tab(self):
         f = ttk.Frame(self._nb, padding=(6, 6, 6, 0))
         self._nb.add(f, text="  Log  ")
+        self._tab_log = f
 
         ctrl = ttk.Frame(f)
         ctrl.pack(fill=tk.X, pady=(0, 4))
@@ -1983,6 +2253,7 @@ class App(tk.Tk):
     def _build_deepseek_tab(self):
         outer = ttk.Frame(self._nb, padding=8)
         self._nb.add(outer, text="  DeepSeek  ")
+        self._tab_deepseek = outer
 
         ctrl = ttk.Frame(outer)
         ctrl.pack(fill=tk.X, pady=(0, 6))
@@ -2435,8 +2706,8 @@ class App(tk.Tk):
                 on_done=None):
         """``on_done`` (opcional) roda na thread do Tk quando o processo termina.
 
-        É o que permite encadear execuções — sem ele não haveria como saber que
-        um bundle acabou para começar o próximo.
+        É o gancho para reagir ao fim de um processo — encadear uma execução
+        seguinte, por exemplo. Sem chamador hoje: o ditado virou uma pasta só.
         """
         with self._proc_lock:
             if self._proc and self._proc.poll() is None:
@@ -2445,7 +2716,7 @@ class App(tk.Tk):
                 return
         self._proc_on_done = on_done
 
-        self._nb.select(4)
+        self._nb.select(self._tab_log)
         self._log_line(f"$ {' '.join(str(c) for c in cmd)}", "cmd")
         self._status_var.set(f"▶  {label}")
         self._stop_btn.config(state=tk.NORMAL)
@@ -2569,9 +2840,14 @@ class App(tk.Tk):
         def _tick():
             with self._proc_lock:
                 running = self._proc is not None and self._proc.poll() is None
-            self._refresh_assets()
-            if self._ds_auto.get():
-                self._ds_refresh()
+            # Só a lista do modo visível: varrer os assets de vídeo enquanto o
+            # modo Texto está na tela é I/O de disco que ninguém vê.
+            if self._is_text_mode():
+                self._refresh_texts()
+            else:
+                self._refresh_assets()
+                if self._ds_auto.get():
+                    self._ds_refresh()
             self.after(3000 if running else 12000, _tick)
         self.after(12000, _tick)
 
@@ -2614,6 +2890,13 @@ class SaveCollectionDialog(tk.Toplevel):
                         variable=self._skip_zero,
                         command=self._refresh).pack(anchor=tk.W, pady=(10, 0))
 
+        # Variantes de legenda: no ditado, os jogos 3 e 4 mostram a imagem que
+        # esconde a resposta. Sem elas esses dois jogos não acontecem.
+        self._variants = tk.BooleanVar(value=app._col_variants)
+        ttk.Checkbutton(f, text="Gerar variantes de imagem (jogos 3 e 4 do ditado)",
+                        variable=self._variants,
+                        command=self._refresh).pack(anchor=tk.W, pady=(10, 0))
+
         # Ditado: NÃO ligado ao _refresh, que refaz duas passadas O(n) sobre os
         # matches (custa caro com dezenas de milhares). Este checkbox não muda a
         # contagem, só a linha de estimativa.
@@ -2650,27 +2933,31 @@ class SaveCollectionDialog(tk.Toplevel):
         """Recalcula contagem e destino conforme formato e filtro escolhidos."""
         cb = self.app._col_import()
         mode = self._mode.get()
-        groups = self.app._col_save_groups(self._skip_zero.get())
+        itens, motivos = self.app._col_save_items(self._skip_zero.get())
 
-        if not groups:
+        if not itens:
             self._n_total = 0
             self._summary.set("Nada a salvar com esse filtro.")
-            self._dest.set("Nenhuma frase da lista sobrou (nota 0 ou sem texto chinês).")
+            self._dest.set("Nenhuma frase da lista sobrou "
+                           "(nota 0, sem texto chinês ou repetida).")
             self._save_btn.config(state=tk.DISABLED)
             self._refresh_bundle()
             return
 
-        n_total = sum(len(ms) for _, ms in groups)
-        self._n_total = n_total   # o _refresh_bundle reusa sem repetir a varredura
-        # Mesmo detalhamento do log: nota 0 e "sem texto chinês" são motivos
-        # diferentes e o rótulo não pode chamar os dois de nota 0.
-        motivos = self.app._col_save_discarded(self._skip_zero.get())
+        self._n_total = len(itens)   # o _refresh_bundle reusa sem repetir a varredura
+        # Mesmo detalhamento do log: nota 0, "sem texto chinês" e repetida são
+        # motivos diferentes e o rótulo não pode chamar os três de nota 0.
         extra = f"  (ignoradas: {', '.join(motivos)})" if motivos else ""
-        self._summary.set(f"{n_total} imagem(ns) em {len(groups)} coleção(ões){extra}")
+        # Com as variantes são três arquivos por frase, e o número que importa
+        # para o disco é o de imagens, não o de frases.
+        n_img = len(itens) * 3 if self._variants.get() else len(itens)
+        imagens = (f"{len(itens)} frase(s), {n_img} imagens"
+                   if n_img != len(itens) else f"{len(itens)} imagem(ns)")
+        self._summary.set(f"{imagens} numa coleção{extra}")
 
-        nomes = [f"{cb.collection_folder_name(w, ms)}_{mode}" for w, ms in groups]
-        shown = ", ".join(nomes[:6]) + ("…" if len(nomes) > 6 else "")
-        self._dest.set(f"→ warehouse/collections/{shown}")
+        label = self.app._col_query or "coleção"
+        nome = f"{cb.collection_folder_name(label, itens)}_{mode}"
+        self._dest.set(f"→ warehouse/collections/{nome}")
         self._save_btn.config(state=tk.NORMAL)
         self._refresh_bundle()
 
@@ -2706,8 +2993,9 @@ class SaveCollectionDialog(tk.Toplevel):
         # Checkbox desabilitado no Tk MANTÉM o valor da variável, então marcar no
         # R36S e trocar para Original geraria o bundle sem isto.
         make_bundle = self._make_bundle.get() and mode != "original"
+        variants = self._variants.get()
         self.destroy()
-        self.app._col_save_run(mode, skip_zero, make_bundle)
+        self.app._col_save_run(mode, skip_zero, make_bundle, variants)
 
 
 # ─── Dialog: Asset Filter (Coleções) ────────────────────────────────────────────

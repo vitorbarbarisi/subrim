@@ -299,8 +299,12 @@ def split_chinese_into_lines(display_items: List[Tuple[str, str, str]], max_char
     return [line1, line2] if line2 else [line1]
 
 
+VARIANTS = ("full", "pt", "zh")
+
+
 def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_json: str, portuguese_text: str,
-                           resize: bool = True, base_chinese_font_size: Optional[int] = None) -> bool:
+                           resize: bool = True, base_chinese_font_size: Optional[int] = None,
+                           variant: str = "full") -> bool:
     """
     Add subtitles to a frame image.
 
@@ -312,10 +316,27 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
         resize: If True, letterbox to 640x480 (R36S). If False, keep original resolution.
         base_chinese_font_size: Override the base Chinese font size. If None, it is chosen
             automatically (36 for R36S, proportional to height otherwise).
+        variant: quais camadas desenhar. O ditado precisa de imagens que escondem
+            metade da legenda, senão o jogo é copiar o que está na tela:
+
+                "full"  tudo (o render de sempre)
+                "pt"    só a frase traduzida no topo — sem hanzi, pinyin ou
+                        glossário; é o que o jogo 3 mostra, onde a tarefa é
+                        justamente recordar os ideogramas
+                "zh"    hanzi + pinyin, sem nenhuma tradução (nem a frase do
+                        topo, nem o glossário amarelo por palavra) — jogo 4
+
+            Um enum e não flags soltas: são estas três combinações que existem,
+            e flags convidariam a combinações que ninguém desenha nem testa.
 
     Returns:
         True if successful, False otherwise
     """
+    if variant not in VARIANTS:
+        raise ValueError(f"variant inválido: {variant!r} (esperado um de {VARIANTS})")
+    draw_bottom = variant != "pt"      # bloco inferior: pinyin + hanzi + glossário
+    draw_top = variant != "zh"         # tarja da frase traduzida, no topo
+    show_word_gloss = variant == "full"
     try:
         # Open and (optionally) resize image
         with Image.open(image_path) as img:
@@ -376,14 +397,19 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                     remaining_text = remaining_text[1:]
             
             if not display_items:
-                # No Chinese text to display, just save the resized image
-                new_img.save(image_path, 'PNG')
-                return True
-            
+                # Sem chinês não há bloco inferior — mas a tarja do topo ainda
+                # pode existir, então não dá para sair da função aqui.
+                draw_bottom = False
+
             # Split Chinese into lines (max 2 lines). Chars-per-line scales with width
             # so wider (original-resolution) frames keep more text on a single line.
+            #
+            # Lista vazia quando o bloco inferior está desligado: é o que faz o
+            # laço de largura e o de desenho rodarem zero vezes, sem precisar
+            # duplicar o corpo da função por variante.
             max_chars_per_line = max(12, int(width / (base_chinese_font_size * 1.5)))
-            chinese_lines = split_chinese_into_lines(display_items, max_chars_per_line=max_chars_per_line)
+            chinese_lines = (split_chinese_into_lines(display_items, max_chars_per_line=max_chars_per_line)
+                             if draw_bottom else [])
             num_chinese_lines = len(chinese_lines)
             
             # Calculate spacing and positioning (proportional to font scale)
@@ -429,8 +455,10 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             # Height calculation: pinyin + spacing + chinese (1 or 2 lines) + spacing + portuguese
             chinese_line_height = base_chinese_font_size + vertical_spacing + base_pinyin_font_size
             chinese_total_height = chinese_line_height * num_chinese_lines + (vertical_spacing * (num_chinese_lines - 1))
-            # Portuguese height: when 2 lines, both lines have portuguese, so we need space for both
-            portuguese_extra_height = base_portuguese_font_size * 2
+            # Portuguese height: when 2 lines, both lines have portuguese, so we need space for both.
+            # Sem glossário essa reserva vai a zero, senão a caixa preta fica
+            # duas linhas alta demais e os hanzi sobem sem motivo.
+            portuguese_extra_height = base_portuguese_font_size * 2 if show_word_gloss else 0
             if num_chinese_lines == 2:
                 # For 2 lines: need space for portuguese of both lines
                 # Line 1 portuguese is between the two chinese lines
@@ -454,7 +482,7 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             top_bg_y = 0
             top_line_height = 0
             original_font = None
-            if portuguese_text and portuguese_text.strip():
+            if draw_top and portuguese_text and portuguese_text.strip():
                 original_font_size = max(18, int(base_chinese_font_size * 0.6))
                 try:
                     original_font = ImageFont.truetype(latin_font_path, original_font_size)
@@ -481,7 +509,8 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             box_overlay = Image.new('RGBA', (width, height), (0, 0, 0, 0))
             box_draw = ImageDraw.Draw(box_overlay)
             # Draw semi-transparent black box (50% opacity = 128/255)
-            box_draw.rectangle([bg_x, bg_y, bg_x + bg_width, bg_y + bg_height], fill=(0, 0, 0, 128))
+            if draw_bottom:
+                box_draw.rectangle([bg_x, bg_y, bg_x + bg_width, bg_y + bg_height], fill=(0, 0, 0, 128))
             if top_box:
                 box_draw.rectangle(list(top_box), fill=(0, 0, 0, 128))
             # Composite the overlay onto the main image
@@ -553,7 +582,7 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                     draw.text((chinese_x, line_chinese_y), chinese_word, font=chinese_font, fill=(255, 255, 255))
                     
                     # Portuguese (yellow) with line breaks - render for all lines
-                    if word_portuguese:
+                    if show_word_gloss and word_portuguese:
                         wrapped_lines = wrap_portuguese_to_width(word_portuguese, portuguese_font, word_width)
                         for pt_line_idx, line in enumerate(wrapped_lines):
                             if line and line.strip():

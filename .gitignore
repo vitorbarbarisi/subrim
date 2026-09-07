@@ -6,6 +6,8 @@ r36s_viewer
 
 # Bundles gerados por dictation/make_bundle.py (grandes, e derivados de uma coleção)
 dictation/*_ditado_*.html
+# Cache das decomposições da hanzi-api: derivado, e regenerável apagando o arquivo
+dictation/.hanzi_cache.json
 
 # Ignore warehouse media files
 warehouse/*

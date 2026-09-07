@@ -29,10 +29,21 @@ from video_screenshoter_r36s import add_subtitles_to_frame, parse_pinyin_transla
 REPO = Path(__file__).parent
 WAREHOUSE = REPO / "warehouse"
 COLLECTIONS = WAREHOUSE / "collections"
+# Escopo "texto": bases gerados pelo text_pipeline.py a partir de assets/text/.
+# Subpasta própria (e não um sufixo no nome) porque os dois corpora nunca devem
+# se misturar numa busca — o modo Vídeo varre WAREHOUSE, o modo Texto varre só
+# aqui, e nenhum dos dois precisa saber que o outro existe.
+TEXT_WAREHOUSE = WAREHOUSE / "text"
+TEXT_COLLECTIONS = TEXT_WAREHOUSE / "collections"
 # Cache de frames de um episódio "arquivado" (mp4 trocado por 1 frame/legenda).
 # Estrutura: warehouse/frames/<asset>/line{NNNN}.jpg — chaveado por line_num,
 # que é estável e mapeia 1-para-1 com a linha do *_base.txt.
 FRAMES = WAREHOUSE / "frames"
+
+
+def warehouse_dir(text: bool = False) -> Path:
+    """Diretório varrido pelas buscas: warehouse/ (vídeo) ou warehouse/text/."""
+    return TEXT_WAREHOUSE if text else WAREHOUSE
 
 
 def _frames_dir(asset: str) -> Path:
@@ -99,19 +110,46 @@ def has_clean_sentence(match: dict) -> bool:
     return bool(clean_chinese_only(match.get("chinese", "")))
 
 
-def collection_folder_name(word: str, matches: List[dict]) -> str:
-    """Nome da pasta da coleção: ``<palavra>_<pinyin_sem_acento>`` (ex.: ``當_dang``).
+def dedupe_sentences(matches: List[dict]) -> tuple:
+    """Remove frases repetidas, preservando a ordem. → ``(mantidas, n_removidas)``.
 
-    O sufixo é o pinyin (sem acento) mais frequente entre as frases encontradas.
-    Se nenhum pinyin estiver disponível, usa apenas a palavra.
+    Compara só os ideogramas (``clean_chinese_only``), então ``"我沒有。"`` e
+    ``"我沒有..."`` são a mesma frase — é a mesma noção de frase que o app de
+    ditado usa. Sobrevive a PRIMEIRA ocorrência da ordem recebida.
+
+    Frase cuja normalização é vazia — legenda só com ``♪``, pontuação ou mojibake
+    — NUNCA deduplica: são milhares no corpus e colidiriam todas num único balde,
+    sumindo de uma vez.
     """
-    safe_word = word.strip().replace("/", "_").replace("\\", "_")
+    vistos, out = set(), []
+    for m in matches:
+        key = clean_chinese_only(m.get("chinese", ""))
+        if key:
+            if key in vistos:
+                continue
+            vistos.add(key)
+        out.append(m)
+    return out, len(matches) - len(out)
+
+
+def collection_folder_name(label: str, matches: List[dict]) -> str:
+    """Nome da pasta da coleção: ``<busca>`` ou ``<palavra>_<pinyin_sem_acento>``.
+
+    A coleção inteira vai para UMA pasta, nomeada pelo texto da busca que a
+    produziu. Quando esse texto é um termo simples, o sufixo é o pinyin (sem
+    acento) mais frequente entre as frases — o ``當_dang`` de sempre.
+    """
+    safe = label.strip().replace("/", "_").replace("\\", "_")
+    # Busca com vírgula (ou) ou traço (e) reúne termos diferentes: o "pinyin mais
+    # frequente" seria o de um termo só, escolhido por acaso. Sem sufixo, então.
+    if "," in safe or "-" in safe:
+        return safe
     suffixes = [pinyin_to_ascii(m.get("pinyin", "")) for m in matches]
     suffixes = [s for s in suffixes if s]
     if not suffixes:
-        return safe_word
+        return safe
     most_common = Counter(suffixes).most_common(1)[0][0]
-    return f"{safe_word}_{most_common}"
+    return f"{safe}_{most_common}"
 
 
 # ── Nota (coluna 6 do base, opcional) ───────────────────────────────────────────
@@ -146,9 +184,9 @@ def clamp_nota(value: int) -> int:
     return max(NOTA_MIN, min(NOTA_MAX, int(value)))
 
 
-def base_path_for(asset: str) -> Path:
-    """Caminho do base do asset no warehouse."""
-    return WAREHOUSE / f"{asset}_base.txt"
+def base_path_for(asset: str, text: bool = False) -> Path:
+    """Caminho do base do asset no warehouse (ou no warehouse de textos)."""
+    return warehouse_dir(text) / f"{asset}_base.txt"
 
 
 def _split_terminator(line: bytes):
@@ -175,7 +213,7 @@ def _backup_once(path: Path) -> None:
         print(f"⚠️  não foi possível criar backup {bak.name}: {e}", flush=True)
 
 
-def set_notes(asset: str, notes: Dict[int, Optional[int]]) -> int:
+def set_notes(asset: str, notes: Dict[int, Optional[int]], text: bool = False) -> int:
     """Grava notas no base do asset. ``notes`` = ``{line_num: nota|None}``.
 
     Aplica TODAS as edições numa única reescrita e devolve quantas linhas
@@ -191,7 +229,7 @@ def set_notes(asset: str, notes: Dict[int, Optional[int]]) -> int:
     A troca final é atômica (``os.replace``), então uma busca lendo em paralelo
     enxerga o arquivo antigo ou o novo, nunca um pela metade.
     """
-    path = base_path_for(asset)
+    path = base_path_for(asset, text=text)
     if not notes or not path.exists():
         return 0
 
@@ -293,11 +331,17 @@ def _asset_source(base_file: Path):
     return None, None
 
 
-def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[dict]:
+def search(word: str, log_cb: Optional[Callable[[str], None]] = None,
+           text: bool = False) -> List[dict]:
     """Varre o warehouse e retorna as frases cujo array de palavras contém ``word``.
 
     Match exato: a palavra precisa ser uma das entradas (hanzi) do array, não
     apenas uma substring.
+
+    ``text=True`` varre ``warehouse/text/`` em vez de ``warehouse/``. Nesse
+    escopo não há vídeo nem cache de frames a resolver — a imagem é desenhada do
+    zero (ver ``_render_frame_to``) —, então nenhuma base é descartada por falta
+    de fonte.
 
     ``log_cb`` (opcional) recebe mensagens de diagnóstico: bases ignoradas por
     falta de vídeo e bases varridas que não contêm a palavra. Sem callback, as
@@ -311,21 +355,25 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
 
     word = word.strip()
     results: List[dict] = []
-    if not word or not WAREHOUSE.exists():
+    root = warehouse_dir(text)
+    if not word or not root.exists():
         return results
 
     skipped_no_src: List[str] = []     # base sem vídeo E sem cache → não dá pra extrair frame
     scanned_no_match: List[str] = []   # base varrida, mas a palavra não aparece nela
     bases_with_match = 0
 
-    for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
+    for base_file in sorted(root.glob("*_base.txt")):
         asset = base_file.stem.replace("_base", "")
-        kind, src = _asset_source(base_file)
-        if kind is None:
-            skipped_no_src.append(asset)
-            continue
-        # Arquivado (frames-only): não há mp4; o frame vem do cache por line_num.
-        video_path = str(src) if kind == "video" else ""
+        if text:
+            video_path = ""
+        else:
+            kind, src = _asset_source(base_file)
+            if kind is None:
+                skipped_no_src.append(asset)
+                continue
+            # Arquivado (frames-only): não há mp4; o frame vem do cache por line_num.
+            video_path = str(src) if kind == "video" else ""
 
         hits_before = len(results)
         try:
@@ -360,6 +408,7 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
                         "portuguese": cols[5],
                         "pinyin": matched[1],
                         "word": word,
+                        "text": text,
                         "nota": parse_nota(cols[NOTA_COL]) if len(cols) > NOTA_COL else None,
                     })
         except Exception as e:  # noqa: BLE001 - varredura tolerante a arquivos ruins
@@ -383,7 +432,7 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None) -> List[di
     return results
 
 
-def _scan_bases(log_cb: Optional[Callable[[str], None]] = None):
+def _scan_bases(log_cb: Optional[Callable[[str], None]] = None, text: bool = False):
     """Gera um registro por linha válida de cada ``*_base.txt`` com fonte utilizável.
 
     Centraliza o contrato de leitura do base (colunas, timestamps, resolução da
@@ -399,17 +448,23 @@ def _scan_bases(log_cb: Optional[Callable[[str], None]] = None):
         else:
             print(msg, flush=True)
 
-    if not WAREHOUSE.exists():
+    root = warehouse_dir(text)
+    if not root.exists():
         return
 
     skipped_no_src: List[str] = []
-    for base_file in sorted(WAREHOUSE.glob("*_base.txt")):
+    for base_file in sorted(root.glob("*_base.txt")):
         asset = base_file.stem.replace("_base", "")
-        kind, src = _asset_source(base_file)
-        if kind is None:
-            skipped_no_src.append(asset)
-            continue
-        video_path = str(src) if kind == "video" else ""
+        if text:
+            # Escopo texto: a imagem é desenhada do zero, então não há fonte a
+            # resolver e nenhuma base é descartada.
+            video_path = ""
+        else:
+            kind, src = _asset_source(base_file)
+            if kind is None:
+                skipped_no_src.append(asset)
+                continue
+            video_path = str(src) if kind == "video" else ""
 
         try:
             with open(base_file, "r", encoding="utf-8") as f:
@@ -433,6 +488,7 @@ def _scan_bases(log_cb: Optional[Callable[[str], None]] = None):
                         "chinese":           cols[3],
                         "translations_json": cols[4],
                         "portuguese":        cols[5],
+                        "text":              text,
                         "nota": parse_nota(cols[NOTA_COL]) if len(cols) > NOTA_COL else None,
                     }
         except Exception as e:  # noqa: BLE001
@@ -443,7 +499,7 @@ def _scan_bases(log_cb: Optional[Callable[[str], None]] = None):
 
 
 def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
-                          max_unknown: int = 1) -> List[dict]:
+                          max_unknown: int = 1, text: bool = False) -> List[dict]:
     """Busca frases com no máximo ``max_unknown`` palavras desconhecidas.
 
     "Desconhecida" = o base tem pinyin E tradução para a palavra E ela ainda não
@@ -467,7 +523,7 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
     _log(f"📚 {len(mastered)} palavra(s) dominada(s) contam como conhecidas.")
 
     results: List[dict] = []
-    for rec in _scan_bases(log_cb=log_cb):
+    for rec in _scan_bases(log_cb=log_cb, text=text):
         pairs = parse_pinyin_translations(rec["translations_json"])
         n_unknown = word_vocab.count_learnable(pairs, mastered)
         if n_unknown > max_unknown:
@@ -481,7 +537,8 @@ def search_comprehensible(log_cb: Optional[Callable[[str], None]] = None,
     return results
 
 
-def search_all(log_cb: Optional[Callable[[str], None]] = None) -> List[dict]:
+def search_all(log_cb: Optional[Callable[[str], None]] = None,
+               text: bool = False) -> List[dict]:
     """Retorna TODAS as frases das bases com fonte utilizável (sem filtrar por palavra).
 
     Modo especial da GUI (busca ``"1"``): mostra tudo o que está disponível para
@@ -500,13 +557,67 @@ def search_all(log_cb: Optional[Callable[[str], None]] = None) -> List[dict]:
             print(msg, flush=True)
 
     results: List[dict] = []
-    for rec in _scan_bases(log_cb=log_cb):
+    for rec in _scan_bases(log_cb=log_cb, text=text):
         rec["pinyin"] = ""
         rec["word"] = "1"
         results.append(rec)
 
     n_assets = len({r["asset"] for r in results})
     _log(f"✓ todas: {len(results)} frase(s) disponíveis em {n_assets} asset(s).")
+    return results
+
+
+def search_terms(terms: List[str],
+                 log_cb: Optional[Callable[[str], None]] = None,
+                 max_unknown: int = 1, text: bool = False) -> List[dict]:
+    """Frases que satisfazem TODOS os ``terms`` — a busca concatenada por traço.
+
+    Cada termo é ``"0"`` (regra i+1: ≤ ``max_unknown`` palavras desconhecidas),
+    ``"1"`` (curinga, não filtra nada) ou uma palavra — match exato numa entrada
+    do array de palavras, igual ao ``search()``.
+
+    Uma varredura só do warehouse avalia todos os termos por linha, e cada frase
+    entra UMA vez — ao contrário da vírgula, que concatena uma cópia por termo.
+
+    ``word`` recebe o termo inteiro (``"放-結束"``), porque é ele que agrupa a
+    coleção ao salvar: o grupo vira uma pasta só. ``pinyin`` sai da primeira
+    palavra do grupo, que é o que dá o sufixo do nome da pasta.
+    """
+    def _log(msg: str) -> None:
+        if log_cb:
+            log_cb(msg)
+        else:
+            print(msg, flush=True)
+
+    label = "-".join(terms)
+    words = [t for t in terms if t not in ("0", "1")]
+    needs_i1 = "0" in terms
+
+    # Uma carga só para a varredura inteira (são ~130k linhas), como no i+1.
+    mastered = word_vocab.mastered_words() if needs_i1 else None
+    if needs_i1:
+        _log(f"📚 {len(mastered)} palavra(s) dominada(s) contam como conhecidas.")
+
+    results: List[dict] = []
+    for rec in _scan_bases(log_cb=log_cb, text=text):
+        found = {}
+        if words or needs_i1:
+            pairs = parse_pinyin_translations(rec["translations_json"])
+            if needs_i1:
+                n_unknown = word_vocab.count_learnable(pairs, mastered)
+                if n_unknown > max_unknown:
+                    continue
+                rec["n_unknown"] = n_unknown
+            found = {w: py for w, py, _ in pairs}
+
+        if not all(w in found for w in words):
+            continue
+
+        rec["word"] = label
+        rec["pinyin"] = found[words[0]] if words else ""
+        results.append(rec)
+
+    _log(f"✓ '{label}': {len(results)} frase(s) com todos os termos.")
     return results
 
 
@@ -560,6 +671,12 @@ def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> 
         cap.release()
 
 
+# Tela do R36S. A imagem de uma frase de texto já nasce nessa proporção, então o
+# letterbox do add_subtitles_to_frame vira no-op no modo r36s e a legenda cai no
+# mesmo lugar que cairia sobre um frame de vídeo.
+_TEXT_CANVAS = (640, 480)
+
+
 def _render_frame_to(match: dict, out_path: Path) -> bool:
     """Materializa o frame da frase em ``out_path`` (sem legenda).
 
@@ -567,7 +684,19 @@ def _render_frame_to(match: dict, out_path: Path) -> bool:
     episódio arquivado (``warehouse/frames/<asset>/lineNNNN.jpg``). É o único
     ponto por onde preview e coleção obtêm o frame — mantém busca, visualização
     e salvamento consistentes esteja o episódio arquivado ou não.
+
+    Frase vinda de um texto (``match["text"]``) não tem vídeo nenhum: a "cena" é
+    uma tela preta, sobre a qual o mesmo ``add_subtitles_to_frame`` desenha a
+    legenda. Assim a coleção de texto sai com o layout idêntico ao das coleções
+    de vídeo — só sem a foto atrás.
     """
+    if match.get("text"):
+        from PIL import Image
+
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        Image.new("RGB", _TEXT_CANVAS, "black").save(out_path)
+        return True
+
     video_path = match.get("video_path") or ""
     if video_path and Path(video_path).exists():
         return extract_frame(video_path, match["avg_time"], out_path)
@@ -681,13 +810,26 @@ def render_preview(match: dict, mode: str = "r36s"):
 SAVE_MODES = ("original", "r36s")
 
 
-def save_collection(word: str, matches: List[dict], mode: str = "r36s",
-                    progress_cb: Optional[Callable[[int, int, str], None]] = None) -> Path:
-    """Persiste a coleção em ``warehouse/collections/<chave>_<mode>/``.
+# Subpastas das variantes de legenda usadas pelos jogos 3 e 4 do ditado.
+# Subpasta, e não sufixo no nome (``001_..._pt.png``), porque o visor do R36S
+# varre todo ``*.png`` da pasta: com sufixo as variantes entrariam no slideshow
+# intercaladas com as imagens de verdade.
+VARIANT_DIRS = {"pt": "so_traducao", "zh": "so_mandarim"}
+
+
+def save_collection(label: str, matches: List[dict], mode: str = "r36s",
+                    progress_cb: Optional[Callable[[int, int, str], None]] = None,
+                    text: bool = False, variants: bool = False) -> Path:
+    """Persiste a coleção INTEIRA em ``warehouse/collections/<chave>_<mode>/``.
+
+    Uma chamada, uma pasta: ``label`` é o texto da busca que produziu a coleção, e
+    todas as frases vão juntas — não há mais uma pasta por termo.
 
     ``mode`` é ``"original"`` (resolução do vídeo) ou ``"r36s"`` (640x480, legenda
     maior) — um só por chamada. A chave é ``collection_folder_name`` (ex.:
     ``當_dang``), então a pasta fica ``當_dang_r36s``.
+
+    Invariante da pasta: uma frase, uma imagem — ver ``dedupe_sentences`` abaixo.
 
     O formato vai no NOME da pasta, e não numa subpasta ``original/``/``r36s/``
     fixa: subpasta com nome fixo colide quando duas coleções são copiadas para o
@@ -697,8 +839,15 @@ def save_collection(word: str, matches: List[dict], mode: str = "r36s",
     ordem da tabela da GUI. Não reordenar aqui.
 
     Junto das imagens grava um ``index.json`` para a aplicação JS que roda no
-    celular: uma lista de ``{index, source, sentence, done}``, onde ``sentence``
-    é a frase limpa (só ideogramas) e ``done`` começa sempre ``false``.
+    celular: uma lista de ``{index, source, sentence, portuguese, done}``, onde
+    ``sentence`` é a frase limpa (só ideogramas) e ``done`` começa sempre
+    ``false``.
+
+    ``variants=True`` grava mais duas imagens por frase, em ``so_traducao/`` e
+    ``so_mandarim/``, com o mesmo nome de arquivo. São as que escondem metade da
+    legenda: sem elas os jogos 3 e 4 do ditado mostrariam a própria resposta.
+    Custam duas queimadas de legenda a mais por frase — não um segundo seek de
+    vídeo, que é a parte cara e continua acontecendo uma vez só.
 
     Frases que zeram na limpeza (legenda só com ``♪`` ou pontuação) não geram
     imagem nem entrada.
@@ -708,11 +857,23 @@ def save_collection(word: str, matches: List[dict], mode: str = "r36s",
     if mode not in SAVE_MODES:
         raise ValueError(f"mode inválido: {mode!r} (esperado um de {SAVE_MODES})")
 
-    out_dir = COLLECTIONS / f"{collection_folder_name(word, matches)}_{mode}"
+    # Coleção de texto vai para warehouse/text/collections/: o nome da pasta é o
+    # termo buscado, que colidiria com a coleção homônima do modo Vídeo.
+    root = TEXT_COLLECTIONS if text else COLLECTIONS
+    out_dir = root / f"{collection_folder_name(label, matches)}_{mode}"
     out_dir.mkdir(parents=True, exist_ok=True)
+    if variants:
+        for sub in VARIANT_DIRS.values():
+            (out_dir / sub).mkdir(exist_ok=True)
 
     # Filtra ANTES de numerar, para o prefixo (001_, 002_…) ficar contíguo.
     usable = [m for m in matches if has_clean_sentence(m)]
+    # A busca por vírgula devolve a mesma frase uma vez por termo, e agora a
+    # coleção inteira cai numa pasta só — sem isto o ditado repetiria o cartão.
+    # Aqui, e não só na GUI, porque a garantia é da função e não de quem chama.
+    usable, n_repetidas = dedupe_sentences(usable)
+    if n_repetidas and progress_cb:
+        progress_cb(0, len(usable), f"↺ {n_repetidas} frase(s) repetida(s) ignorada(s)")
 
     entries: List[dict] = []
     total = len(usable)
@@ -725,17 +886,40 @@ def save_collection(word: str, matches: List[dict], mode: str = "r36s",
                 progress_cb(i, total, f"⚠️  Falha ao extrair frame de {match['asset']} (linha {match['line_num']})")
             continue
 
+        # As cópias saem do frame CRU e ANTES da primeira queimada:
+        # add_subtitles_to_frame grava por cima do arquivo, então depois dela o
+        # frame limpo não existe mais e só um novo seek no vídeo o traria de
+        # volta — que é justamente o custo que se quer pagar uma vez só.
+        variant_paths = {}
+        if variants:
+            for key, sub in VARIANT_DIRS.items():
+                variant_paths[key] = out_dir / sub / name
+                shutil.copyfile(out_path, variant_paths[key])
+
+        burn = (mode == "r36s")
         add_subtitles_to_frame(out_path, match["chinese"], match["translations_json"],
-                               match["portuguese"], resize=(mode == "r36s"))
+                               match["portuguese"], resize=burn)
+        for key, vpath in variant_paths.items():
+            add_subtitles_to_frame(vpath, match["chinese"], match["translations_json"],
+                                   match["portuguese"], resize=burn, variant=key)
 
         # Só entra no índice o que virou imagem de fato.
-        entries.append({
+        entry = {
             "index": i,
             "source": name,
             "sentence": clean_chinese_only(match["chinese"]),
+            # Gravado sempre, mesmo sem as variantes: não custa nada e é o que o
+            # jogo 4 usa como resposta certa.
+            "portuguese": (match.get("portuguese") or "").strip(),
             "done": False,
-        })
+        }
+        for key, sub in VARIANT_DIRS.items():
+            if key in variant_paths:
+                entry[f"source_{key}"] = f"{sub}/{name}"
+        entries.append(entry)
 
+        # Um aviso por FRASE, não por imagem: com as variantes o log triplicaria
+        # sem dizer nada de novo.
         if progress_cb:
             progress_cb(i, total, f"✓ {name}")
 
