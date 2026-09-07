@@ -544,6 +544,29 @@ def _deepseek_max_tokens(n_items: int = 1, per_item: int = 120, base: int = 400)
     return min(8192, base + per_item * max(1, n_items))
 
 
+# Contexto de registro compartilhado pelos prompts de tradução pt/es/en → zht.
+# As legendas vêm de filmes e novelas: é DIÁLOGO FALADO, não texto escrito. Sem
+# esta instrução o modelo assume o registro escrito neutro (書面語) e a tradução
+# sai livresca demais para quem quer aprender mandarim de conversa.
+_ZHT_REGISTRO_FALADO = (
+    "CONTEXTO: são legendas de filmes, séries e novelas — falas de personagens "
+    "conversando, não texto escrito. Traduza em mandarim COLOQUIAL do dia a dia "
+    "(口語), do jeito que se fala numa conversa:\n"
+    "- prefira vocabulário e construções da fala comum; evite o registro escrito "
+    "(書面語), chengyu e palavras literárias quando a fala for casual;\n"
+    "- use partículas modais e interjeições onde soarem naturais (啊, 吧, 呢, 嘛, "
+    "了, 欸, 哎, 唉) — são elas que fazem a fala soar falada;\n"
+    "- prefira as formas faladas: 幹嘛, 怎麼了, 沒事, 走吧, 真的假的, 不會吧;\n"
+    "- use mandarim padrão, SEM gíria regional forte (nem 啥/咋 do norte, nem gíria "
+    "exclusiva de Taiwan);\n"
+    "- MANTENHA O REGISTRO do original: fala grosseira continua grosseira, "
+    "xingamento continua xingamento, carinho continua carinho — e se o original for "
+    "mesmo formal (notícia, discurso, documento oficial), traduza formal;\n"
+    "- legenda falada é curta: mantenha o comprimento próximo ao do original, sem "
+    "acrescentar explicação."
+)
+
+
 def _retry_api_call(func, *args, max_retries: int = None, base_delay: float = None,
                     backoff_factor: float = None, **kwargs):
     """Retry API call with exponential backoff on failures.
@@ -805,7 +828,8 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
         src_label = "inglês"
 
     prompt = (
-        f"Traduza do {src_label} para chinês tradicional (zht).\n"
+        f"Traduza do {src_label} para chinês tradicional (zht) esta fala de legenda.\n\n"
+        f"{_ZHT_REGISTRO_FALADO}\n\n"
         "RETORNE SOMENTE o texto traduzido (sem marcações, sem explicações).\n\n"
         f"Texto: {text}"
     )
@@ -815,7 +839,10 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
         "messages": [
             {"role": "user", "content": prompt},
         ],
-        "temperature": 0.2,
+        # 0.4 (e não 0.2): temperatura baixa demais puxa a tradução mais
+        # canônica/literal — o registro escrito. Um pouco de folga deixa a
+        # escolha coloquial aparecer sem soltar o formato de saída.
+        "temperature": 0.4,
     }
     data = json.dumps(body).encode("utf-8")
 
@@ -888,9 +915,11 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
     numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, start=1))
     prompt = (
         f"Traduza do {src_label} para chinês tradicional (zht) os segmentos de "
-        "legenda abaixo. Eles são CONSECUTIVOS e podem ser pedaços de uma mesma "
-        "fala — use os vizinhos como CONTEXTO para traduzir melhor, mas traduza "
-        "CADA segmento separadamente, mantendo a mesma divisão (uma tradução por número).\n"
+        "legenda abaixo.\n\n"
+        f"{_ZHT_REGISTRO_FALADO}\n\n"
+        "Os segmentos são CONSECUTIVOS e podem ser pedaços de uma mesma fala — use "
+        "os vizinhos como CONTEXTO para traduzir melhor, mas traduza CADA segmento "
+        "separadamente, mantendo a mesma divisão (uma tradução por número).\n"
         "RETORNE SOMENTE um objeto JSON onde a chave é o número do segmento (string) "
         "e o valor é a tradução em zht. Sem markdown, sem explicações, sem texto extra.\n"
         "Exemplo: {\"1\": \"對不起\", \"2\": \"爸爸來晚了\"}\n\n"
@@ -900,7 +929,10 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
     body = {
         "model": model,
         "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+        # 0.4 (e não 0.2): temperatura baixa demais puxa a tradução mais
+        # canônica/literal — o registro escrito. Um pouco de folga deixa a
+        # escolha coloquial aparecer sem soltar o formato de saída.
+        "temperature": 0.4,
         # Traduções zht curtas (uma por segmento) → teto enxuto e escalado.
         "max_tokens": _deepseek_max_tokens(len(texts), per_item=120),
     }
