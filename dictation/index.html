@@ -12,6 +12,9 @@
     --line: #2c2c36;
     --accent: #7048e8;
     --bad: #e24b4a;
+    /* Verde só do jogo 5: "componente certo, esperando os outros". Precisa ser
+       um terceiro estado — o roxo já quer dizer "acertou e acabou". */
+    --mark: #2ea043;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--fg); }
@@ -122,14 +125,18 @@
      com as glossárias), então cada opção ocupa a linha toda e alinha à
      esquerda — lado a lado elas viram um bloco ilegível. */
   .opt.wide { flex: 1 1 100%; text-align: left; font-size: 14px; line-height: 1.3; }
-  /* Jogo 5 no mesmo corpo do jogo 3: o que se lê no botão são ideogramas, e um
-     radical a 14px não dá para distinguir de outro. Depois de .opt.wide, para
-     ganhar dela o tamanho da fonte. */
-  .opt.decomp { font-size: 30px; line-height: 1.25; }
-  /* A glossária explica o componente, não é o componente: em corpo cheio ela
-     dobrava a altura do botão e o grid virava três telas de rolagem. */
-  .opt.decomp .gloss { font-size: 14px; color: var(--dim); }
+  /* Jogo 5: componente já encontrado, esperando os outros do mesmo caractere. */
+  .opt.mark { border-color: var(--mark); background: #122417; }
   .opt.gone { display: none; }
+
+  /* Glossa do jogo 5. No desktop sai de graça pelo title; no celular não existe
+     hover, então o toque longo mostra este balão — sem ele a glossa ficaria
+     invisível justamente onde o ditado é jogado. */
+  #tip {
+    position: absolute; z-index: 30; pointer-events: none;
+    background: #1c1c24; border: 1px solid var(--line); border-radius: 6px;
+    padding: 4px 8px; font-size: 13px; color: var(--fg); max-width: 70vw;
+  }
 
   #msg { padding: 0 12px 12px; font-size: 13px; color: var(--dim); min-height: 18px; }
 
@@ -168,6 +175,7 @@
   </form>
   <div id="msg"></div>
   <div id="grid" class="hide"></div>
+  <div id="tip" class="hide"></div>
 
   <footer>
     <span id="count">—</span>
@@ -205,6 +213,7 @@
     answer: document.getElementById("answer"),
     msg: document.getElementById("msg"),
     grid: document.getElementById("grid"),
+    tip: document.getElementById("tip"),
     exportBtn: document.getElementById("export"),
     menuBtn: document.getElementById("menu-btn"),
     menu: document.getElementById("menu")
@@ -338,9 +347,7 @@
   }
 
   function optLabel(cur, i) {
-    if (cur.game === 2) return cur.opts[i].p;
-    if (cur.game === 5) return cur.decomps[i];   // sem decomposição vem o caractere
-    return cur.chars[i];
+    return cur.game === 2 ? cur.opts[i].p : cur.chars[i];
   }
 
   // O que o botão escreve se for a vez dele; null no distrator.
@@ -354,40 +361,17 @@
       : (cur.sentence.charAt(cur.step) || null);
   }
 
-  // Classe extra do botão, por jogo: caractere grande no 3, linha inteira no 5.
+  // Classe extra do botão: no 3 e no 5 o rótulo é um glifo só, e glifo pequeno
+  // não se distingue de outro.
   function optClass(cur) {
-    if (cur.game === 3) return " char";
-    if (cur.game === 5) return " wide decomp";
-    return "";
-  }
-
-  // Monta o rótulo do jogo 5 em dois corpos. O campo vem como
-  // "日 (sol/tempo) + 寺 (templo/instituição)": o que está entre parênteses é
-  // explicação e vai pequeno; o resto — componentes e "+" — é o que se lê.
-  // Sem parênteses (o fallback do caractere puro) o laço não acha nada e o
-  // rótulo inteiro sai grande, que é o certo.
-  function fillDecomp(btn, label) {
-    var re = /\(([^)]*)\)/g;
-    var pos = 0, m, span;
-    while ((m = re.exec(label))) {
-      if (m.index > pos) {
-        btn.appendChild(document.createTextNode(label.slice(pos, m.index)));
-      }
-      span = document.createElement("span");
-      span.className = "gloss";
-      span.textContent = m[0];
-      btn.appendChild(span);
-      pos = m.index + m[0].length;
-    }
-    if (pos < label.length) {
-      btn.appendChild(document.createTextNode(label.slice(pos)));
-    }
+    return (cur.game === 3 || cur.game === 5) ? " char" : "";
   }
 
   function buildGrid() {
     var cur = items[at];
     el.grid.textContent = "";
     el.grid.style.maxHeight = "";
+    el.tip.classList.add("hide");
     if (!cur || cur.game === 1) {
       el.grid.classList.add("hide");
       el.answer.readOnly = false;
@@ -415,14 +399,29 @@
         b.setAttribute("data-i", i);
         frag.appendChild(b);
       }
+    } else if (cur.game === 5) {
+      // Um botão por componente. `mark` é o verde de "já achei este, faltam os
+      // outros do mesmo caractere"; `gone` são os caracteres já fechados.
+      for (i = 0; i < cur.comps.length; i++) {
+        b = document.createElement("button");
+        b.type = "button";
+        b.className = "opt char"
+                    + (cur.used.indexOf(i) >= 0 ? " gone" : "")
+                    + (cur.marked.indexOf(i) >= 0 ? " mark" : "");
+        b.textContent = cur.comps[i].c;
+        // Componente sem glossa existe no dado (要 vem como "西 () + 女 ()").
+        // Sem este guarda o hover abriria um balão vazio.
+        if (cur.comps[i].g) b.title = cur.comps[i].g;
+        b.setAttribute("data-i", i);
+        frag.appendChild(b);
+      }
     } else {
       for (i = 0; i < optCount(cur); i++) {
         b = document.createElement("button");
         b.type = "button";
         b.className = "opt" + optClass(cur)
                     + (cur.used.indexOf(i) >= 0 ? " gone" : "");
-        if (cur.game === 5) fillDecomp(b, optLabel(cur, i));
-        else b.textContent = optLabel(cur, i);
+        b.textContent = optLabel(cur, i);
         b.setAttribute("data-i", i);
         frag.appendChild(b);
       }
@@ -498,6 +497,18 @@
     }, 350);
   }
 
+  // Componentes que o caractere atual ainda pede. Compara por VALOR e COM
+  // REPETIÇÃO: há caractere com o mesmo radical duas vezes (多 = 夕 + 夕) e há
+  // radical repetido entre caracteres diferentes da frase.
+  function restantes(cur) {
+    var falta = cur.needs[cur.step].slice();
+    for (var k = 0; k < cur.marked.length; k++) {
+      var pos = falta.indexOf(cur.comps[cur.marked[k]].c);
+      if (pos >= 0) falta.splice(pos, 1);
+    }
+    return falta;
+  }
+
   function pick(i, btn) {
     var cur = items[at];
     if (!cur || cur.game === 1) return;
@@ -508,6 +519,31 @@
       el.answer.value = cur.answer;        // confirmação antes de virar a página
       flash(el.answer, "ok");
       btn.classList.add("ok");
+      finish();
+      return;
+    }
+
+    // Jogo 5: cada botão é um COMPONENTE, e um caractere só fecha quando todos
+    // os seus forem achados — em qualquer ordem.
+    if (cur.game === 5) {
+      var falta = restantes(cur);
+      var onde = falta.indexOf(cur.comps[i].c);
+      if (onde < 0) { flash(btn, "bad"); return; }
+      cur.marked.push(i);
+      btn.classList.add("mark");
+      if (cur.marked.length < cur.needs[cur.step].length) return;
+
+      // Fechou: os verdes somem e o caractere entra no campo.
+      for (var m = 0; m < cur.marked.length; m++) {
+        cur.used.push(cur.marked[m]);
+        var alvo = el.grid.querySelector('[data-i="' + cur.marked[m] + '"]');
+        if (alvo) { alvo.classList.remove("mark"); alvo.classList.add("gone"); }
+      }
+      cur.marked = [];
+      el.answer.value += cur.sentence.charAt(cur.step);
+      cur.step++;
+      flash(el.answer, "ok");
+      if (cur.step < cur.sentence.length) return;
       finish();
       return;
     }
@@ -533,7 +569,58 @@
   el.grid.addEventListener("click", function (e) {
     var b = e.target && e.target.closest ? e.target.closest(".opt") : null;
     if (!b || b.classList.contains("gone")) return;
+    // Se o toque virou "segurar para ver a glossa", ele não é uma jogada. A
+    // flag é zerada no próximo touchstart, não aqui.
+    if (segurou) return;
     pick(parseInt(b.getAttribute("data-i"), 10), b);
+  });
+
+  // ── Glossa por toque longo ──────────────────────────────────────────────
+  // No desktop o `title` do botão já resolve. No celular não há hover, então
+  // segurar o botão mostra o balão. De propósito SEM preventDefault no
+  // touchstart: ele mataria o clique, e o clique é a jogada. Quem separa os
+  // dois é a flag `segurou`, que o handler de clique consome.
+  var segurou = false, timerTip = null;
+
+  function mostraTip(btn) {
+    var texto = btn.getAttribute("title");
+    if (!texto) return;                       // componente sem glossa
+    el.tip.textContent = texto;
+    el.tip.classList.remove("hide");
+    var r = btn.getBoundingClientRect();
+    var largura = el.tip.offsetWidth;
+    var x = r.left + window.scrollX + (r.width - largura) / 2;
+    x = Math.max(6, Math.min(x, document.documentElement.clientWidth - largura - 6));
+    el.tip.style.left = Math.round(x) + "px";
+    el.tip.style.top = Math.round(r.top + window.scrollY - el.tip.offsetHeight - 6) + "px";
+  }
+
+  function escondeTip() {
+    el.tip.classList.add("hide");
+  }
+
+  function cancelaTimer() {
+    if (timerTip) { clearTimeout(timerTip); timerTip = null; }
+  }
+
+  el.grid.addEventListener("touchstart", function (e) {
+    // Todo toque novo começa limpo. Zerar aqui, e não no handler de clique,
+    // porque um toque longo que termina FORA do botão não gera clique nenhum —
+    // e a flag presa engoliria a próxima jogada de verdade.
+    segurou = false;
+    escondeTip();
+    var b = e.target && e.target.closest ? e.target.closest(".opt") : null;
+    if (!b || b.classList.contains("gone") || !b.getAttribute("title")) return;
+    cancelaTimer();
+    timerTip = setTimeout(function () {
+      timerTip = null;
+      segurou = true;
+      mostraTip(b);
+    }, 400);
+  }, { passive: true });
+
+  ["touchend", "touchmove", "touchcancel"].forEach(function (ev) {
+    el.grid.addEventListener(ev, cancelaTimer, { passive: true });
   });
 
   function submit() {
@@ -636,6 +723,7 @@
         game: 1,
         step: 0,          // pedaços já colocados nesta frase
         used: [],         // índices de opts já gastos
+        marked: [],       // jogo 5: componentes verdes do caractere em curso
         draft: ""         // o que foi digitado aqui (só jogo 1)
       };
       // Os jogos 2 a 5 dependem de dados que só o make_bundle monta. Sem eles
@@ -652,10 +740,10 @@
         it.game = 4;
         it.options = e.options;
         it.answer = e.answer;
-      } else if (e.game === 5 && e.chars && e.chars.length && e.decomps) {
+      } else if (e.game === 5 && e.needs && e.needs.length && e.comps) {
         it.game = 5;
-        it.chars = e.chars;
-        it.decomps = e.decomps;
+        it.needs = e.needs;      // por caractere, os componentes que ele pede
+        it.comps = e.comps;      // os botões, já embaralhados
       }
       out.push(it);
     }

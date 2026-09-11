@@ -192,12 +192,33 @@ colunas só coincide em 78,9% das linhas, porque a legenda foi re-segmentada na 
 peneiras a mais existem só para não entregar a resposta — as opções têm a mesma caixa (as novelas
 são maiúsculas, os filmes não) e tamanho parecido, senão bastaria escolher a diferente.
 
-**Jogo 5 — montar por decomposição.** Como o jogo 3, com os componentes no mesmo corpo de letra
-(a glossária entre parênteses vai menor, senão o botão dobra de altura), mas cada botão mostra os
-componentes do caractere (`日 (sol/tempo) + 寺 (templo/instituição)`), vindos do campo `decomposition` da
-hanzi-api. Caractere sem decomposição aparece inteiro, como fallback — o que também acontece quando
-a decomposição registrada denunciaria a resposta (9% delas começam pelo próprio caractere). Na
-prática ~2 em cada 10 botões caem no fallback.
+A posição da certa é sorteada, mas **nunca repete três vezes seguidas**. O sorteio puro é uniforme
+e independente (medido: qui² da marginal e das diferenças abaixo do limiar, correlação lag-1 ~0),
+só que o acaso produz corridas — chegou a cinco frases seguidas com a certa na mesma posição, e aí
+o jogo parece viciado mesmo estando certo. A regra mora no `make_bundle`, e não no
+`translations.py`, porque é sobre a sequência: lá só se enxerga uma frase por vez. Ela dispara em
+~3% dos itens, então a distribuição continua uniforme.
+
+**Jogo 5 — montar por decomposição.** Cada botão é **um componente** (`日`, `寺`), não a
+decomposição inteira: montar um caractere exige achar todos os seus componentes espalhados pelo
+grid. Dentro de um caractere a **ordem é livre** — a decomposição é um conjunto, e a ordem do campo
+vem de LLM, então não dá para punir por ela.
+
+- componente certo fica com **borda verde**, marcado, até o caractere fechar;
+- componente errado fica vermelho e volta ao normal, sem escrever nada;
+- caractere completo entra no campo e os verdes desaparecem;
+- a **glossa** do componente está no hover (desktop) e no toque longo de ~400 ms (celular), porque
+  no Chrome do Android não existe hover e o `title` não aparece. Componente sem glossa não abre
+  balão nenhum — existem no dado (`要` vem como `西 () + 女 ()`).
+
+Os componentes saem do campo `decomposition` da hanzi-api. Dos 1.261 caracteres com o campo
+preenchido, **1.156 decompõem**; as 105 recusas são legítimas (glossa com `+` dentro, decomposição
+alternativa com "ou", subtração, forma tradicional no lugar da simplificada) e caem no fallback: o
+caractere inteiro num botão só. Frase em que **nenhum** caractere decompõe é rebaixada para o
+jogo 1 — seriam todos botões inteiros, viraria o jogo 3 com a imagem que mostra a resposta. São
+0,2% das frases.
+
+O grid fica com ~17 botões na mediana e 25 no p90, no mesmo corpo de letra do jogo 3.
 
 ## Controles
 
@@ -208,8 +229,9 @@ prática ~2 em cada 10 botões caem no fallback.
   **literal**: um espaço a mais reprova. Nos outros jogos o Enter não faz nada — não há o que enviar.
 - Errando, fica vermelho e treme: o campo no jogo 1, o botão tocado nos demais.
 - Sair de uma frase pela metade e voltar **não perde o caminho andado** — nem o que você digitou no
-  jogo 1, nem os botões já tocados nos jogos 2 e 3. O campo é um só na página, mas o conteúdo é de
-  cada frase: chegando a uma frase do jogo 1 ele vem vazio e já com o cursor dentro.
+  jogo 1, nem os botões já tocados nos jogos 2, 3 e 5, nem os componentes verdes de um caractere
+  que ficou pela metade. O campo é um só na página, mas o conteúdo é de cada frase: chegando a uma
+  frase do jogo 1 ele vem vazio e já com o cursor dentro.
 - No menu **⋮**, **Exportar index.json** baixa o índice com os `done` atualizados. O arquivo sai no
   formato de sempre (`index`, `source`, `sentence`, `done`) — os dados dos jogos não vão junto,
   porque são remontados a cada empacotamento.

@@ -30,6 +30,7 @@ Diagnóstico rápido:  python3 dictation/hanzi_decomp.py 學 我 的
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -118,6 +119,61 @@ def sanitize(char: str, decomposition: str) -> str:
     if "+" not in decomposition or char in decomposition:
         return ""
     return decomposition
+
+
+# Um pedaço da decomposição: o componente e, entre parênteses, a glossa.
+_PART_RE = re.compile(r"^\s*([^\s(]+)\s*(?:\(([^)]*)\))?\s*$")
+
+
+def _split_top_level(text: str) -> list:
+    """Divide em ``+``, ignorando os que estiverem DENTRO de parênteses.
+
+    A glossa às vezes traz um: ``扌 (mão) + 詹 (falar, que contém 厃 + 八 + 言)``.
+    Dividir ingenuamente quebra esse caso — e são 5 caracteres a mais que dá
+    para aproveitar em vez de mandar para o fallback.
+    """
+    partes, atual, prof = [], [], 0
+    for ch in text:
+        if ch == "(":
+            prof += 1
+        elif ch == ")":
+            prof = max(0, prof - 1)
+        if ch == "+" and prof == 0:
+            partes.append("".join(atual))
+            atual = []
+        else:
+            atual.append(ch)
+    partes.append("".join(atual))
+    return partes
+
+
+def split_components(decomposition: str) -> list:
+    """``[(componente, glossa)]``, ou ``[]`` quando não dá para separar.
+
+    Recebe o campo JÁ passado pelo ``sanitize``. Devolve vazio — e quem chama
+    cai no caractere inteiro — sempre que o texto sai do formato
+    ``X (glossa) + Y (glossa)``. Dos 1.261 caracteres com decomposição no banco,
+    1.156 passam; as 105 recusas são todas legítimas:
+
+        會   … + 曰 (falar/dizer) ou 亼 + 曾 (…)   decomposição alternativa
+        矢   丿 (…) + 天 (céu) - 一 (…)            subtração
+        专   專 = 叀 + 寸                          tradicional no lugar da simplificada
+
+    Menos de dois componentes também não serve: um componente só não é
+    decomposição, é o caractere com outro nome.
+    """
+    if not decomposition:
+        return []
+    out = []
+    for pedaco in _split_top_level(decomposition):
+        m = _PART_RE.match(pedaco)
+        if not m:
+            return []
+        comp = m.group(1).strip()
+        if not comp:
+            return []
+        out.append((comp, (m.group(2) or "").strip()))
+    return out if len(out) >= 2 else []
 
 
 def _fetch(char: str) -> str:

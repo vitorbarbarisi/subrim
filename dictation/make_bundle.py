@@ -89,6 +89,7 @@ class Deps:
         self.lex = None
         self.bank = None
         self.decomps = {}
+        self.comps = {}
         self.games = [1]
         self.notas = []
         if not enabled:
@@ -121,7 +122,10 @@ class Deps:
         chars = {c for e in entries for c in (e.get("sentence") or "")}
         if chars:
             self.decomps = hanzi_decomp.decompositions(sorted(chars))
-        if any(self.decomps.values()):
+        # O jogo 5 precisa dos componentes separados, não do campo inteiro.
+        self.comps = {c: hanzi_decomp.split_components(d)
+                      for c, d in self.decomps.items()}
+        if any(self.comps.values()):
             self.games.append(5)
         else:
             self.notas.append("nenhuma decomposição: o jogo 5 sai de cena")
@@ -142,6 +146,7 @@ def assign_games(items: list, deps: Deps) -> list:
     """
     counts = [0] * 5
     ciclo = deps.games
+    ultimas = []          # onde a certa do jogo 4 caiu nas duas últimas vezes
     for i, item in enumerate(items):
         game = ciclo[i % len(ciclo)]
         # Semente pelo nome do arquivo: reempacotar a mesma coleção devolve
@@ -166,19 +171,57 @@ def assign_games(items: list, deps: Deps) -> list:
             options = (deps.bank.options(item.get("portuguese", ""), rng)
                        if deps.bank else None)
             if options:
-                item["options"] = options
                 # A certa também vai limpa: é assim que ela aparece no botão, e
                 # é por igualdade de texto que a página confere o clique.
-                item["answer"] = translations.clean_pt(item["portuguese"])
+                answer = translations.clean_pt(item["portuguese"])
+                onde = options.index(answer)
+                # O sorteio é uniforme e independente — medido —, mas o acaso
+                # produz corridas: chegou a cinco frases seguidas com a certa na
+                # mesma posição, e aí o jogo PARECE viciado mesmo sorteando
+                # direito. Duas seguidas é o limite. A regra dispara em ~4% dos
+                # itens (1/5 × 1/5), então quase não mexe na distribuição.
+                #
+                # Mora aqui, e não no `translations.options`: a regra é sobre a
+                # SEQUÊNCIA, e lá só se enxerga uma frase por vez. Entre dois
+                # jogos 4 passam sempre quatro frases de outros jogos, então o
+                # histórico é dos jogos 4, não dos itens vizinhos.
+                if len(ultimas) == 2 and ultimas[0] == ultimas[1] == onde:
+                    # Troca, nunca remove e reinsere: é o que garante que as
+                    # cinco opções continuem lá, sem duplicar nem perder uma.
+                    novo = rng.choice([j for j in range(len(options)) if j != onde])
+                    options[onde], options[novo] = options[novo], options[onde]
+                    onde = novo
+                ultimas = (ultimas + [onde])[-2:]
+                item["options"] = options
+                item["answer"] = answer
             else:
-                game = 1
+                game = 1          # rebaixada: não houve posição para lembrar
         elif game == 5:
-            chars = wordgrid.char_game(sentence, rng)
-            # Sem decomposição o botão mostra o caractere inteiro, como pedido.
-            if chars:
-                item["chars"] = chars
-                item["decomps"] = [deps.decomps.get(c) or c for c in chars]
+            # Um botão por COMPONENTE. `needs` guarda, na ordem da frase, quais
+            # componentes cada caractere pede; `comps` é a lista embaralhada de
+            # botões. O multiconjunto dos dois é o MESMO — nada sobra e nada
+            # falta —, e é isso que garante que a frase fecha mesmo quando dois
+            # caracteres pedem o mesmo radical.
+            needs, botoes = [], []
+            for ch in sentence:
+                partes = deps.comps.get(ch) or []
+                if partes:
+                    needs.append([c for c, _g in partes])
+                    botoes += partes
+                else:
+                    # Sem decomposição utilizável: o caractere inteiro vira um
+                    # botão só, como pedido.
+                    needs.append([ch])
+                    botoes.append((ch, ""))
+            decompostos = sum(1 for n, ch in zip(needs, sentence) if n != [ch])
+            if len(sentence) >= 2 and decompostos:
+                rng.shuffle(botoes)
+                item["needs"] = needs
+                item["comps"] = [{"c": c, "g": g} if g else {"c": c}
+                                 for c, g in botoes]
             else:
+                # Nenhum caractere decompõe: seriam todos botões inteiros, o
+                # jogo viraria o 3 — só que com a imagem que mostra a resposta.
                 game = 1
 
         item["game"] = game
@@ -289,8 +332,8 @@ def build(folder: Path, out_dir: Path, per_file: int, quality: int,
         if deps.lex:
             print(f"   léxico: {len(deps.lex)} palavras"
                   + (f", traduções: {len(deps.bank)}" if deps.bank else "")
-                  + (f", decomposições: {sum(1 for v in deps.decomps.values() if v)}"
-                     f"/{len(deps.decomps)} caracteres" if deps.decomps else ""))
+                  + (f", decomposições: {sum(1 for v in deps.comps.values() if v)}"
+                     f"/{len(deps.comps)} caracteres" if deps.comps else ""))
         for nota in deps.notas:
             print(f"   ⚠️  {nota}")
 
