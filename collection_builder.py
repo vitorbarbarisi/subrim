@@ -23,6 +23,7 @@ from typing import Callable, Dict, List, Optional
 
 import cv2
 
+import periods_base
 import word_vocab
 from video_screenshoter_r36s import add_subtitles_to_frame, parse_pinyin_translations
 
@@ -39,6 +40,11 @@ TEXT_COLLECTIONS = TEXT_WAREHOUSE / "collections"
 # Estrutura: warehouse/frames/<asset>/line{NNNN}.jpg — chaveado por line_num,
 # que é estável e mapeia 1-para-1 com a linha do *_base.txt.
 FRAMES = WAREHOUSE / "frames"
+# Cache dos episódios arquivados PELOS PERÍODOS (ver periods_base.py). Diretório
+# separado, e não um sufixo dentro de frames/<asset>/, porque a chave do cache é
+# o número da linha e as duas segmentações numeram diferente: misturá-las
+# devolveria a imagem errada para todo mundo, em silêncio.
+FRAMES_PERIODS = WAREHOUSE / "frames_periods"
 
 
 def warehouse_dir(text: bool = False) -> Path:
@@ -46,26 +52,37 @@ def warehouse_dir(text: bool = False) -> Path:
     return TEXT_WAREHOUSE if text else WAREHOUSE
 
 
-def _frames_dir(asset: str) -> Path:
-    return FRAMES / asset
+def _frames_dir(asset: str, periods: bool = False) -> Path:
+    return (FRAMES_PERIODS if periods else FRAMES) / asset
 
 
-def _cached_frame_path(asset: str, line_num: int) -> Path:
-    return _frames_dir(asset) / f"line{line_num:04d}.jpg"
+def _cached_frame_path(asset: str, line_num: int, periods: bool = False) -> Path:
+    return _frames_dir(asset, periods) / f"line{line_num:04d}.jpg"
 
 
-def has_frame_cache(asset: str) -> bool:
-    """True se o episódio tem cache de frames (foi arquivado)."""
-    d = _frames_dir(asset)
-    return d.is_dir() and next(d.glob("line*.jpg"), None) is not None
+def has_frame_cache(asset: str, periods: Optional[bool] = None) -> bool:
+    """True se o episódio tem cache de frames (foi arquivado).
+
+    ``periods=None`` aceita qualquer um dos dois caches; ``True``/``False``
+    perguntam por um só.
+    """
+    kinds = (True, False) if periods is None else (periods,)
+    for kind in kinds:
+        d = _frames_dir(asset, kind)
+        if d.is_dir() and next(d.glob("line*.jpg"), None) is not None:
+            return True
+    return False
 
 
-def frame_cache_count(asset: str) -> int:
+def frame_cache_count(asset: str, periods: Optional[bool] = None) -> int:
     """Quantidade de frames no cache do episódio (0 se não houver)."""
-    d = _frames_dir(asset)
-    if not d.is_dir():
-        return 0
-    return sum(1 for _ in d.glob("line*.jpg"))
+    kinds = (True, False) if periods is None else (periods,)
+    total = 0
+    for kind in kinds:
+        d = _frames_dir(asset, kind)
+        if d.is_dir():
+            total += sum(1 for _ in d.glob("line*.jpg"))
+    return total
 
 
 def pinyin_to_ascii(pinyin: str) -> str:
@@ -189,6 +206,40 @@ def base_path_for(asset: str, text: bool = False) -> Path:
     return warehouse_dir(text) / f"{asset}_base.txt"
 
 
+def periods_path_for(asset: str, text: bool = False) -> Path:
+    """Caminho do arquivo de períodos do asset (ver ``periods_base.py``)."""
+    return warehouse_dir(text) / f"{asset}{periods_base.PERIODS_SUFFIX}"
+
+
+def active_base_for(base_file: Path):
+    """Arquivo que a busca deve LER para esse episódio, e se ele é o de períodos.
+
+    O ``*_base.txt`` continua intacto no disco; quem manda é o ``*_periods.txt``
+    quando ele existe, porque é dele que saem os frames desde que o
+    arquivamento passou a usar períodos.
+
+    A exceção é o episódio arquivado ANTES disso: os frames dele estão
+    numerados pela segmentação da legenda, então ler os períodos devolveria a
+    imagem de outra frase. Nesse caso o base antigo segue valendo — gerar o
+    arquivo de períodos para um episódio já arquivado não muda nada e não
+    quebra nada.
+
+    Devolve ``(Path, is_periods)``.
+    """
+    asset = base_file.stem.replace("_base", "")
+    periods = base_file.with_name(f"{asset}{periods_base.PERIODS_SUFFIX}")
+    if not periods.exists():
+        return base_file, False
+    if has_frame_cache(asset, periods=False) and not has_frame_cache(asset, periods=True):
+        return base_file, False
+    return periods, True
+
+
+def active_base_path(asset: str, text: bool = False) -> Path:
+    """``active_base_for`` a partir do nome do asset (usado pela gravação de notas)."""
+    return active_base_for(base_path_for(asset, text=text))[0]
+
+
 def _split_terminator(line: bytes):
     """Separa a linha do seu terminador, preservando qual terminador era."""
     for term in (b"\r\n", b"\n", b"\r"):
@@ -219,6 +270,12 @@ def set_notes(asset: str, notes: Dict[int, Optional[int]], text: bool = False) -
     Aplica TODAS as edições numa única reescrita e devolve quantas linhas
     mudaram. ``None`` remove a nota da linha.
 
+    Escreve no arquivo que a BUSCA leu (``active_base_path``): num episódio já
+    arquivado por períodos a nota pertence ao período, e ``line_num`` só faz
+    sentido no ``*_periods.txt``. As notas do base antigo continuam lá, e o
+    gerador de períodos as carrega para o período (a maior das linhas que ele
+    junta) — mas daí em diante os dois arquivos anotam separado.
+
     Invariante crítica: contagem de linhas, ordem e terminadores saem idênticos.
     ``line_num`` é o índice FÍSICO da linha e é a única chave do cache de frames
     (``warehouse/frames/<asset>/lineNNNN.jpg``); alterá-la remapearia em silêncio
@@ -229,7 +286,7 @@ def set_notes(asset: str, notes: Dict[int, Optional[int]], text: bool = False) -
     A troca final é atômica (``os.replace``), então uma busca lendo em paralelo
     enxerga o arquivo antigo ou o novo, nunca um pela metade.
     """
-    path = base_path_for(asset, text=text)
+    path = active_base_path(asset, text=text)
     if not notes or not path.exists():
         return 0
 
@@ -315,19 +372,22 @@ def _find_video(base_file: Path) -> Optional[Path]:
     return None
 
 
-def _asset_source(base_file: Path):
+def _asset_source(base_file: Path, periods: bool = False):
     """Fonte utilizável de frames para o episódio do ``*_base.txt``.
 
     Retorna ``("video", Path)`` se há o mp4 original, ``("frames", Path)`` se
     o episódio foi arquivado (só cache de frames), ou ``(None, None)`` se não
     há nenhuma fonte (a busca precisa ignorar esse episódio).
+
+    ``periods`` diz qual dos dois caches responde por este episódio — o da
+    segmentação da legenda ou o dos períodos.
     """
     video = _find_video(base_file)
     if video is not None:
         return "video", video
     asset = base_file.stem.replace("_base", "")
-    if has_frame_cache(asset):
-        return "frames", _frames_dir(asset)
+    if has_frame_cache(asset, periods=periods):
+        return "frames", _frames_dir(asset, periods)
     return None, None
 
 
@@ -365,10 +425,11 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None,
 
     for base_file in sorted(root.glob("*_base.txt")):
         asset = base_file.stem.replace("_base", "")
+        active, is_periods = active_base_for(base_file)
         if text:
             video_path = ""
         else:
-            kind, src = _asset_source(base_file)
+            kind, src = _asset_source(base_file, periods=is_periods)
             if kind is None:
                 skipped_no_src.append(asset)
                 continue
@@ -377,7 +438,7 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None,
 
         hits_before = len(results)
         try:
-            with open(base_file, "r", encoding="utf-8") as f:
+            with open(active, "r", encoding="utf-8") as f:
                 for line_num, line in enumerate(f, 1):
                     line = line.rstrip("\n")
                     cols = line.split("\t")
@@ -409,10 +470,11 @@ def search(word: str, log_cb: Optional[Callable[[str], None]] = None,
                         "pinyin": matched[1],
                         "word": word,
                         "text": text,
+                        "periods": is_periods,
                         "nota": parse_nota(cols[NOTA_COL]) if len(cols) > NOTA_COL else None,
                     })
         except Exception as e:  # noqa: BLE001 - varredura tolerante a arquivos ruins
-            _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
+            _log(f"⚠️  Erro ao ler {active.name}: {e}")
             continue
 
         if len(results) > hits_before:
@@ -455,19 +517,20 @@ def _scan_bases(log_cb: Optional[Callable[[str], None]] = None, text: bool = Fal
     skipped_no_src: List[str] = []
     for base_file in sorted(root.glob("*_base.txt")):
         asset = base_file.stem.replace("_base", "")
+        active, is_periods = active_base_for(base_file)
         if text:
             # Escopo texto: a imagem é desenhada do zero, então não há fonte a
             # resolver e nenhuma base é descartada.
             video_path = ""
         else:
-            kind, src = _asset_source(base_file)
+            kind, src = _asset_source(base_file, periods=is_periods)
             if kind is None:
                 skipped_no_src.append(asset)
                 continue
             video_path = str(src) if kind == "video" else ""
 
         try:
-            with open(base_file, "r", encoding="utf-8") as f:
+            with open(active, "r", encoding="utf-8") as f:
                 for line_num, line in enumerate(f, 1):
                     cols = line.rstrip("\r\n").split("\t")
                     if len(cols) < 6:
@@ -489,10 +552,11 @@ def _scan_bases(log_cb: Optional[Callable[[str], None]] = None, text: bool = Fal
                         "translations_json": cols[4],
                         "portuguese":        cols[5],
                         "text":              text,
+                        "periods":           is_periods,
                         "nota": parse_nota(cols[NOTA_COL]) if len(cols) > NOTA_COL else None,
                     }
         except Exception as e:  # noqa: BLE001
-            _log(f"⚠️  Erro ao ler {base_file.name}: {e}")
+            _log(f"⚠️  Erro ao ler {active.name}: {e}")
 
     if skipped_no_src:
         _log(f"⚠️  {len(skipped_no_src)} base(s) ignorada(s) por falta de vídeo e de cache de frames.")
@@ -674,7 +738,8 @@ def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> 
 # Tela do R36S. A imagem de uma frase de texto já nasce nessa proporção, então o
 # letterbox do add_subtitles_to_frame vira no-op no modo r36s e a legenda cai no
 # mesmo lugar que cairia sobre um frame de vídeo.
-_TEXT_CANVAS = (640, 480)
+R36S_SIZE = (640, 480)
+_TEXT_CANVAS = R36S_SIZE
 
 
 def _render_frame_to(match: dict, out_path: Path) -> bool:
@@ -702,7 +767,8 @@ def _render_frame_to(match: dict, out_path: Path) -> bool:
         return extract_frame(video_path, match["avg_time"], out_path)
 
     # Fallback: episódio arquivado — frame já extraído, indexado por line_num.
-    cached = _cached_frame_path(match["asset"], match["line_num"])
+    cached = _cached_frame_path(match["asset"], match["line_num"],
+                                bool(match.get("periods")))
     if cached.exists():
         img = cv2.imread(str(cached))
         if img is not None:
@@ -717,18 +783,27 @@ def _render_frame_to(match: dict, out_path: Path) -> bool:
 
 
 def archive_asset(asset: str, jpeg_quality: int = 90,
-                  progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
-    """Extrai 1 frame por legenda do episódio para o cache (``warehouse/frames/<asset>/``).
+                  progress_cb: Optional[Callable[[int, int, str], None]] = None,
+                  periods: bool = True) -> dict:
+    """Extrai 1 frame por FRASE do episódio para o cache e devolve estatísticas.
 
-    Percorre TODAS as linhas do ``*_base.txt`` (não só as de uma palavra), pois a
-    busca pode encontrar qualquer palavra. Cada frame é salvo como
-    ``line{NNNN}.jpg`` no mesmo timestamp (``avg_time``) que o preview/coleção
-    usariam ao vivo — logo o frame do cache é idêntico ao que o mp4 produziria.
+    A frase é o período inteiro: antes de extrair, o ``*_periods.txt`` é gerado
+    (se ainda não existir) e é ELE que define as linhas, indo o cache para
+    ``warehouse/frames_periods/<asset>/``. Assim o cartão da coleção mostra o
+    período completo em vez do pedaço que coube na legenda. ``periods=False``
+    volta ao comportamento antigo (uma imagem por legenda, em
+    ``warehouse/frames/<asset>/``).
+
+    Percorre TODAS as linhas do arquivo (não só as de uma palavra), pois a busca
+    pode encontrar qualquer palavra. Cada frame é salvo como ``line{NNNN}.jpg``
+    no mesmo timestamp (``avg_time``) que o preview/coleção usariam ao vivo —
+    logo o frame do cache é idêntico ao que o mp4 produziria.
 
     NÃO apaga o mp4: devolve estatísticas para o chamador decidir a remoção
     conforme a tolerância a frames perdidos.
 
-    Retorna ``{"total", "ok", "failed", "dropped": [line_num], "dir"}``.
+    Retorna ``{"total", "ok", "failed", "dropped": [line_num], "dir", "periods",
+    "source"}``.
     """
     base_file = WAREHOUSE / f"{asset}_base.txt"
     if not base_file.exists():
@@ -738,9 +813,20 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
     if video is None:
         raise FileNotFoundError(f"vídeo original ausente para '{asset}' — nada a arquivar")
 
+    source_file = base_file
+    if periods:
+        # force=False: um arquivo de períodos já existente (gerado no clean-up ou
+        # ajustado à mão) é o que vale — refazer mudaria a numeração das linhas
+        # debaixo de um cache que talvez já exista.
+        res = periods_base.generate(base_file, force=False)
+        source_file = Path(res["path"])
+        if progress_cb and not res.get("skipped"):
+            progress_cb(0, 0, f"📐 períodos gerados: {res['source_lines']} legenda(s) → "
+                              f"{res['groups']} período(s) [{res['criterio']}]")
+
     # Lê todas as linhas com timestamps válidos.
     lines: List[tuple] = []  # (line_num, avg_time)
-    with open(base_file, "r", encoding="utf-8") as f:
+    with open(source_file, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
             cols = line.rstrip("\n").split("\t")
             if len(cols) < 6:
@@ -752,7 +838,7 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
                 continue
             lines.append((line_num, (begin + end) / 2))
 
-    out_dir = _frames_dir(asset)
+    out_dir = _frames_dir(asset, periods)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     total = len(lines)
@@ -774,7 +860,7 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
                 if progress_cb:
                     progress_cb(i, total, f"⚠️  sem frame legível para a linha {line_num} (~{avg_time:.1f}s)")
                 continue
-            out_path = _cached_frame_path(asset, line_num)
+            out_path = _cached_frame_path(asset, line_num, periods)
             cv2.imwrite(str(out_path), frame,
                         [int(cv2.IMWRITE_JPEG_QUALITY), int(jpeg_quality)])
             ok += 1
@@ -784,7 +870,50 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
         cap.release()
 
     return {"total": total, "ok": ok, "failed": len(dropped),
-            "dropped": dropped, "dir": out_dir}
+            "dropped": dropped, "dir": out_dir, "periods": periods,
+            "source": source_file}
+
+
+# Piso do encolhimento automático da fonte chinesa (ver _fit_chinese_font_size).
+# Abaixo disso o hanzi deixa de ser distinguível na tela do R36S — vale mais
+# deixar a frase transbordar (e o limite de hanzi do periods_base evitá-la) do
+# que desenhar algo que ninguém consegue ler.
+MIN_CHINESE_FONT = 22
+
+
+def _canvas_size(frame_path: Path, resize: bool):
+    """Tamanho em que a legenda será desenhada: 640x480 no R36S, o do frame fora dele."""
+    if resize:
+        return R36S_SIZE
+    from PIL import Image
+
+    with Image.open(frame_path) as img:   # só o cabeçalho: não decodifica o pixel
+        return img.size
+
+
+def _fit_chinese_font_size(chinese_text: str, width: int, height: int,
+                           resize: bool) -> Optional[int]:
+    """Tamanho da fonte chinesa que faz a frase caber nas 2 linhas do cartão.
+
+    ``add_subtitles_to_frame`` quebra o hanzi em no MÁXIMO 2 linhas, com
+    ``max_chars_per_line = width / (fonte * 1.5)``. Na segmentação da legenda
+    isso nunca apertava — cada cartão tinha um pedaço curto. Com o período
+    inteiro, frases de 30+ ideogramas passam do que cabe e as palavras saem
+    pelas bordas. Encolher a fonte aumenta os caracteres por linha na mesma
+    proporção, então a conta é direta.
+
+    Devolve ``None`` quando o padrão já serve (o caso comum), para não mexer no
+    render de quem não precisa.
+    """
+    chars = len(clean_chinese_only(chinese_text))
+    if chars <= 0:
+        return None
+    default = 36 if resize else max(24, int(height * 0.045))
+    per_line = (chars + 1) // 2          # 2 linhas, a mais cheia delas
+    fits = int(width / (per_line * 1.5))
+    if fits >= default:
+        return None
+    return max(MIN_CHINESE_FONT, fits)
 
 
 def render_preview(match: dict, mode: str = "r36s"):
@@ -799,9 +928,12 @@ def render_preview(match: dict, mode: str = "r36s"):
         tmp_png = Path(tmp) / "frame.png"
         if not _render_frame_to(match, tmp_png):
             return None
+        resize = (mode == "r36s")
+        cw, ch = _canvas_size(tmp_png, resize)
         add_subtitles_to_frame(
             tmp_png, match["chinese"], match["translations_json"], match["portuguese"],
-            resize=(mode == "r36s"),
+            resize=resize,
+            base_chinese_font_size=_fit_chinese_font_size(match["chinese"], cw, ch, resize),
         )
         with Image.open(tmp_png) as img:
             return img.copy()
@@ -897,11 +1029,17 @@ def save_collection(label: str, matches: List[dict], mode: str = "r36s",
                 shutil.copyfile(out_path, variant_paths[key])
 
         burn = (mode == "r36s")
+        # A frase de um período inteiro é bem maior que a de uma legenda — sem
+        # isto ela sai pelas bordas do cartão.
+        cw, ch = _canvas_size(out_path, burn)
+        font = _fit_chinese_font_size(match["chinese"], cw, ch, burn)
         add_subtitles_to_frame(out_path, match["chinese"], match["translations_json"],
-                               match["portuguese"], resize=burn)
+                               match["portuguese"], resize=burn,
+                               base_chinese_font_size=font)
         for key, vpath in variant_paths.items():
             add_subtitles_to_frame(vpath, match["chinese"], match["translations_json"],
-                                   match["portuguese"], resize=burn, variant=key)
+                                   match["portuguese"], resize=burn, variant=key,
+                                   base_chinese_font_size=font)
 
         # Só entra no índice o que virou imagem de fato.
         entry = {

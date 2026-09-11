@@ -29,13 +29,21 @@ TEXTS     = ASSETS / "text"          # txt do modo Texto (um arquivo = um asset)
 WAREHOUSE = REPO / "warehouse"
 TEXT_WAREHOUSE = WAREHOUSE / "text"  # bases gerados pelo text_pipeline.py
 FRAMES    = WAREHOUSE / "frames"   # cache de frames de episódios arquivados
+FRAMES_PERIODS = WAREHOUSE / "frames_periods"   # idem, arquivados por período
 DEEPSEEK_LOG = REPO / "deepseek_debug.log"
+
+
+def _wh_frames_dir(prefix: str) -> Path | None:
+    """Cache de frames do episódio — o de períodos tem precedência. None se não há."""
+    for d in (FRAMES_PERIODS / prefix, FRAMES / prefix):
+        if d.is_dir() and next(d.glob("line*.jpg"), None) is not None:
+            return d
+    return None
 
 
 def _wh_is_archived(prefix: str) -> bool:
     """True se o episódio foi arquivado (sem mp4, mas com cache de frames)."""
-    d = FRAMES / prefix
-    return d.is_dir() and next(d.glob("line*.jpg"), None) is not None
+    return _wh_frames_dir(prefix) is not None
 
 
 def _wh_readable_name(stem: str) -> str:
@@ -784,6 +792,10 @@ class App(tk.Tk):
             ctrl, text="🗄  Arquivar (trocar vídeo por frames)",
             command=self._wh_archive_selected, state=tk.DISABLED)
         self._wh_archive_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._wh_periods_btn = ttk.Button(
+            ctrl, text="📐  Gerar períodos",
+            command=self._wh_periods_selected, state=tk.DISABLED)
+        self._wh_periods_btn.pack(side=tk.LEFT, padx=(8, 0))
         self._wh_count_var = tk.StringVar()
         ttk.Label(ctrl, textvariable=self._wh_count_var, foreground="#888").pack(side=tk.RIGHT)
         self._wh_selected_base = None
@@ -921,10 +933,15 @@ class App(tk.Tk):
             # vídeo correspondente: mesmo prefixo sem _base, extensão .mp4
             prefix = bf.stem.replace("_base", "")
             has_video = any(True for _ in WAREHOUSE.glob(f"{prefix}.mp4"))
+            fdir = _wh_frames_dir(prefix)
             if has_video:
                 status, tag = "Completo", "ok"
-            elif _wh_is_archived(prefix):
+                if (WAREHOUSE / f"{prefix}_periods.txt").exists():
+                    status = "Completo · períodos"
+            elif fdir is not None:
                 status, tag = "Arquivado", "archived"
+                if fdir.parent == FRAMES_PERIODS:
+                    status = "Arquivado · períodos"
             else:
                 status, tag = "Falta vídeo", "missing"
             self._wh_tree.insert("", tk.END, iid=str(bf),
@@ -971,6 +988,10 @@ class App(tk.Tk):
             self._wh_archive_btn.config(text="🗄  Arquivar (trocar vídeo por frames)")
         self._wh_archive_btn.config(
             state=(tk.NORMAL if (n and not self._wh_archiving) else tk.DISABLED))
+        # Gerar períodos não precisa de mp4 — vale para qualquer base selecionado.
+        self._wh_periods_btn.config(
+            state=(tk.NORMAL if (self._wh_tree.selection() and not self._wh_archiving)
+                   else tk.DISABLED))
 
     def _wh_on_select(self, _=None):
         sel = self._wh_tree.selection()
@@ -994,9 +1015,19 @@ class App(tk.Tk):
             if mp4:
                 fonte_line = mp4.name
             elif _wh_is_archived(prefix):
-                fonte_line = f"— (arquivado: {len(list((FRAMES / prefix).glob('line*.jpg')))} frames)"
+                fdir = _wh_frames_dir(prefix)
+                por = " por período" if fdir and fdir.parent == FRAMES_PERIODS else ""
+                n_frames = len(list(fdir.glob("line*.jpg"))) if fdir else 0
+                fonte_line = f"— (arquivado{por}: {n_frames} frames)"
             else:
                 fonte_line = "—"
+
+        periods_file = bf.with_name(f"{prefix}_periods.txt")
+        if periods_file.exists():
+            n_per = sum(1 for _ in periods_file.open(encoding="utf-8"))
+            periods_line = f"{periods_file.name} ({n_per} frase(s))"
+        else:
+            periods_line = "— (não gerado; o arquivamento gera)"
 
         # análise (em thread para não travar a UI)
         self._wh_detail.set("Analisando…")
@@ -1012,6 +1043,7 @@ class App(tk.Tk):
             detail = (
                 f"Arquivo : {bf.name}\n"
                 f"{fonte_rot} : {fonte_line}\n"
+                f"Períodos: {periods_line}\n"
                 f"\n"
                 f"Palavras distintas : {stats['total_words']}\n"
                 f"  Conhecidas (nuas ou dominadas) : {stats['known']}\n"
@@ -1022,13 +1054,62 @@ class App(tk.Tk):
 
         threading.Thread(target=_work, daemon=True).start()
 
+    def _wh_periods_selected(self):
+        """(Re)gera o ``*_periods.txt`` dos bases selecionados.
+
+        O base não é tocado — o arquivo de períodos é um segundo arquivo, com o
+        mesmo formato, onde cada linha é uma frase inteira em vez do pedaço que
+        coube na legenda. É dele que o arquivamento passa a tirar os frames.
+
+        Episódio já arquivado POR PERÍODOS é pulado: os frames dele estão
+        numerados pelo arquivo atual, e regerá-lo trocaria a imagem de cada
+        frase sem avisar. Para refazer, é preciso repor o vídeo original.
+        """
+        if self._wh_archiving:
+            return
+        import periods_base
+
+        bases = [Path(iid) for iid in self._wh_tree.selection()]
+        if not bases:
+            return
+
+        self._nb.select(self._tab_log)
+        self._log_line(f"📐 Gerando períodos para {len(bases)} base(s)…", "cmd")
+
+        def _work():
+            feito = pulado = erro = 0
+            for bf in bases:
+                prefix = bf.stem.replace("_base", "")
+                cache = _wh_frames_dir(prefix)
+                if cache is not None and cache.parent == FRAMES_PERIODS:
+                    self._log_q.put((
+                        f"    ↷ '{prefix}' já foi arquivado por períodos — mantido "
+                        f"(os frames estão numerados pelo arquivo atual).", "warning"))
+                    pulado += 1
+                    continue
+                try:
+                    res = periods_base.generate(bf)
+                    self._log_q.put((
+                        "    ✓ " + periods_base.format_stats(Path(res["path"]).name, res),
+                        "success"))
+                    feito += 1
+                except Exception as e:  # noqa: BLE001
+                    self._log_q.put((f"    Erro em '{prefix}': {e}", "error"))
+                    erro += 1
+            self._log_q.put((f"📐 Períodos: {feito} gerado(s), {pulado} pulado(s), "
+                             f"{erro} com erro.", "success" if feito else "warning"))
+            self.after(0, self._wh_refresh)
+
+        threading.Thread(target=_work, daemon=True).start()
+
     def _wh_archive_selected(self):
         """Arquiva em lote os episódios selecionados que ainda têm mp4.
 
-        Para cada um: extrai 1 frame por legenda para o cache
-        (warehouse/frames/<asset>/) e, dentro da tolerância a frames perdidos,
-        apaga o mp4. Busca/preview/salvamento na aba Coleções seguem funcionando
-        pelos frames. Um episódio com perda relevante mantém o vídeo.
+        Para cada um: gera o arquivo de períodos (se faltar), extrai 1 frame por
+        FRASE para o cache (warehouse/frames_periods/<asset>/) e, dentro da
+        tolerância a frames perdidos, apaga o mp4. Busca/preview/salvamento na
+        aba Coleções seguem funcionando pelos frames. Um episódio com perda
+        relevante mantém o vídeo.
         """
         if self._wh_archiving:
             return
@@ -1049,7 +1130,8 @@ class App(tk.Tk):
                 "Arquivar episódios",
                 f"Arquivar {len(targets)} episódio(s)?\n\n"
                 f"{shown}\n\n"
-                f"• Extrai 1 frame por legenda para warehouse/frames/<asset>/\n"
+                f"• Gera o <asset>_periods.txt (frases inteiras) e extrai\n"
+                f"  1 frame por FRASE para warehouse/frames_periods/<asset>/\n"
                 f"• Depois APAGA o(s) mp4 (~{total_gb:.2f} GB no total)\n\n"
                 f"Busca e visualização na aba Coleções seguem funcionando pelos "
                 f"frames. Para reverter é preciso repor o vídeo original.\n\n"

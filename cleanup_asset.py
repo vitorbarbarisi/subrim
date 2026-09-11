@@ -13,6 +13,9 @@ já finalizado (merge + upload ao Drive concluídos) ele:
   3. Envia o vídeo original (<asset>.mp4) e o arquivo base para o warehouse/.
   4. Verifica se o envio foi feito corretamente (existência + tamanho). Se sim,
      remove DEFINITIVAMENTE as pastas assets/<asset>/ e assets/<asset>_sub/.
+  5. Gera o <asset>_periods.txt ao lado do base — o mesmo conteúdo reagrupado
+     por períodos completos, que é de onde saem os frames no arquivamento
+     (ver periods_base.py). O base não é alterado.
 
 Usage: python3 cleanup_asset.py <asset>
 Example: python3 cleanup_asset.py clone40
@@ -208,11 +211,32 @@ def send_to_warehouse_and_cleanup(asset: str, asset_dir: Path, sub_dir: Path,
         else:
             print(f"   (pasta {folder.name} já não existe)")
 
+    _generate_periods(dest_base)
+
     print(f"\n🎉 Clean-up de '{asset}' concluído com sucesso!")
     print(f"   • warehouse/{dest_video.name}")
     print(f"   • warehouse/{dest_base.name}")
     print("   • pastas do asset removidas do disco.")
     return True
+
+
+# ─── Etapa 5: arquivo de períodos ───────────────────────────────────────────────
+def _generate_periods(base_in_warehouse: Path) -> None:
+    """Gera o ``<asset>_periods.txt`` ao lado do base recém-enviado.
+
+    Best-effort: o clean-up já terminou o que importa quando chega aqui, e o
+    arquivamento sabe gerar o arquivo sozinho se ele faltar. Falhar aqui não
+    pode desfazer nada.
+    """
+    print("\n📋 ETAPA 5: Arquivo de períodos")
+    try:
+        import periods_base
+
+        res = periods_base.generate(base_in_warehouse)
+        print("✅ " + periods_base.format_stats(Path(res["path"]).name, res))
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠️  Não foi possível gerar o arquivo de períodos: {e}")
+        print("   (o arquivamento gera sob demanda; nada mais é afetado.)")
 
 
 def main() -> int:
