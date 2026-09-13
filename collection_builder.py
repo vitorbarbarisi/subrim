@@ -738,8 +738,7 @@ def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> 
 # Tela do R36S. A imagem de uma frase de texto já nasce nessa proporção, então o
 # letterbox do add_subtitles_to_frame vira no-op no modo r36s e a legenda cai no
 # mesmo lugar que cairia sobre um frame de vídeo.
-R36S_SIZE = (640, 480)
-_TEXT_CANVAS = R36S_SIZE
+_TEXT_CANVAS = (640, 480)
 
 
 def _render_frame_to(match: dict, out_path: Path) -> bool:
@@ -874,48 +873,6 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
             "source": source_file}
 
 
-# Piso do encolhimento automático da fonte chinesa (ver _fit_chinese_font_size).
-# Abaixo disso o hanzi deixa de ser distinguível na tela do R36S — vale mais
-# deixar a frase transbordar (e o limite de hanzi do periods_base evitá-la) do
-# que desenhar algo que ninguém consegue ler.
-MIN_CHINESE_FONT = 22
-
-
-def _canvas_size(frame_path: Path, resize: bool):
-    """Tamanho em que a legenda será desenhada: 640x480 no R36S, o do frame fora dele."""
-    if resize:
-        return R36S_SIZE
-    from PIL import Image
-
-    with Image.open(frame_path) as img:   # só o cabeçalho: não decodifica o pixel
-        return img.size
-
-
-def _fit_chinese_font_size(chinese_text: str, width: int, height: int,
-                           resize: bool) -> Optional[int]:
-    """Tamanho da fonte chinesa que faz a frase caber nas 2 linhas do cartão.
-
-    ``add_subtitles_to_frame`` quebra o hanzi em no MÁXIMO 2 linhas, com
-    ``max_chars_per_line = width / (fonte * 1.5)``. Na segmentação da legenda
-    isso nunca apertava — cada cartão tinha um pedaço curto. Com o período
-    inteiro, frases de 30+ ideogramas passam do que cabe e as palavras saem
-    pelas bordas. Encolher a fonte aumenta os caracteres por linha na mesma
-    proporção, então a conta é direta.
-
-    Devolve ``None`` quando o padrão já serve (o caso comum), para não mexer no
-    render de quem não precisa.
-    """
-    chars = len(clean_chinese_only(chinese_text))
-    if chars <= 0:
-        return None
-    default = 36 if resize else max(24, int(height * 0.045))
-    per_line = (chars + 1) // 2          # 2 linhas, a mais cheia delas
-    fits = int(width / (per_line * 1.5))
-    if fits >= default:
-        return None
-    return max(MIN_CHINESE_FONT, fits)
-
-
 def render_preview(match: dict, mode: str = "r36s"):
     """Gera uma imagem PIL já legendada de uma frase (para preview na GUI).
 
@@ -928,12 +885,9 @@ def render_preview(match: dict, mode: str = "r36s"):
         tmp_png = Path(tmp) / "frame.png"
         if not _render_frame_to(match, tmp_png):
             return None
-        resize = (mode == "r36s")
-        cw, ch = _canvas_size(tmp_png, resize)
         add_subtitles_to_frame(
             tmp_png, match["chinese"], match["translations_json"], match["portuguese"],
-            resize=resize,
-            base_chinese_font_size=_fit_chinese_font_size(match["chinese"], cw, ch, resize),
+            resize=(mode == "r36s"),
         )
         with Image.open(tmp_png) as img:
             return img.copy()
@@ -1029,17 +983,14 @@ def save_collection(label: str, matches: List[dict], mode: str = "r36s",
                 shutil.copyfile(out_path, variant_paths[key])
 
         burn = (mode == "r36s")
-        # A frase de um período inteiro é bem maior que a de uma legenda — sem
-        # isto ela sai pelas bordas do cartão.
-        cw, ch = _canvas_size(out_path, burn)
-        font = _fit_chinese_font_size(match["chinese"], cw, ch, burn)
+        # Sem base_chinese_font_size: o render escolhe a fonte pelo conteúdo, o
+        # que importa aqui porque a frase de um período inteiro é bem maior que
+        # a de uma legenda (ver _auto_chinese_font_size).
         add_subtitles_to_frame(out_path, match["chinese"], match["translations_json"],
-                               match["portuguese"], resize=burn,
-                               base_chinese_font_size=font)
+                               match["portuguese"], resize=burn)
         for key, vpath in variant_paths.items():
             add_subtitles_to_frame(vpath, match["chinese"], match["translations_json"],
-                                   match["portuguese"], resize=burn, variant=key,
-                                   base_chinese_font_size=font)
+                                   match["portuguese"], resize=burn, variant=key)
 
         # Só entra no índice o que virou imagem de fato.
         entry = {

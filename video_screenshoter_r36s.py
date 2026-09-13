@@ -299,6 +299,78 @@ def split_chinese_into_lines(display_items: List[Tuple[str, str, str]], max_char
     return [line1, line2] if line2 else [line1]
 
 
+# Piso do ajuste automático da fonte chinesa. Abaixo disso o hanzi deixa de ser
+# distinguível na tela do R36S: vale mais deixar o desenho apertar (o próprio
+# layout ainda encolhe as colunas) do que escrever o que ninguém lê.
+MIN_CHINESE_FONT_SIZE = 22
+
+
+def _word_widths_at(line_items: List[Tuple[str, str, str]], size: int) -> List[int]:
+    """Largura de cada coluna de uma linha de hanzi na fonte ``size``.
+
+    Repete a conta do desenho, logo abaixo — inclusive o espaçamento mínimo por
+    palavra, que é o que aperta em frase longa: cada palavra ocupa ao menos
+    ``min_word_spacing``, então o que pesa não é só quantos ideogramas há na
+    linha, mas em quantas PALAVRAS eles estão divididos.
+    """
+    _s = size / 36
+    chinese_char_width = int(size * 0.95)
+    pinyin_char_width = int(int(size * 0.65) * 0.65)
+    min_word_spacing = max(30, int(60 * _s))
+    widths = []
+    for chinese_word, word_pinyin, _pt in line_items:
+        base = max(len(chinese_word) * chinese_char_width,
+                   len(word_pinyin) * pinyin_char_width if word_pinyin else 0,
+                   min_word_spacing)
+        widths.append(base + max(15, int(base * 0.10)))
+    return widths
+
+
+def _line_fits(line_items: List[Tuple[str, str, str]], size: int, available: int) -> bool:
+    """A linha cabe em ``available`` na fonte ``size``, DEPOIS do encolhimento?
+
+    Não basta somar as colunas: o desenho já encolhe uma linha larga demais. O
+    que não pode acontecer é (a) nem encolhida ela caber, ou (b) a coluna ficar
+    mais estreita que o próprio conteúdo — o ideograma ou o pinyin em cima dele,
+    que é centralizado na coluna e por isso invade a vizinha quando não cabe.
+    """
+    chinese_char_width = int(size * 0.95)
+    widths = _word_widths_at(line_items, size)
+    total = sum(widths)
+    if total > available:
+        scale = available / total
+        floor = min(40, chinese_char_width + 4)
+        widths = [max(floor, int(w * scale)) for w in widths]
+        total = sum(widths)
+    if total > available:
+        return False
+    pinyin_char_width = int(int(size * 0.65) * 0.65)
+    return all(w >= max(len(item[0]) * chinese_char_width,
+                        len(item[1]) * pinyin_char_width if item[1] else 0)
+               for w, item in zip(widths, line_items))
+
+
+def _auto_chinese_font_size(display_items: List[Tuple[str, str, str]],
+                            width: int, height: int, resize: bool) -> int:
+    """Maior fonte (até o padrão) em que a frase cabe nas 2 linhas do cartão.
+
+    O padrão de sempre — 36 no R36S — foi calibrado para o texto de UMA legenda.
+    Uma frase inteira (ver ``periods_base.py``) tem duas ou três vezes isso, e
+    aí as palavras saem pelas bordas: o layout encolhe as COLUNAS para caber,
+    mas desenha os ideogramas no tamanho pedido, então elas se sobrepõem e
+    vazam. Procurar o tamanho de cima para baixo não mexe em nada que já cabia —
+    quem cabia recebe exatamente a fonte de antes.
+    """
+    default = 36 if resize else max(24, int(height * 0.045))
+    for size in range(default, MIN_CHINESE_FONT_SIZE - 1, -1):
+        max_chars = max(12, int(width / (size * 1.5)))
+        lines = split_chinese_into_lines(display_items, max_chars_per_line=max_chars)
+        available = width - max(20, int(20 * (size / 36))) * 2
+        if all(_line_fits(line, size, available) for line in lines):
+            return size
+    return MIN_CHINESE_FONT_SIZE
+
+
 VARIANTS = ("full", "pt", "zh")
 
 
@@ -351,24 +423,6 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             chinese_font_path = get_chinese_font_path()
             latin_font_path = get_latin_font_path()
             
-            # Font sizes (R36S uses 36 @ 480px; original resolution scales proportionally)
-            if base_chinese_font_size is None:
-                base_chinese_font_size = 36 if resize else max(24, int(height * 0.045))
-            base_pinyin_font_size = int(base_chinese_font_size * 0.65)
-            base_portuguese_font_size = int(base_chinese_font_size * 0.45)
-            # Scale absolute spacings relative to the R36S baseline (font 36)
-            _s = base_chinese_font_size / 36
-            
-            try:
-                chinese_font = ImageFont.truetype(chinese_font_path, base_chinese_font_size)
-                pinyin_font = ImageFont.truetype(chinese_font_path, base_pinyin_font_size)
-                portuguese_font = ImageFont.truetype(latin_font_path, base_portuguese_font_size)
-            except Exception as e:
-                print(f"   ⚠️  Erro ao carregar fontes: {e}, usando fontes padrão")
-                chinese_font = ImageFont.load_default()
-                pinyin_font = ImageFont.load_default()
-                portuguese_font = ImageFont.load_default()
-            
             # Parse translations. A ajuda (pinyin/tradução) das palavras já
             # dominadas é omitida AQUI, no render — o base preserva tudo.
             # Precisa vir antes do cálculo de largura das colunas (mais abaixo
@@ -401,6 +455,30 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                 # pode existir, então não dá para sair da função aqui.
                 draw_bottom = False
 
+            # Font sizes (R36S uses 36 @ 480px; original resolution scales proportionally)
+            # Sem tamanho pedido, ele sai do conteúdo: uma legenda curta recebe o
+            # padrão de sempre; uma frase inteira recebe o maior tamanho em que
+            # ainda cabe (ver _auto_chinese_font_size).
+            if base_chinese_font_size is None:
+                base_chinese_font_size = (
+                    _auto_chinese_font_size(display_items, width, height, resize)
+                    if draw_bottom and display_items
+                    else (36 if resize else max(24, int(height * 0.045))))
+            base_pinyin_font_size = int(base_chinese_font_size * 0.65)
+            base_portuguese_font_size = int(base_chinese_font_size * 0.45)
+            # Scale absolute spacings relative to the R36S baseline (font 36)
+            _s = base_chinese_font_size / 36
+            
+            try:
+                chinese_font = ImageFont.truetype(chinese_font_path, base_chinese_font_size)
+                pinyin_font = ImageFont.truetype(chinese_font_path, base_pinyin_font_size)
+                portuguese_font = ImageFont.truetype(latin_font_path, base_portuguese_font_size)
+            except Exception as e:
+                print(f"   ⚠️  Erro ao carregar fontes: {e}, usando fontes padrão")
+                chinese_font = ImageFont.load_default()
+                pinyin_font = ImageFont.load_default()
+                portuguese_font = ImageFont.load_default()
+            
             # Split Chinese into lines (max 2 lines). Chars-per-line scales with width
             # so wider (original-resolution) frames keep more text on a single line.
             #
@@ -440,10 +518,17 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                     word_widths.append(word_width)
                     total_line_width += word_width
                 
-                # Scale down if too wide
+                # Scale down if too wide.
+                #
+                # O piso por palavra acompanha a FONTE, e não é mais o 40 fixo: o
+                # 40 foi calibrado para a fonte 36, e numa linha de 16 palavras
+                # (o que só acontece com a frase inteira de um período) 16x40 já
+                # é mais largo que a tela — a linha "encolhida" continuava
+                # vazando pelas bordas. Com o piso proporcional, o que não coube
+                # na fonte escolhida por _auto_chinese_font_size ainda cabe aqui.
                 if total_line_width > available_width:
                     scale_factor = available_width / total_line_width
-                    min_word_width = 40
+                    min_word_width = min(40, chinese_char_width + 4)
                     word_widths = [max(min_word_width, int(w * scale_factor)) for w in word_widths]
                     total_line_width = sum(word_widths)
                 
