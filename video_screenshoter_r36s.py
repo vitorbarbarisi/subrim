@@ -258,51 +258,74 @@ def wrap_portuguese_to_width(portuguese_text: str, font, max_width: int) -> List
     return lines
 
 
-def split_chinese_into_lines(display_items: List[Tuple[str, str, str]], max_chars_per_line: int = 12) -> List[List[Tuple[str, str, str]]]:
-    """
-    Split Chinese display items into at most 2 lines based on character count.
-    
+def split_chinese_into_lines(display_items: List[Tuple[str, str, str]],
+                             max_chars_per_line: int = 12,
+                             max_lines: int = 2) -> List[List[Tuple[str, str, str]]]:
+    """Reparte os tokens em até ``max_lines`` linhas, equilibradas por caractere.
+
+    ``max_lines`` era 2 fixo, e foi o que quebrou nos períodos inteiros (ver
+    ``periods_base.py``): 12% deles não cabem em duas linhas nem na fonte
+    mínima, e aí o encolhimento de colunas atropelava os ideogramas. O número de
+    linhas usado é o MENOR que comporta o texto — quem já cabia em uma ou duas
+    continua exatamente como antes.
+
     Args:
-        display_items: List of (chinese_word, pinyin, portuguese) tuples
-        max_chars_per_line: Maximum characters per line (default: 12)
-    
+        display_items: lista de ``(hanzi, pinyin, português)``
+        max_chars_per_line: caracteres por linha que a fonte comporta
+        max_lines: teto de linhas do cartão
+
     Returns:
-        List of lines, each containing a list of display items
+        Lista de linhas, cada uma com a sua lista de tokens.
     """
     if not display_items:
         return []
-    
-    # Count total characters
+
     total_chars = sum(len(item[0]) for item in display_items)
-    
-    # If fits in one line, return as single line
     if total_chars <= max_chars_per_line:
         return [display_items]
-    
-    # Split into 2 lines - try to balance character count
-    line1 = []
-    line1_chars = 0
-    target_chars = total_chars // 2
-    
+
+    # Quantas linhas o texto exige, dentro do teto.
+    n = max(2, min(max_lines, -(-total_chars // max(1, max_chars_per_line))))
+
+    # A regra de corte é a MESMA de quando isto só fazia duas linhas: encher
+    # até `alvo + 2`, com a última recebendo o resto. Generalizar em vez de
+    # reescrever importa — qualquer outro critério muda o ponto de quebra de
+    # toda legenda de 2 linhas do acervo, que é um estrago bem maior que o
+    # conserto.
+    alvo = total_chars // n
+    linhas: List[List[Tuple[str, str, str]]] = []
+    atual: List[Tuple[str, str, str]] = []
+    contagem = 0
     for item in display_items:
-        item_chars = len(item[0])
-        # Add to line1 if it doesn't exceed target too much, or if line1 is empty
-        if line1_chars + item_chars <= target_chars + 2 or not line1:
-            line1.append(item)
-            line1_chars += item_chars
-        else:
-            # Remaining items go to line2
-            break
-    
-    line2 = display_items[len(line1):]
-    
-    return [line1, line2] if line2 else [line1]
+        cabe = contagem + len(item[0]) <= alvo + 2
+        if not cabe and atual and len(linhas) < n - 1:
+            linhas.append(atual)
+            atual, contagem = [], 0
+        atual.append(item)
+        contagem += len(item[0])
+    if atual:
+        linhas.append(atual)
+    return linhas
 
 
 # Piso do ajuste automático da fonte chinesa. Abaixo disso o hanzi deixa de ser
 # distinguível na tela do R36S: vale mais deixar o desenho apertar (o próprio
 # layout ainda encolhe as colunas) do que escrever o que ninguém lê.
 MIN_CHINESE_FONT_SIZE = 22
+# Piso absoluto de uma linha espremida. Abaixo disto não se lê o ideograma.
+MIN_LINE_FONT_SIZE = 14
+# Quanto da altura do frame o cartão pode ocupar. Sem este teto a busca de
+# fonte, que só olha LARGURA, escolhe 4 linhas grandes e o cartão sobe até
+# debaixo da tarja de tradução — os dois blocos se sobrepõem.
+#
+# 0,70 não é estético, é um piso: o cartão PADRÃO de duas linhas na fonte 36 já
+# ocupa 62% do frame (297px de 480). Um teto abaixo disso reprovaria o layout de
+# sempre e encolheria TODA legenda de duas linhas do acervo. Acima de 0,70
+# entram as quatro linhas na fonte 26 (80%), que não deixam ver a cena.
+MAX_CARD_FRACTION = 0.70
+# Teto de linhas do cartão. Quatro cobrem 92% dos períodos que estouravam em
+# duas; acima disso o cartão come mais da metade do frame.
+MAX_CHINESE_LINES = 4
 
 
 def _word_widths_at(line_items: List[Tuple[str, str, str]], size: int) -> List[int]:
@@ -350,9 +373,34 @@ def _line_fits(line_items: List[Tuple[str, str, str]], size: int, available: int
                for w, item in zip(widths, line_items))
 
 
+def card_height(size: int, n_lines: int, show_gloss: bool = True) -> int:
+    """Altura do cartão de legenda, na fonte e no nº de linhas dados.
+
+    Mesma conta do empilhamento em ``add_subtitles_to_frame`` — se uma mudar, a
+    outra tem de mudar junto, senão a busca de fonte aprova um cartão que não
+    cabe.
+    """
+    pinyin = int(size * 0.65)
+    gloss = int(size * 0.45) * 2 if show_gloss else 0
+    spacing = max(6, int(12 * (size / 36)))
+    return (n_lines * (size + pinyin + gloss) + pinyin
+            + 3 * n_lines * spacing + int(20 * (size / 36)))
+
+
+def _font(path: str, size: int, fallback):
+    """Fonte no tamanho pedido, caindo para ``fallback`` se o arquivo falhar."""
+    try:
+        return ImageFont.truetype(path, max(1, size))
+    except Exception:
+        return fallback
+
+
 def _auto_chinese_font_size(display_items: List[Tuple[str, str, str]],
-                            width: int, height: int, resize: bool) -> int:
-    """Maior fonte (até o padrão) em que a frase cabe nas 2 linhas do cartão.
+                            width: int, height: int, resize: bool,
+                            show_gloss: bool = True) -> tuple:
+    """Maior fonte, e menor nº de linhas, em que a frase cabe no cartão.
+
+    Devolve ``(tamanho_da_fonte, n_linhas)``.
 
     O padrão de sempre — 36 no R36S — foi calibrado para o texto de UMA legenda.
     Uma frase inteira (ver ``periods_base.py``) tem duas ou três vezes isso, e
@@ -362,13 +410,22 @@ def _auto_chinese_font_size(display_items: List[Tuple[str, str, str]],
     quem cabia recebe exatamente a fonte de antes.
     """
     default = 36 if resize else max(24, int(height * 0.045))
+    altura_max = int(height * MAX_CARD_FRACTION)
     for size in range(default, MIN_CHINESE_FONT_SIZE - 1, -1):
-        max_chars = max(12, int(width / (size * 1.5)))
-        lines = split_chinese_into_lines(display_items, max_chars_per_line=max_chars)
         available = width - max(20, int(20 * (size / 36))) * 2
-        if all(_line_fits(line, size, available) for line in lines):
-            return size
-    return MIN_CHINESE_FONT_SIZE
+        max_chars = max(12, int(width / (size * 1.5)))
+        # Primeiro a MAIOR fonte; dentro dela, o MENOR número de linhas. Assim
+        # quem já cabia recebe exatamente o que recebia antes, e só o texto
+        # comprido gasta linha a mais.
+        for linhas in range(2, MAX_CHINESE_LINES + 1):
+            partes = split_chinese_into_lines(display_items,
+                                              max_chars_per_line=max_chars,
+                                              max_lines=linhas)
+            if card_height(size, len(partes), show_gloss) > altura_max:
+                continue          # caberia na largura, mas cobriria o frame
+            if all(_line_fits(line, size, available) for line in partes):
+                return size, len(partes)
+    return MIN_CHINESE_FONT_SIZE, MAX_CHINESE_LINES
 
 
 VARIANTS = ("full", "pt", "zh")
@@ -459,11 +516,13 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             # Sem tamanho pedido, ele sai do conteúdo: uma legenda curta recebe o
             # padrão de sempre; uma frase inteira recebe o maior tamanho em que
             # ainda cabe (ver _auto_chinese_font_size).
+            auto_lines = MAX_CHINESE_LINES
             if base_chinese_font_size is None:
-                base_chinese_font_size = (
-                    _auto_chinese_font_size(display_items, width, height, resize)
-                    if draw_bottom and display_items
-                    else (36 if resize else max(24, int(height * 0.045))))
+                if draw_bottom and display_items:
+                    base_chinese_font_size, auto_lines = _auto_chinese_font_size(
+                        display_items, width, height, resize, show_word_gloss)
+                else:
+                    base_chinese_font_size = 36 if resize else max(24, int(height * 0.045))
             base_pinyin_font_size = int(base_chinese_font_size * 0.65)
             base_portuguese_font_size = int(base_chinese_font_size * 0.45)
             # Scale absolute spacings relative to the R36S baseline (font 36)
@@ -479,14 +538,18 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                 pinyin_font = ImageFont.load_default()
                 portuguese_font = ImageFont.load_default()
             
-            # Split Chinese into lines (max 2 lines). Chars-per-line scales with width
-            # so wider (original-resolution) frames keep more text on a single line.
+            # Split Chinese into lines. Chars-per-line scales with width so wider
+            # (original-resolution) frames keep more text on a single line; o nº
+            # de linhas vem do _auto_chinese_font_size, que já achou o par
+            # (fonte, linhas) em que a frase cabe.
             #
             # Lista vazia quando o bloco inferior está desligado: é o que faz o
             # laço de largura e o de desenho rodarem zero vezes, sem precisar
             # duplicar o corpo da função por variante.
             max_chars_per_line = max(12, int(width / (base_chinese_font_size * 1.5)))
-            chinese_lines = (split_chinese_into_lines(display_items, max_chars_per_line=max_chars_per_line)
+            chinese_lines = (split_chinese_into_lines(display_items,
+                                                      max_chars_per_line=max_chars_per_line,
+                                                      max_lines=auto_lines)
                              if draw_bottom else [])
             num_chinese_lines = len(chinese_lines)
             
@@ -503,6 +566,7 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             
             all_line_widths = []
             all_word_widths_per_line = []
+            line_font_sizes = []
             max_line_width = 0
             
             for line_items in chinese_lines:
@@ -531,29 +595,63 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                     min_word_width = min(40, chinese_char_width + 4)
                     word_widths = [max(min_word_width, int(w * scale_factor)) for w in word_widths]
                     total_line_width = sum(word_widths)
-                
+
+                # Garantia de não-sobreposição, último recurso. Encolher a
+                # COLUNA sem encolher o GLIFO é exatamente o que fazia os
+                # ideogramas se atropelarem: eles são centralizados na coluna e
+                # invadem a vizinha quando não cabem. Se sobrou alguma coluna
+                # mais estreita que o seu conteúdo, esta LINHA é desenhada numa
+                # fonte menor — feia, mas legível, em vez de ilegível.
+                aperto = 1.0
+                for w, item in zip(word_widths, line_items):
+                    preciso = max(len(item[0]) * chinese_char_width,
+                                  len(item[1]) * pinyin_char_width if item[1] else 0)
+                    if preciso > w:
+                        aperto = min(aperto, w / preciso)
+                line_font_sizes.append(max(MIN_LINE_FONT_SIZE,
+                                           int(base_chinese_font_size * aperto)))
+
                 all_line_widths.append(total_line_width)
                 all_word_widths_per_line.append(word_widths)
                 max_line_width = max(max_line_width, total_line_width)
             
-            # Calculate Y positions from bottom
-            # Height calculation: pinyin + spacing + chinese (1 or 2 lines) + spacing + portuguese
-            chinese_line_height = base_chinese_font_size + vertical_spacing + base_pinyin_font_size
-            chinese_total_height = chinese_line_height * num_chinese_lines + (vertical_spacing * (num_chinese_lines - 1))
-            # Portuguese height: when 2 lines, both lines have portuguese, so we need space for both.
-            # Sem glossário essa reserva vai a zero, senão a caixa preta fica
+            # Y de cada linha, empilhando blocos iguais de baixo para cima.
+            #
+            # Antes isto era um if para 1 linha e outro para 2. Com o teto em
+            # MAX_CHINESE_LINES, uma terceira linha cairia no ramo de 1 e as
+            # linhas se desenhariam umas por cima das outras — pior que o
+            # problema original. Um bloco por linha resolve em qualquer número.
+            #
+            # Sem glossário a reserva dele vai a zero, senão a caixa preta fica
             # duas linhas alta demais e os hanzi sobem sem motivo.
             portuguese_extra_height = base_portuguese_font_size * 2 if show_word_gloss else 0
-            if num_chinese_lines == 2:
-                # For 2 lines: need space for portuguese of both lines
-                # Line 1 portuguese is between the two chinese lines
-                # Line 2 portuguese is at the bottom
-                total_subtitle_height = base_pinyin_font_size + vertical_spacing + chinese_total_height + (vertical_spacing * 2) + (portuguese_extra_height * 2)
-            else:
-                total_subtitle_height = base_pinyin_font_size + vertical_spacing + chinese_total_height + vertical_spacing + portuguese_extra_height
-            
-            portuguese_y = height - bottom_margin - portuguese_extra_height - (base_portuguese_font_size // 2)
+
+            # Fórmula GENERALIZADA da de 2 linhas, não uma nova: para 1 e 2
+            # linhas ela devolve exatamente os mesmos pixels de antes. Escrever
+            # um empilhamento "mais limpo" mudava a posição de TODA legenda do
+            # acervo — raio de alcance grande demais para um conserto de 12%.
+            total_subtitle_height = (
+                num_chinese_lines * (base_chinese_font_size + base_pinyin_font_size
+                                     + portuguese_extra_height)
+                + base_pinyin_font_size + 3 * num_chinese_lines * vertical_spacing)
+
+            portuguese_y = (height - bottom_margin - portuguese_extra_height
+                            - (base_portuguese_font_size // 2))
             chinese_bottom_y = portuguese_y - vertical_spacing - base_chinese_font_size
+
+            # De baixo para cima: a última linha assenta em chinese_bottom_y e
+            # cada anterior sobe 3*vertical_spacing acima do pinyin da seguinte.
+            line_positions = []
+            han_y = chinese_bottom_y
+            for _k in range(num_chinese_lines):
+                pin_y = han_y - vertical_spacing - base_pinyin_font_size
+                # A linha única mantém o glossário em portuguese_y (sem o +4),
+                # como no código anterior — são 4px, mas são 4px em tudo.
+                glo_y = (portuguese_y if num_chinese_lines == 1
+                         else han_y + vertical_spacing + base_chinese_font_size + 4)
+                line_positions.append((pin_y, han_y, glo_y))
+                han_y = pin_y - vertical_spacing * 3 - base_chinese_font_size
+            line_positions.reverse()
             
             # Calculate background box dimensions
             bg_width = max_line_width + int(40 * _s)  # Add padding
@@ -604,49 +702,22 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             draw = ImageDraw.Draw(new_img)
             
             # Draw each line of Chinese text
-            # Calculate Y positions for each line properly
-            if num_chinese_lines == 2:
-                # For 2 lines: calculate from bottom up
-                # Line 2 (bottom): chinese + pinyin
-                line2_chinese_y = chinese_bottom_y
-                line2_pinyin_y = line2_chinese_y - vertical_spacing - base_pinyin_font_size
-                line2_portuguese_y = line2_chinese_y + vertical_spacing + base_chinese_font_size + 4  # Extra spacing for portuguese
-                
-                # Line 1 (top): above line 2 with proper spacing
-                # Space needed: pinyin + spacing + chinese + spacing between lines
-                line_spacing = vertical_spacing * 3  # Extra spacing between the two chinese lines (increased from 2)
-                line1_chinese_y = line2_pinyin_y - line_spacing - base_chinese_font_size
-                line1_pinyin_y = line1_chinese_y - vertical_spacing - base_pinyin_font_size
-                line1_portuguese_y = line1_chinese_y + vertical_spacing + base_chinese_font_size + 4  # Extra spacing for portuguese
-            else:
-                # Single line
-                line1_chinese_y = chinese_bottom_y
-                line1_pinyin_y = line1_chinese_y - vertical_spacing - base_pinyin_font_size
-                line1_portuguese_y = portuguese_y
-                line2_chinese_y = None
-                line2_pinyin_y = None
-                line2_portuguese_y = None
-            
             for line_idx, (line_items, word_widths) in enumerate(zip(chinese_lines, all_word_widths_per_line)):
                 line_width = all_line_widths[line_idx]
                 start_x = (width - line_width) // 2
                 current_x = start_x
-                
-                # Get Y positions for this line
-                if num_chinese_lines == 2:
-                    if line_idx == 1:  # Second line (bottom)
-                        line_chinese_y = line2_chinese_y
-                        line_pinyin_y = line2_pinyin_y
-                        line_portuguese_y = line2_portuguese_y
-                    else:  # First line (top)
-                        line_chinese_y = line1_chinese_y
-                        line_pinyin_y = line1_pinyin_y
-                        line_portuguese_y = line1_portuguese_y
+                line_pinyin_y, line_chinese_y, line_portuguese_y = line_positions[line_idx]
+                # Fonte desta linha: igual à base, salvo quando as colunas
+                # ficaram apertadas demais (ver o cálculo de `aperto`).
+                line_size = line_font_sizes[line_idx]
+                if line_size == base_chinese_font_size:
+                    line_chinese_font, line_pinyin_font = chinese_font, pinyin_font
                 else:
-                    # Single line
-                    line_chinese_y = line1_chinese_y
-                    line_pinyin_y = line1_pinyin_y
-                    line_portuguese_y = line1_portuguese_y
+                    line_chinese_font = _font(chinese_font_path, line_size, chinese_font)
+                    line_pinyin_font = _font(chinese_font_path, int(line_size * 0.65),
+                                             pinyin_font)
+                    # Espremida, a linha desce para continuar assentada na base.
+                    line_chinese_y += base_chinese_font_size - line_size
                 
                 # Draw each word in this line
                 for i, (chinese_word, word_pinyin, word_portuguese) in enumerate(line_items):
@@ -655,16 +726,16 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                     
                     # Pinyin (purple)
                     if word_pinyin:
-                        pinyin_bbox = pinyin_font.getbbox(word_pinyin)
+                        pinyin_bbox = line_pinyin_font.getbbox(word_pinyin)
                         pinyin_text_width = pinyin_bbox[2] - pinyin_bbox[0]
                         pinyin_x = word_center_x - pinyin_text_width // 2
-                        draw.text((pinyin_x, line_pinyin_y), word_pinyin, font=pinyin_font, fill=(147, 112, 219))
+                        draw.text((pinyin_x, line_pinyin_y), word_pinyin, font=line_pinyin_font, fill=(147, 112, 219))
                     
                     # Chinese (white)
-                    chinese_bbox = chinese_font.getbbox(chinese_word)
+                    chinese_bbox = line_chinese_font.getbbox(chinese_word)
                     chinese_text_width = chinese_bbox[2] - chinese_bbox[0]
                     chinese_x = word_center_x - chinese_text_width // 2
-                    draw.text((chinese_x, line_chinese_y), chinese_word, font=chinese_font, fill=(255, 255, 255))
+                    draw.text((chinese_x, line_chinese_y), chinese_word, font=line_chinese_font, fill=(255, 255, 255))
                     
                     # Portuguese (yellow) with line breaks - render for all lines
                     if show_word_gloss and word_portuguese:
