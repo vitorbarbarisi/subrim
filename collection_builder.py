@@ -781,6 +781,89 @@ def _render_frame_to(match: dict, out_path: Path) -> bool:
     return False
 
 
+def derive_periods_cache(asset: str, progress_cb: Optional[Callable[[int, int, str], None]] = None,
+                         force: bool = False) -> dict:
+    """Monta ``frames_periods/<asset>/`` a partir do ``frames/<asset>/`` já existente.
+
+    Arquivar por período normalmente re-extrai o frame do mp4 no timestamp do
+    período inteiro — mas o vídeo original só sobrou em 6 dos 215 episódios. O
+    atalho é que um período é um AGRUPAMENTO de legendas consecutivas, então o
+    frame dele já está no cache antigo: basta escolher, entre as legendas do
+    grupo, aquela cujo instante fica mais perto do meio do período.
+
+    Em 75% dos casos o período é uma legenda só e o frame é EXATAMENTE o que a
+    re-extração daria. Nos 22% que agrupam, o erro de tempo fica em 0,9s na
+    mediana (1,7s no p90) — dentro do mesmo plano, quase sempre.
+
+    A numeração é o ponto delicado: tanto ``archive_asset`` quanto
+    ``_scan_bases`` nomeiam e leem o frame pela POSIÇÃO da linha no arquivo
+    (``enumerate(f, 1)``), não pela coluna 0. Então a origem é
+    ``line{row.line_num}`` no base e o destino é ``line{posição do período}`` no
+    arquivo de períodos. Confundir as duas daria a imagem de outra frase, sem
+    erro nenhum aparecendo.
+
+    Usa hardlink: são ~120 mil jpgs, e copiá-los dobraria o warehouse à toa.
+
+    Retorna ``{"total", "exact", "approx", "missing", "dir", "skipped"}``.
+    """
+    base_file = WAREHOUSE / f"{asset}_base.txt"
+    periods_file = periods_path_for(asset)
+    out_dir = _frames_dir(asset, periods=True)
+
+    vazio = {"total": 0, "exact": 0, "approx": 0, "missing": 0,
+             "dir": out_dir, "skipped": ""}
+    if not base_file.exists() or not periods_file.exists():
+        return dict(vazio, skipped="sem base ou sem arquivo de períodos")
+    if not has_frame_cache(asset, periods=False):
+        return dict(vazio, skipped="sem frames/ de onde derivar")
+    if has_frame_cache(asset, periods=True) and not force:
+        # O cache extraído do vídeo é a verdade; não trocar por derivado.
+        return dict(vazio, skipped="frames_periods/ já existe")
+
+    grupos = periods_base.build_groups(base_file)
+    arquivo = [l for l in periods_file.read_text(encoding="utf-8").splitlines()]
+    if len(grupos) != len(arquivo):
+        return dict(vazio, skipped=f"períodos no disco ({len(arquivo)}) não batem "
+                                   f"com os recalculados ({len(grupos)})")
+    # Confere o alinhamento posição a posição pelo começo do período: se o
+    # agrupamento no disco for outro, o frame iria para a frase errada.
+    for pos, (g, linha) in enumerate(zip(grupos, arquivo), 1):
+        cols = linha.split("\t")
+        if len(cols) < 3 or cols[1] != g.rows[0].begin:
+            return dict(vazio, skipped=f"período {pos} do disco não corresponde ao recalculado")
+
+    origem_dir = _frames_dir(asset, periods=False)
+    disponiveis = {int(f.stem[4:]) for f in origem_dir.glob("line*.jpg")}
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    exact = approx = missing = 0
+    for pos, g in enumerate(grupos, 1):
+        rows = g.rows
+        alvo = (rows[0].begin_s + rows[-1].end_s) / 2
+        candidatos = [r for r in rows if r.line_num in disponiveis]
+        if not candidatos:
+            missing += 1
+            continue
+        melhor = min(candidatos, key=lambda r: abs((r.begin_s + r.end_s) / 2 - alvo))
+        src = _cached_frame_path(asset, melhor.line_num, periods=False)
+        dst = _cached_frame_path(asset, pos, periods=True)
+        if dst.exists():
+            dst.unlink()
+        try:
+            os.link(src, dst)
+        except OSError:
+            shutil.copyfile(src, dst)        # sistemas de arquivo sem hardlink
+        if len(rows) == 1:
+            exact += 1
+        else:
+            approx += 1
+        if progress_cb and (pos % 200 == 0 or pos == len(grupos)):
+            progress_cb(pos, len(grupos), f"{pos}/{len(grupos)}")
+
+    return {"total": len(grupos), "exact": exact, "approx": approx,
+            "missing": missing, "dir": out_dir, "skipped": ""}
+
+
 def archive_asset(asset: str, jpeg_quality: int = 90,
                   progress_cb: Optional[Callable[[int, int, str], None]] = None,
                   periods: bool = True) -> dict:
@@ -1017,3 +1100,56 @@ def save_collection(label: str, matches: List[dict], mode: str = "r36s",
         json.dumps(entries, indent=2, ensure_ascii=False), encoding="utf-8")
 
     return out_dir
+
+
+# ── CLI ─────────────────────────────────────────────────────────────────────────
+def _cli(argv=None) -> int:
+    """``python3 collection_builder.py derivar-periodos [asset...|--all]``."""
+    import argparse
+
+    p = argparse.ArgumentParser(
+        description="Utilitários do acervo de coleções.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+    d = sub.add_parser("derivar-periodos",
+                       help="monta frames_periods/ a partir do frames/ existente")
+    d.add_argument("assets", nargs="*", help="nome do asset; vazio exige --all")
+    d.add_argument("--all", action="store_true", help="todos os assets do warehouse")
+    d.add_argument("--force", action="store_true",
+                   help="refaz mesmo se frames_periods/ já existir "
+                        "(sobrescreve o cache extraído do vídeo)")
+    a = p.parse_args(argv)
+
+    alvos = (sorted(x.stem.replace("_base", "") for x in WAREHOUSE.glob("*_base.txt"))
+             if a.all else a.assets)
+    if not alvos:
+        p.error("informe um asset ou use --all")
+
+    tot = {"total": 0, "exact": 0, "approx": 0, "missing": 0}
+    pulados = []
+    for asset in alvos:
+        r = derive_periods_cache(asset, force=a.force)
+        if r["skipped"]:
+            pulados.append((asset, r["skipped"]))
+            continue
+        for k in tot:
+            tot[k] += r[k]
+        print(f"✓ {asset}: {r['total']} período(s) — {r['exact']} exato(s), "
+              f"{r['approx']} aproximado(s), {r['missing']} sem frame")
+
+    if pulados:
+        print(f"\n↷ {len(pulados)} pulado(s):")
+        motivos = {}
+        for asset, m in pulados:
+            motivos.setdefault(m, []).append(asset)
+        for m, assets in sorted(motivos.items(), key=lambda kv: -len(kv[1])):
+            amostra = ", ".join(assets[:4]) + ("…" if len(assets) > 4 else "")
+            print(f"   {len(assets):3d}  {m}  ({amostra})")
+
+    print(f"\nΣ {tot['total']} período(s): {tot['exact']} exato(s), "
+          f"{tot['approx']} aproximado(s), {tot['missing']} sem frame")
+    return 0
+
+
+if __name__ == "__main__":
+    import sys
+    sys.exit(_cli())
