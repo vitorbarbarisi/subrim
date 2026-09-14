@@ -684,15 +684,24 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = None) -> str:
             content = obj.get("choices", [{}])[0].get("message", {}).get("content")
             if not content:
                 return "N/A"
+            # Strip optional ```json fences before parsing, como o _call_deepseek_pairs_batch
+            # já fazia. Sem isto, uma resposta cercada não vira JSON, cai no
+            # sanitize cru e a cerca ia PARA DENTRO do base — a linha perde
+            # pinyin e tradução para sempre, porque nenhum leitor do repo
+            # consegue mais parsear aquele array.
+            stripped = content.strip()
+            if stripped.startswith("```"):
+                stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
+                stripped = re.sub(r"\s*```$", "", stripped)
             # Try to strictly keep only a JSON array of strings
             try:
-                parsed = json.loads(content)
+                parsed = json.loads(stripped)
                 if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
                     return json.dumps(parsed, ensure_ascii=False)
             except Exception:
                 pass
             # Fallback: sanitize raw content
-            return _sanitize_tsv_field(content)
+            return _sanitize_tsv_field(stripped)
     except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
         # Enhanced error handling with more specific messages for pairs extraction
         if isinstance(exc, urlerror.HTTPError):

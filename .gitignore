@@ -40,3 +40,6 @@ warehouse/screenshots/
 
 # Archive files
 *.zip
+
+# Log de depuração das chamadas à DeepSeek (grande, e regenerado a cada execução)
+deepseek_debug.log
