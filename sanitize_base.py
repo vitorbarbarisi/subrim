@@ -85,17 +85,19 @@ def check_word_api_health() -> bool:
         return False
 
 
-def get_word_from_api(word: str) -> dict:
+def get_word_from_api(word: str, text: bool = False) -> dict:
     """
     Faz GET para a word-api para verificar se a palavra existe.
     
     Args:
         word: Palavra em mandarim para verificar
+        text: True se a palavra veio de um TXT (aba Texto) — a API contabiliza
+              o acesso em `calls_text` além de `calls`
         
     Returns:
         dict: Resposta da API ou None se erro
     """
-    url = f"{WORD_API_BASE_URL}/{word}"
+    url = f"{WORD_API_BASE_URL}/{word}" + ("?text=true" if text else "")
     try:
         response = requests.get(url, timeout=5)
 
@@ -116,7 +118,8 @@ def get_word_from_api(word: str) -> dict:
         return None
 
 
-def post_word_to_api(word: str, pinyin: str, translation: str, confidence_level: int = 1) -> bool:
+def post_word_to_api(word: str, pinyin: str, translation: str, confidence_level: int = 1,
+                     text: bool = False) -> bool:
     """
     Faz POST para a word-api para adicionar uma nova palavra.
     
@@ -125,11 +128,13 @@ def post_word_to_api(word: str, pinyin: str, translation: str, confidence_level:
         pinyin: Pinyin da palavra
         translation: Tradução da palavra
         confidence_level: Nível de confiança (padrão: 1)
+        text: True se a palavra veio de um TXT — a palavra já nasce com
+              `calls_text = 1`
         
     Returns:
         bool: True se sucesso, False caso contrário
     """
-    url = f"{WORD_API_BASE_URL}/"
+    url = f"{WORD_API_BASE_URL}/" + ("?text=true" if text else "")
     try:
         data = {
             "word": word,
@@ -285,7 +290,7 @@ def extract_pairs_from_translation(translation_text: str) -> list:
     return pairs
 
 
-def process_word_api_integration(pairs: list) -> list:
+def process_word_api_integration(pairs: list, text: bool = False) -> list:
     """
     Processa integração com word-api para cada palavra nos pares.
 
@@ -296,9 +301,17 @@ def process_word_api_integration(pairs: list) -> list:
 
     Args:
         pairs: Lista de pares de palavras
+        text: True quando a origem é um TXT (aba Texto). Propagado ao GET e ao
+              POST como `?text=true`, para a API separar em `calls_text` o
+              vocabulário que veio de texto do que veio de legenda de vídeo.
 
     Returns:
-        list: Os mesmos pares, sem as entradas de palavra vazia
+        list: Os mesmos pares, sem as entradas que não são palavras (vazias ou
+        só pontuação). Quem chama regrava a coluna 4 a partir desta lista, então
+        o descarte também tira esses tokens do base — que é o desejado: `/` ou
+        `♪` no array vira uma "palavra" desenhada na legenda e contada na aba
+        Warehouse. Uma linha cujo array era SÓ pontuação fica sem pares e cai no
+        mesmo caminho de remoção que já existia para o caso de palavra vazia.
     """
     filtered_pairs = []
     
@@ -307,19 +320,23 @@ def process_word_api_integration(pairs: list) -> list:
         pinyin = pair["pinyin"]
         translation = pair["translation"]
         
-        # Pula palavras vazias ou inválidas
-        if not word or word.strip() == "":
+        # Pula palavras vazias ou que são só pontuação. Sem esta guarda, um par
+        # como "/ (barra): barra" — que a LLM às vezes produz — vira uma entrada
+        # de vocabulário. Pior: o GET de "/" monta `word-api//`, que não resolve,
+        # então o cliente conclui que a palavra não existe e faz um POST que
+        # esbarra na chave primária, devolvendo 500 a cada execução.
+        if not word or not word_vocab.is_real_word(word.strip()):
             continue
         
         print(f"   🔍 Verificando palavra: '{word}'")
         
         # Consulta a word-api
-        api_response = get_word_from_api(word)
+        api_response = get_word_from_api(word, text=text)
         
         if api_response is None:
             # Palavra não encontrada, adiciona à word-api
             print(f"   📝 Palavra '{word}' não encontrada, adicionando...")
-            post_word_to_api(word, pinyin, translation, confidence_level=1)
+            post_word_to_api(word, pinyin, translation, confidence_level=1, text=text)
             filtered_pairs.append(pair)
         else:
             # Palavra encontrada, verifica confidence_level

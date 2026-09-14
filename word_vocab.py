@@ -31,6 +31,7 @@ Diagnóstico rápido:  python3 word_vocab.py
 
 import json
 import os
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -38,6 +39,22 @@ import urllib.request
 
 DEFAULT_BASE_URL = "http://localhost:7998/word-api"
 MASTERED_LEVEL = 3   # confidence_level que significa "dominada"
+
+# Uma "palavra" precisa ter ao menos um caractere com conteúdo (CJK, letra ou
+# dígito). Sem isso, pontuação solta que sobra do parsing — `,`「」!。♪ / — entra
+# na tabela como se fosse vocabulário.
+#
+# Mora aqui, e não no sanitize_base, porque a regra vale nas DUAS pontas: no
+# registro (o que se manda para a API) e na exibição (o que a aba Warehouse
+# conta). O word_vocab é o único módulo comum aos dois — e é só stdlib, então
+# importá-lo não arrasta `requests` para dentro da GUI.
+_WORD_HAS_CONTENT = re.compile(r"[0-9A-Za-z\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
+
+
+def is_real_word(word: str) -> bool:
+    """True se ``word`` tem ao menos um caractere de conteúdo (não é só pontuação)."""
+    return bool(word) and bool(_WORD_HAS_CONTENT.search(word))
+
 
 _mastered: frozenset | None = None   # cache de processo
 _vocab: dict | None = None           # cache do vocabulário completo (só GUI)
