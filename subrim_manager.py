@@ -427,6 +427,8 @@ class App(tk.Tk):
         # Filtro de assets: None = todos (sem filtro); set = só esses assets.
         self._col_asset_filter = None
         self._col_render_token = 0
+        self._col_audio_token = 0
+        self._col_audio_proc = None  # subprocess.Popen do afplay em curso, ou None
         self._col_photo = None
         self._col_saving = False
         # Últimas escolhas do pop-up de salvar (reabre nelas na mesma sessão).
@@ -1131,7 +1133,8 @@ class App(tk.Tk):
                 f"Arquivar {len(targets)} episódio(s)?\n\n"
                 f"{shown}\n\n"
                 f"• Gera o <asset>_periods.txt (frases inteiras) e extrai\n"
-                f"  1 frame por FRASE para warehouse/frames_periods/<asset>/\n"
+                f"  1 frame + 1 áudio por FRASE para warehouse/frames_periods/<asset>/\n"
+                f"  e warehouse/audio_periods/<asset>/\n"
                 f"• Depois APAGA o(s) mp4 (~{total_gb:.2f} GB no total)\n\n"
                 f"Busca e visualização na aba Coleções seguem funcionando pelos "
                 f"frames. Para reverter é preciso repor o vídeo original.\n\n"
@@ -1182,6 +1185,18 @@ class App(tk.Tk):
         total = res["total"] or 1
         tolerance = max(2, int(total * 0.01))  # ≤2 frames ou ≤1% do total
         dropped = res.get("dropped", [])
+
+        # Áudio nunca bloqueia o apagamento do mp4 — só a extração de frames
+        # decide isso (mesma tolerância acima). Falha de áudio é só aviso.
+        audio_ok = res.get("audio_ok", 0)
+        audio_failed = res.get("audio_failed", 0)
+        if audio_failed:
+            self._log_q.put((
+                f"    ⚠️  áudio: {audio_ok} ok, {audio_failed} falha(s) "
+                f"(linhas {res.get('audio_dropped', [])[:20]}"
+                f"{'…' if audio_failed > 20 else ''}).", "warning"))
+        elif audio_ok:
+            self._log_q.put((f"    🔊 áudio: {audio_ok} clipe(s) extraído(s).", "info"))
 
         if res["ok"] == 0 or res["failed"] > tolerance:
             self._log_q.put((
@@ -1531,6 +1546,12 @@ class App(tk.Tk):
                    command=lambda: self._nota_bump(-1)).pack(side=tk.LEFT, padx=2)
         ttk.Button(btns, text="∧", width=2,
                    command=lambda: self._nota_bump(1)).pack(side=tk.LEFT, padx=2)
+
+        self._col_audio_btn = tk.Button(nota_box, text="🔇", font=("", 20),
+                                        width=3, bg=self.cget("bg"),
+                                        command=self._col_play_audio,
+                                        state=tk.DISABLED)
+        self._col_audio_btn.pack(pady=(10, 0))
 
         for w in (self._nota_frame, *self._nota_frame.winfo_children()):
             w.bind("<Button-1>", lambda _: self._nota_frame.focus_set())
@@ -1898,6 +1919,10 @@ class App(tk.Tk):
         # Cronômetro: nova busca encerra qualquer sessão ativa e (re)habilita o botão.
         self._timing_reset()
         self._timing_btn.config(state=tk.NORMAL if n else tk.DISABLED)
+        # Estado definitivo do botão de áudio é decidido por _col_render_current
+        # (depende da frase, não só de haver resultado); aqui só cobre o caso
+        # "nenhum resultado" (sem seleção pra disparar aquele render).
+        self._col_set_audio_btn(False)
         self._col_preview.config(image="", text="(preview r36s aparece aqui)")
         self._col_photo = None
         self._col_caption.config(state=tk.NORMAL)
@@ -2050,6 +2075,7 @@ class App(tk.Tk):
         m = self._col_matches[idx]
         n = len(self._col_matches)
         self._col_pos.set(f"{idx + 1}/{n}")
+        self._col_set_audio_btn(cb.audio_available_for_match(m))
         self._col_caption.config(state=tk.NORMAL)
         self._col_caption.delete("1.0", tk.END)
         self._col_caption.insert(tk.END, f"{m['chinese']}\n{m['portuguese']}")
@@ -2068,6 +2094,66 @@ class App(tk.Tk):
             self.after(0, lambda: self._col_set_preview(token, img))
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _col_set_audio_btn(self, available: bool):
+        """Reflete a disponibilidade de áudio no botão — ícone E estado.
+
+        Só desabilitar (``state=tk.DISABLED``) não é visível o bastante: no
+        Tk, emoji coloridos como "🔊" não escurecem quando o botão desabilita
+        (a cor do glifo vem da fonte de emoji, não do ``disabledforeground``),
+        então habilitado e desabilitado pareciam idênticos. Trocar pro glifo
+        "🔇" deixa o estado óbvio em qualquer plataforma.
+        """
+        self._col_audio_btn.config(
+            state=tk.NORMAL if available else tk.DISABLED,
+            text="🔊" if available else "🔇")
+
+    def _col_play_audio(self):
+        """Toca o áudio da frase atual — do cache, ou extraindo na hora do mp4."""
+        m = self._nota_current_match()
+        if m is None:
+            return
+        cb = self._col_import()
+        if not cb:
+            return
+
+        self._col_audio_token += 1
+        token = self._col_audio_token
+        self._col_audio_btn.config(state=tk.DISABLED, text="⏳")
+
+        def _work():
+            try:
+                path = cb.audio_clip_for_match(m)
+            except Exception as e:  # noqa: BLE001
+                path = None
+                self._log_q.put((f"Erro ao extrair áudio: {e}", "error"))
+            self.after(0, lambda: self._col_audio_ready(token, path))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _col_audio_ready(self, token: int, path):
+        if token != self._col_audio_token:
+            return  # um clique mais novo já assumiu
+        self._col_set_audio_btn(path is not None)
+        if path is None:
+            messagebox.showinfo(
+                "Áudio indisponível",
+                "Não há clipe de áudio em cache para esta frase, e o vídeo "
+                "original não está mais disponível (episódio arquivado antes "
+                "deste recurso existir).")
+            return
+        self._col_play_path(path)
+
+    def _col_play_path(self, path):
+        if self._col_audio_proc is not None and self._col_audio_proc.poll() is None:
+            try:
+                self._col_audio_proc.terminate()
+            except Exception:  # noqa: BLE001
+                pass
+        try:
+            self._col_audio_proc = subprocess.Popen(["afplay", str(path)])
+        except Exception as e:  # noqa: BLE001
+            self._log_q.put((f"Erro ao tocar áudio: {e}", "error"))
 
     # ── Cronômetro de leitura (tempo por caractere) ─────────────────────────────
     @staticmethod

@@ -15,6 +15,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import tempfile
 import unicodedata
 from collections import Counter
@@ -45,6 +46,10 @@ FRAMES = WAREHOUSE / "frames"
 # o número da linha e as duas segmentações numeram diferente: misturá-las
 # devolveria a imagem errada para todo mundo, em silêncio.
 FRAMES_PERIODS = WAREHOUSE / "frames_periods"
+# Cache de áudio de uma frase/período (ver archive_asset / audio_clip_for_match).
+# Mesma convenção de FRAMES_PERIODS: warehouse/audio_periods/<asset>/line{NNNN}.mp3,
+# chaveado por line_num do *_periods.txt — nunca por line_num do _base.txt.
+AUDIO_PERIODS = WAREHOUSE / "audio_periods"
 
 
 def warehouse_dir(text: bool = False) -> Path:
@@ -58,6 +63,14 @@ def _frames_dir(asset: str, periods: bool = False) -> Path:
 
 def _cached_frame_path(asset: str, line_num: int, periods: bool = False) -> Path:
     return _frames_dir(asset, periods) / f"line{line_num:04d}.jpg"
+
+
+def _audio_dir(asset: str) -> Path:
+    return AUDIO_PERIODS / asset
+
+
+def _cached_audio_path(asset: str, line_num: int) -> Path:
+    return _audio_dir(asset) / f"line{line_num:04d}.mp3"
 
 
 def has_frame_cache(asset: str, periods: Optional[bool] = None) -> bool:
@@ -735,6 +748,30 @@ def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> 
         cap.release()
 
 
+def extract_audio_segment(video: Path, start: float, end: float, out_path: Path) -> bool:
+    """Extrai o trecho ``[start, end]`` (segundos) do vídeo como mp3, sem vídeo.
+
+    ``-ss`` ANTES de ``-i`` = accurate seek, mesmo padrão de ``_cut_only`` em
+    process_chunks.py e do corte de vídeo em split_video.py. ``try/except``
+    cobre tanto falha do ffmpeg quanto ausência do binário no PATH — nesses
+    casos o chamador (archive_asset / audio_clip_for_match) só registra a
+    falha e segue, sem derrubar o lote.
+    """
+    duration = max(0.05, end - start)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    cmd = [
+        "ffmpeg", "-ss", str(start), "-i", str(video), "-t", str(duration),
+        "-vn", "-c:a", "libmp3lame", "-q:a", "4", "-y", str(out_path),
+    ]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True)
+    except Exception:  # noqa: BLE001 - ffmpeg ausente/PATH quebrado etc.
+        return False
+    if r.returncode != 0:
+        return False
+    return out_path.exists() and out_path.stat().st_size > 0
+
+
 # Tela do R36S. A imagem de uma frase de texto já nasce nessa proporção, então o
 # letterbox do add_subtitles_to_frame vira no-op no modo r36s e a legenda cai no
 # mesmo lugar que cairia sobre um frame de vídeo.
@@ -884,8 +921,15 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
     NÃO apaga o mp4: devolve estatísticas para o chamador decidir a remoção
     conforme a tolerância a frames perdidos.
 
+    Também extrai, quando ``periods=True``, 1 recorte de áudio por FRASE para
+    ``warehouse/audio_periods/<asset>/`` (mesma chave ``line_num``), enquanto o
+    mp4 original ainda está disponível — é a única janela em que isso é
+    possível, já que o chamador apaga o mp4 logo depois. Falha de áudio NÃO
+    entra em ``failed``/``dropped`` (que seguem só sobre frames, base da
+    tolerância que decide apagar o mp4); fica em ``audio_failed``/``audio_dropped``.
+
     Retorna ``{"total", "ok", "failed", "dropped": [line_num], "dir", "periods",
-    "source"}``.
+    "source", "audio_ok", "audio_failed", "audio_dropped": [line_num]}``.
     """
     base_file = WAREHOUSE / f"{asset}_base.txt"
     if not base_file.exists():
@@ -907,7 +951,7 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
                               f"{res['groups']} período(s) [{res['criterio']}]")
 
     # Lê todas as linhas com timestamps válidos.
-    lines: List[tuple] = []  # (line_num, avg_time)
+    lines: List[tuple] = []  # (line_num, avg_time, begin, end)
     with open(source_file, "r", encoding="utf-8") as f:
         for line_num, line in enumerate(f, 1):
             cols = line.rstrip("\n").split("\t")
@@ -918,7 +962,7 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
                 end = float(cols[2].replace("s", ""))
             except ValueError:
                 continue
-            lines.append((line_num, (begin + end) / 2))
+            lines.append((line_num, (begin + end) / 2, begin, end))
 
     out_dir = _frames_dir(asset, periods)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -935,7 +979,7 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
             raise RuntimeError(f"FPS inválido para o vídeo: {video}")
         total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
 
-        for i, (line_num, avg_time) in enumerate(lines, 1):
+        for i, (line_num, avg_time, begin, end) in enumerate(lines, 1):
             frame = _grab_at(cap, fps, avg_time, total_frames)
             if frame is None:
                 dropped.append(line_num)
@@ -951,9 +995,60 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
     finally:
         cap.release()
 
+    audio_ok = 0
+    audio_dropped: List[int] = []
+    if periods:
+        for i, (line_num, avg_time, begin, end) in enumerate(lines, 1):
+            if extract_audio_segment(video, begin, end, _cached_audio_path(asset, line_num)):
+                audio_ok += 1
+            else:
+                audio_dropped.append(line_num)
+            if progress_cb and (i % 25 == 0 or i == total):
+                progress_cb(i, total, f"{i}/{total} áudios")
+
     return {"total": total, "ok": ok, "failed": len(dropped),
             "dropped": dropped, "dir": out_dir, "periods": periods,
-            "source": source_file}
+            "source": source_file,
+            "audio_ok": audio_ok, "audio_failed": len(audio_dropped),
+            "audio_dropped": audio_dropped}
+
+
+def audio_available_for_match(match: dict) -> bool:
+    """Checagem barata (só ``Path.exists()``, sem ffmpeg): há áudio pra essa frase?
+
+    ``True`` se já existe o clipe em cache, ou se o mp4 original ainda está
+    presente (dá pra extrair na hora). Usada pela GUI pra decidir o estado
+    enabled/disabled do botão de áudio a cada troca de frase.
+    """
+    cached = _cached_audio_path(match["asset"], match["line_num"])
+    if cached.exists() and cached.stat().st_size > 0:
+        return True
+    video_path = match.get("video_path") or ""
+    return bool(video_path) and Path(video_path).exists()
+
+
+def audio_clip_for_match(match: dict) -> Optional[Path]:
+    """Caminho do clipe de áudio da frase, extraindo sob demanda se preciso.
+
+    Ordem: cache em warehouse/audio_periods/<asset>/ → se ausente e o mp4
+    original ainda existir (match["video_path"]), extrai e cacheia agora.
+    ``None`` se nenhuma das duas fontes existe (episódio arquivado antes
+    desta feature, sem cache de áudio).
+    """
+    cached = _cached_audio_path(match["asset"], match["line_num"])
+    if cached.exists() and cached.stat().st_size > 0:
+        return cached
+
+    video_path = match.get("video_path") or ""
+    if not video_path:
+        return None
+    video = Path(video_path)
+    if not video.exists():
+        return None
+
+    if extract_audio_segment(video, match["begin"], match["end"], cached):
+        return cached
+    return None
 
 
 def render_preview(match: dict, mode: str = "r36s"):
