@@ -29,15 +29,15 @@ O progresso (done) fica no localStorage, com chave derivada dos nomes dos
 arquivos de CADA bundle — então cada arquivo controla o seu próprio bloco, e o
 "Exportar" de um bundle traz só as entradas dele.
 
-Os cinco jogos se alternam a cada frase, então um bloco de 150 sai 30 de cada.
-Tudo que eles precisam — segmentação, pinyin, distratores, traduções erradas,
-decomposições, embaralhamento — é resolvido AQUI e viaja embutido: a página não
-tem rede quando roda no celular. Ver ``wordgrid.py``, ``translations.py`` e
-``hanzi_decomp.py``.
+Os seis jogos giram num ciclo de 10 posições (ver ``CICLO``), então um bloco de
+150 sai 15 ciclos: 15/15/45/45/15/15. Tudo que eles precisam — segmentação,
+pinyin, distratores, traduções erradas, decomposições, máscaras, embaralhamento
+— é resolvido AQUI e viaja embutido: a página não tem rede quando roda no
+celular. Ver ``wordgrid.py``, ``translations.py`` e ``hanzi_decomp.py``.
 
-Cada jogo embute a imagem que NÃO mostra a sua resposta: o jogo 3 usa a variante
-``so_traducao/`` e o jogo 4 a ``so_mandarim/``, gravadas pelo "salvar coleção".
-Continua sendo uma imagem por frase — o tamanho do bundle não muda.
+Cada jogo embute a imagem que NÃO mostra a sua resposta: os jogos 3 e 6 usam a
+variante ``so_traducao/`` e o jogo 4 a ``so_mandarim/``, gravadas pelo "salvar
+coleção". Continua sendo uma imagem por frase — o tamanho do bundle não muda.
 """
 
 import argparse
@@ -57,7 +57,17 @@ TEMPLATE = HERE / "index.html"
 MARKER = "<!-- DICTATION_DATA:"
 
 # Qual variante de imagem cada jogo embute. Ausente = a imagem completa.
-GAME_IMAGE = {3: "source_pt", 4: "source_zh"}
+GAME_IMAGE = {3: "source_pt", 4: "source_zh", 6: "source_pt"}
+
+# A ordem em que os jogos se alternam pelas frases do bloco. Não é um jogo por
+# posição: o 3 e o 4 aparecem três vezes cada, e são eles que carregam o peso —
+# montar por caractere e escolher a tradução são os que mais exigem ler o
+# chinês. Com 10 posições, um arquivo de 150 dá 15 ciclos redondos.
+CICLO = [1, 2, 3, 3, 3, 4, 4, 4, 6, 5]
+
+# Quantos jogos existem — o ciclo cita todos, então não há uma segunda lista
+# para esquecer de atualizar.
+N_JOGOS = max(CICLO)
 
 # Acima disso o Chrome do Android começa a engasgar para abrir o arquivo.
 WARN_MB = 60
@@ -80,14 +90,15 @@ class Deps:
     """O que os jogos precisam, carregado uma vez por execução.
 
     Também decide QUAIS jogos esta coleção suporta. Uma coleção salva sem as
-    variantes de imagem não tem como jogar 3 nem 4; alternar 1..5 assim mandaria
-    60% das frases para o jogo 1. O rodízio passa a ser só sobre os jogos
-    possíveis — 1, 2 e 5 nesse caso — e a saída diz o motivo.
+    variantes de imagem não tem como jogar 3, 4 nem 6; manter o ciclo inteiro
+    assim mandaria 70% das frases para o jogo 1. O ciclo passa a ser só sobre os
+    jogos possíveis — 1, 2 e 5 nesse caso — e a saída diz o motivo.
     """
 
     def __init__(self, entries: list, folder: Path, enabled: bool = True):
         self.lex = None
         self.bank = None
+        self.masks = None
         self.decomps = {}
         self.comps = {}
         self.games = [1]
@@ -101,11 +112,28 @@ class Deps:
         else:
             self.notas.append("sem léxico: o jogo 2 sai de cena")
 
-        if any((e.get("source_pt") and (folder / e["source_pt"]).exists())
-               for e in entries):
+        tem_pt_img = any((e.get("source_pt") and (folder / e["source_pt"]).exists())
+                         for e in entries)
+        if tem_pt_img:
             self.games.append(3)
         else:
             self.notas.append("sem so_traducao/: o jogo 3 sai de cena")
+
+        # O jogo 6 mostra a mesma imagem do 3 — com a completa, a legenda
+        # queimada traz a palavra oculta no glossário, com pinyin e tradução.
+        self.masks = wordgrid.Masks.load()
+        if tem_pt_img and self.masks:
+            self.games.append(6)
+        elif not self.masks:
+            self.notas.append("sem pares no warehouse: o jogo 6 sai de cena")
+        else:
+            self.notas.append("sem so_traducao/: o jogo 6 sai de cena")
+        # A maestria é a única coisa aqui que não sai do disco. Sem ela o jogo 6
+        # esconde palavra que já se sabe, que é o que ele existe para não fazer —
+        # e isso passaria calado, porque o bundle sai inteiro do mesmo jeito.
+        if self.masks and not self.masks.mastered:
+            self.notas.append("word-api sem palavras dominadas: o jogo 6 pode "
+                              "esconder palavra que você já sabe")
 
         tem_pt = any((e.get("portuguese") or "").strip() for e in entries)
         self.bank = translations.Bank.load() if tem_pt else None
@@ -130,25 +158,37 @@ class Deps:
         else:
             self.notas.append("nenhuma decomposição: o jogo 5 sai de cena")
 
+    def cycle(self) -> list:
+        """O ``CICLO`` com os jogos que esta coleção não suporta removidos.
+
+        Tirar em vez de substituir preserva as proporções do que sobrou: sem o
+        jogo 3, o 4 continua valendo três posições contra uma do 2.
+        """
+        return [g for g in CICLO if g in self.games] or [1]
+
     def describe(self) -> str:
-        return "jogos disponíveis: " + "/".join(str(g) for g in self.games)
+        # O ciclo, e não o conjunto: agora as repetições são a informação.
+        return "ciclo: " + "|".join(str(g) for g in self.cycle())
 
 
-def assign_games(items: list, deps: Deps) -> list:
-    """Alterna os jogos disponíveis pelos itens e anexa o que cada um precisa.
+def assign_games(items: list, deps: Deps) -> tuple:
+    """Roda o ciclo de jogos pelos itens e anexa o que cada um precisa.
 
     A distribuição usa a posição na lista JÁ FILTRADA (as entradas sem imagem
-    saíram antes), que é o que garante o 30/30/30/30/30 num bloco de 150.
+    saíram antes), que é o que garante o 15/15/45/45/15/15 num bloco de 150.
 
     Um item que não dá para montar — frase de um caractere só, sem tradução com
-    pontuação parecida, sem pinyin para alguma palavra — é REBAIXADO para o
-    jogo 1 em vez de sumir. Devolve a contagem por jogo (índice 0 = jogo 1).
+    pontuação parecida, sem pinyin para alguma palavra, sem palavra a mascarar —
+    é REBAIXADO para o jogo 1 em vez de sumir. Devolve
+    ``(contagem por jogo, rebaixadas)``, com o índice 0 = jogo 1.
     """
-    counts = [0] * 5
-    ciclo = deps.games
+    counts = [0] * N_JOGOS
+    rebaixadas = 0
+    ciclo = deps.cycle()
     ultimas = []          # onde a certa do jogo 4 caiu nas duas últimas vezes
     for i, item in enumerate(items):
         game = ciclo[i % len(ciclo)]
+        pedido = game     # o jogo que o ciclo mandou, antes de qualquer recuo
         # Semente pelo nome do arquivo: reempacotar a mesma coleção devolve
         # exatamente o mesmo bundle, o que torna diffs e bugs reproduzíveis.
         rng = random.Random(item["source"])
@@ -223,15 +263,29 @@ def assign_games(items: list, deps: Deps) -> list:
                 # Nenhum caractere decompõe: seriam todos botões inteiros, o
                 # jogo viraria o 3 — só que com a imagem que mostra a resposta.
                 game = 1
+        elif game == 6:
+            # A palavra sai dos pares da PRÓPRIA legenda, não do léxico: o
+            # léxico tem pinyin e tradução para 我 também, e esconderia 我 em vez
+            # de 失去. Sem par utilizável a frase cai no jogo 1 — é o caso de
+            # 10,5% delas no warehouse.
+            feito = deps.masks.mask(sentence) if deps.masks else None
+            if feito:
+                # Só a máscara viaja: a página não mostra pista nenhuma e
+                # confere o que foi digitado contra `sentence`.
+                item["masked"] = feito[0]
+            else:
+                game = 1
 
+        if game != pedido:
+            rebaixadas += 1
         item["game"] = game
         counts[game - 1] += 1
-    return counts
+    return counts, rebaixadas
 
 
 def write_bundle(chunk: list, folder: Path, out: Path, template: str,
                  quality: int, keep_png: bool, deps: Deps) -> tuple:
-    """Grava um bundle. Devolve (n_imagens, bytes, faltando, contagem_por_jogo)."""
+    """Grava um bundle. Devolve (n_imagens, bytes, faltando, jogos, rebaixadas)."""
     items = []
     faltando = []
     for i, e in enumerate(chunk, 1):
@@ -251,11 +305,11 @@ def write_bundle(chunk: list, folder: Path, out: Path, template: str,
         })
 
     if not items:
-        return (0, 0, faltando, [0] * 5)
+        return (0, 0, faltando, [0] * N_JOGOS, 0)
 
     # Os jogos são atribuídos ANTES de codificar: cada jogo embute uma imagem
     # diferente, e codificar tudo para depois escolher desperdiçaria o base64.
-    counts = assign_games(items, deps)
+    counts, rebaixadas = assign_games(items, deps)
 
     for item in items:
         variante = item.pop("_src").get(item["game"])
@@ -266,6 +320,7 @@ def write_bundle(chunk: list, folder: Path, out: Path, template: str,
             counts[item["game"] - 1] -= 1
             item["game"] = 1
             counts[0] += 1
+            rebaixadas += 1
             caminho = folder / item["source"]
         item["img"] = encode_image(caminho, quality, keep_png)
         # Serviu para montar as opções do jogo 4 e não tem leitor na página: o
@@ -280,7 +335,7 @@ def write_bundle(chunk: list, folder: Path, out: Path, template: str,
     before, _, rest = template.partition(MARKER)
     _, _, after = rest.partition("-->")
     out.write_text(before + injected + after, encoding="utf-8")
-    return (len(items), out.stat().st_size, faltando, counts)
+    return (len(items), out.stat().st_size, faltando, counts, rebaixadas)
 
 
 def build(folder: Path, out_dir: Path, per_file: int, quality: int,
@@ -332,6 +387,9 @@ def build(folder: Path, out_dir: Path, per_file: int, quality: int,
         if deps.lex:
             print(f"   léxico: {len(deps.lex)} palavras"
                   + (f", traduções: {len(deps.bank)}" if deps.bank else "")
+                  + (f", máscaras: {len(deps.masks)} frases"
+                     f" ({len(deps.masks.mastered)} dominadas fora)"
+                     if deps.masks else "")
                   + (f", decomposições: {sum(1 for v in deps.comps.values() if v)}"
                      f"/{len(deps.comps)} caracteres" if deps.comps else ""))
         for nota in deps.notas:
@@ -340,8 +398,8 @@ def build(folder: Path, out_dir: Path, per_file: int, quality: int,
     escritos, total_bytes, faltando_geral = 0, 0, []
     for n, chunk in enumerate(chunks, 1):
         out = out_dir / f"{folder.name}_ditado_{n:0{width}d}.html"
-        n_img, size, faltando, jogos = write_bundle(chunk, folder, out, template,
-                                                    quality, keep_png, deps)
+        n_img, size, faltando, jogos, rebaixadas = write_bundle(
+            chunk, folder, out, template, quality, keep_png, deps)
         faltando_geral += faltando
         if not n_img:
             print(f"   [{n}/{len(chunks)}] {out.name}: nenhuma imagem encontrada — pulado")
@@ -352,11 +410,11 @@ def build(folder: Path, out_dir: Path, per_file: int, quality: int,
         flag = "  ⚠️  grande" if mb > WARN_MB else ""
         print(f"   [{n}/{len(chunks)}] {out.name}  {n_img} imagens, {mb:.1f} MB{flag}")
         if not no_games:
-            # Rebaixadas = as que iriam para outro jogo, não deram, e por isso
-            # engordaram o jogo 1 acima da fatia que lhe cabia no rodízio.
-            por_jogo = -(-n_img // len(deps.games))
-            rebaixadas = jogos[0] - (por_jogo if 1 in deps.games else 0)
-            extra = f", {rebaixadas} rebaixada(s)" if rebaixadas > 0 else ""
+            # Rebaixadas = as que o ciclo mandou para outro jogo, não deram, e
+            # por isso engordaram o jogo 1. Contadas uma a uma no assign_games,
+            # e não estimadas a partir da fatia: com o ciclo pesado as fatias
+            # não são iguais.
+            extra = f", {rebaixadas} rebaixada(s)" if rebaixadas else ""
             print("        jogos " + "/".join(str(x) for x in jogos) + extra)
 
     if faltando_geral:

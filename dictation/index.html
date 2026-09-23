@@ -94,8 +94,8 @@
   #answer[readonly] { border-color: var(--line); }
   #answer.ok, .opt.ok { border-color: var(--accent); background: #1e1a2e; }
   /* Feedback de erro: animação CSS pura, o compositor cuida — nada de JS por frame.
-     Uma regra só para os dois casos: no jogo 1 quem erra é o campo, nos jogos 2
-     e 3 é o botão tocado — e errar tem de ser a mesma coisa nos três. */
+     Uma regra só para os dois casos: nos jogos 1 e 6 quem erra é o campo, nos de
+     montar é o botão tocado — e errar tem de ser a mesma coisa em todos. */
   #answer.bad, .opt.bad {
     border-color: var(--bad); background: #2a1719;
     animation: shake .28s ease-in-out;
@@ -219,7 +219,7 @@
     menu: document.getElementById("menu")
   };
 
-  var items = [];      // [{index, source, sentence, done, game, words|chars, opts}]
+  var items = [];      // [{index, source, sentence, done, game, words|chars|masked, opts}]
   var at = 0;          // posição atual NO ARRAY (não é o campo index)
   var storeKey = "";   // chave de progresso, isolada por coleção
 
@@ -334,10 +334,19 @@
     setTimeout(function () { node.classList.remove(cls); }, 900);
   }
 
-  // ── Grids dos jogos 2 a 5 ───────────────────────────────────────────────
+  // ── Grids dos jogos 2 a 5, e os jogos de teclado ────────────────────────
   // As funções abaixo são a única coisa que separa os jogos de montar: o 2
   // trabalha em palavras rotuladas por pinyin, o 3 em caracteres, e o 5 é o 3
   // com outro rótulo. O 4 é de clique único e não passa por elas.
+
+  // Os jogos de TECLADO: o 1 digita a frase do zero, o 6 completa a palavra que
+  // veio como `*`. Os dois usam o campo em vez do grid, guardam rascunho e
+  // validam no Enter — daí o predicado, em vez de `=== 1 || === 6` em seis
+  // lugares.
+  function digita(cur) {
+    return !cur || cur.game === 1 || cur.game === 6;
+  }
+
   function pieces(cur) {
     return cur.game === 2 ? cur.words.length : cur.sentence.length;
   }
@@ -372,10 +381,12 @@
     el.grid.textContent = "";
     el.grid.style.maxHeight = "";
     el.tip.classList.add("hide");
-    if (!cur || cur.game === 1) {
+    if (digita(cur)) {
       el.grid.classList.add("hide");
       el.answer.readOnly = false;
-      el.answer.placeholder = "Digite a frase";
+      // O jogo 6 já abre com a frase mascarada no campo: placeholder ali seria
+      // texto que ninguém chega a ver.
+      el.answer.placeholder = (cur && cur.game === 6) ? "" : "Digite a frase";
       return;
     }
     // readonly nos jogos de montar: o teclado do Android subiria por cima do
@@ -446,11 +457,11 @@
   // Girar o aparelho muda tudo que fitGrid mediu.
   window.addEventListener("resize", fitGrid);
 
-  // Guarda o que está no campo ANTES de trocar de frase. Só o jogo 1 precisa:
-  // nos outros o campo é reconstruído a partir de `step`.
+  // Guarda o que está no campo ANTES de trocar de frase. Só os jogos de teclado
+  // precisam: nos de montar o campo é reconstruído a partir de `step`.
   function stashDraft() {
     var cur = items[at];
-    if (cur && cur.game === 1) cur.draft = el.answer.value;
+    if (cur && digita(cur)) cur.draft = el.answer.value;
   }
 
   // Repõe o campo com o que pertence à frase atual — e só com isso. O campo é
@@ -471,6 +482,20 @@
       // e é o que faz o teclado subir sozinho depois do avanço automático.
       el.answer.focus();
       el.answer.select();
+      return;
+    }
+    if (cur.game === 6) {
+      // O campo abre com a frase e o buraco: é ele que mostra o mandarim, já
+      // que a imagem deste jogo só tem a tradução.
+      el.answer.value = cur.draft || cur.masked;
+      el.answer.focus();
+      // Com a máscara ainda intacta, deixar o `*` SELECIONADO faz a primeira
+      // tecla substituí-lo — senão, no celular, seria preciso mirar o cursor no
+      // meio da frase e apagar à mão. Mexeu, o cursor vai para o fim: refazer a
+      // seleção por cima do que a pessoa digitou apagaria o trabalho dela.
+      var buraco = el.answer.value === cur.masked ? cur.masked.indexOf("*") : -1;
+      if (buraco >= 0) el.answer.setSelectionRange(buraco, buraco + 1);
+      else el.answer.setSelectionRange(el.answer.value.length, el.answer.value.length);
       return;
     }
     el.answer.value = cur.game === 2
@@ -511,7 +536,7 @@
 
   function pick(i, btn) {
     var cur = items[at];
-    if (!cur || cur.game === 1) return;
+    if (digita(cur)) return;                 // sem grid: a jogada é o teclado
 
     // Jogo 4: um toque resolve a frase, então não há `step` nem botão que some.
     if (cur.game === 4) {
@@ -626,7 +651,7 @@
   function submit() {
     var cur = items[at];
     if (!cur) return;
-    if (cur.game !== 1) return;              // nos jogos de montar não há o que enviar
+    if (!digita(cur)) return;                // nos jogos de montar não há o que enviar
     // Comparação literal, como pedido: nada de trim nem normalização.
     if (el.answer.value === cur.sentence) {
       if (!cur.done) { cur.done = true; saveProgress(); }
@@ -724,9 +749,9 @@
         step: 0,          // pedaços já colocados nesta frase
         used: [],         // índices de opts já gastos
         marked: [],       // jogo 5: componentes verdes do caractere em curso
-        draft: ""         // o que foi digitado aqui (só jogo 1)
+        draft: ""         // o que foi digitado aqui (jogos 1 e 6)
       };
-      // Os jogos 2 a 5 dependem de dados que só o make_bundle monta. Sem eles
+      // Os jogos 2 a 6 dependem de dados que só o make_bundle monta. Sem eles
       // — index.json antigo, servido por pasta — o item cai no jogo 1, que é o
       // que a página sempre soube fazer.
       if (e.game === 2 && e.opts && e.opts.length && e.words && e.words.length) {
@@ -744,6 +769,9 @@
         it.game = 5;
         it.needs = e.needs;      // por caractere, os componentes que ele pede
         it.comps = e.comps;      // os botões, já embaralhados
+      } else if (e.game === 6 && typeof e.masked === "string" && e.masked) {
+        it.game = 6;
+        it.masked = e.masked;    // a frase com a palavra trocada por "*"
       }
       out.push(it);
     }

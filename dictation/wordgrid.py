@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Léxico, segmentação e distratores para os jogos 2 e 3 do ditado.
+"""Léxico, segmentação e distratores para os jogos 2, 3 e 6 do ditado.
 
 O jogo 2 precisa da frase INTEIRA quebrada em palavras com pinyin — um botão
 por palavra, mais dois botões errados por palavra. A coluna 4 do ``*_base.txt``
@@ -17,6 +17,11 @@ prática 99,8% das frases fecham com pinyin em todos os tokens.
 
 Distratores variam nas LETRAS, nunca só no acento: se a certa é ``jiǎn zhí``,
 ``jiān zhí`` está proibido — vale ``jiān chí``, ``miǎn zhí``. Ver ``distractors``.
+
+O jogo 6 usa a MESMA coluna 4 que não serve ao jogo 2, e pelo mesmo motivo: ela
+lista só as palavras que a legenda ensina. Onde o jogo 2 precisa da frase toda,
+o 6 precisa de uma palavra só — e quer justamente a que vale a pena esconder.
+Ver ``Masks``.
 """
 
 import random
@@ -38,7 +43,7 @@ import word_vocab  # noqa: E402
 # Regex local, e não `video_screenshoter_r36s.parse_pinyin_translations`, porque
 # importar aquele módulo arrastaria cv2 + PIL para dentro de dictation/ — que o
 # README promete manter sem dependência de runtime.
-_PAIR_RE = re.compile(r'"([^"\s(]+)\s*\(([^)]+)\)')
+_PAIR_RE = re.compile(r'"([^"\s(]+)\s*\(([^)]+)\):\s*([^"]*)"')
 
 _CJK_ONLY_RE = re.compile(r"[^一-鿿㐀-䶿豈-﫿]")
 
@@ -54,27 +59,38 @@ def warehouse_dir(warehouse: Path = None) -> Path:
     return warehouse
 
 
-def iter_base_rows(warehouse: Path = None):
+def iter_base_rows(warehouse: Path = None, include_periods: bool = False):
     """Percorre todos os ``*_base.txt``, devolvendo ``(asset, colunas)``.
 
     Uma linha só é devolvida se tiver as 6 colunas do contrato
     (``index begin end zht pares pt``). Mora aqui, e não em cada consumidor,
-    porque o ditado já tem dois módulos lendo os mesmos 209 arquivos — o
-    léxico dos jogos 2/5 e o banco de traduções do jogo 4.
+    porque o ditado já tem três módulos lendo os mesmos 209 arquivos — o
+    léxico dos jogos 2/5, o banco de traduções do jogo 4 e as máscaras do 6.
+
+    ``include_periods`` acrescenta os ``*_periods.txt``, que têm o mesmo
+    formato de 6 colunas e os seus próprios pares. Uma coleção pode ter sido
+    construída a partir deles (ver ``collection_builder.active_base_for``), e
+    28 mil frases só existem lá. Fica desligado por padrão porque ao léxico e
+    ao banco de traduções essas linhas quase só repetem o que o base já tem —
+    quem precisa da frase EXATA da coleção é a ``Masks``.
     """
     warehouse = warehouse_dir(warehouse)
     if not warehouse.is_dir():
         return
-    for base in sorted(warehouse.glob("*_base.txt")):
-        asset = base.stem[:-len("_base")] if base.stem.endswith("_base") else base.stem
-        try:
-            text = base.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for line in text.splitlines():
-            cols = line.split("\t")
-            if len(cols) > PT_COL:
-                yield asset, cols
+    padroes = ["*_base.txt"] + (["*_periods.txt"] if include_periods else [])
+    for padrao in padroes:
+        sufixo = padrao[1:-len(".txt")]        # "_base" / "_periods"
+        for base in sorted(warehouse.glob(padrao)):
+            asset = (base.stem[:-len(sufixo)]
+                     if base.stem.endswith(sufixo) else base.stem)
+            try:
+                text = base.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            for line in text.splitlines():
+                cols = line.split("\t")
+                if len(cols) > PT_COL:
+                    yield asset, cols
 
 # ── Pinyin ──────────────────────────────────────────────────────────────────
 # Os quatro tons combinantes. O trema do "ü" (U+0308) NÃO entra aqui: ele faz
@@ -237,8 +253,15 @@ def clean_chinese_only(text: str) -> str:
 
 
 def parse_pairs(cell: str) -> list:
-    """Coluna 4 do base → lista de ``(palavra, pinyin)``."""
-    return [(w, p.strip()) for w, p in _PAIR_RE.findall(cell or "")]
+    """Coluna 4 do base → lista de ``(palavra, pinyin, tradução)``.
+
+    Exigir o ``): …"`` inteiro, e não só o ``(pinyin)``, é o que descarta as
+    ~460 entradas malformadas do warehouse: pontuação catalogada como palavra
+    (``"？ (?: ponto de interrogação)"``, onde o ``?`` vinha como o termo),
+    parêntese que não fecha (``"起來 (qǐ lái: indica início de ação)"``) e
+    anotação no meio do nome (``"出  (repetição) (chū): sair"``).
+    """
+    return [(w, p.strip(), t.strip()) for w, p, t in _PAIR_RE.findall(cell or "")]
 
 
 # ── Léxico ──────────────────────────────────────────────────────────────────
@@ -305,7 +328,7 @@ class Lexicon:
         """``palavra -> pinyin mais frequente`` agregando todos os ``*_base.txt``."""
         tally = {}
         for _asset, cols in iter_base_rows(warehouse):
-            for word, pinyin in parse_pairs(cols[PAIRS_COL]):
+            for word, pinyin, _tr in parse_pairs(cols[PAIRS_COL]):
                 word = clean_chinese_only(word)   # já garante a chave CJK
                 if not word or not is_clean_pinyin(pinyin):
                     continue
@@ -444,3 +467,105 @@ def char_game(sentence: str, rng: random.Random):
                 break
             rng.shuffle(chars)
     return chars
+
+
+# ── Jogo 6 ──────────────────────────────────────────────────────────────────
+MASK = "*"
+
+
+class Masks:
+    """``frase limpa -> palavra a ocultar``, agregando todos os bases.
+
+    No jogo 6 a imagem mostra só a tradução e o campo traz a frase em mandarim
+    com uma palavra trocada por ``*``. Qual palavra não sai do léxico dos jogos
+    2/3/5, e sim dos pares da PRÓPRIA legenda: o léxico tem pinyin e tradução
+    para ``我`` também, então ele esconderia ``我`` em vez de ``失去``. A coluna 4
+    lista só o que aquela legenda se propôs a ensinar, que é exatamente o
+    critério de "palavra que vale a pena esconder".
+
+    A chave é ``clean_chinese_only(zht)``, que é o que o ``collection_builder``
+    grava em ``sentence`` no ``index.json`` — então a busca é por igualdade, sem
+    depender do nome do arquivo nem do número da linha (que um base regravado
+    ou uma coleção de períodos deslocariam).
+
+    As palavras DOMINADAS ficam de fora. O base preserva pinyin e tradução de
+    tudo, inclusive do que já se sabe — em ``因為她失去了兒子`` os cinco pares
+    estão lá, e sem o filtro o escolhido seria ``因為``, que é a primeira e é
+    dominada. Esconder uma palavra que já se sabe não ensina nada: quem importa
+    ali é ``失去``, a única que ainda tem o que ensinar. É o mesmo critério do
+    ``word_vocab.count_learnable``.
+
+    O preço são 8 pontos de cobertura (89,5% → 81,5%), quase todos em frases
+    onde TODA palavra ensinada já é dominada — e essas não tinham mesmo o que
+    perguntar. O outro preço é a word-api: com ela fora do ar o filtro não
+    aplica nada e volta-se a esconder palavra sabida. Falha aberta, como o resto
+    do repo, mas o ``make_bundle`` avisa em vez de deixar passar calado.
+    """
+
+    def __init__(self, choices: dict, mastered: frozenset = frozenset()):
+        self.choices = choices
+        # Quantas dominadas o filtro chegou a conhecer. Zero, com a word-api no
+        # ar e alguma palavra marcada, significa que ela não respondeu.
+        self.mastered = mastered
+
+    def __bool__(self) -> bool:
+        return bool(self.choices)
+
+    def __len__(self) -> int:
+        return len(self.choices)
+
+    @classmethod
+    def load(cls, warehouse: Path = None, mastered: frozenset = None) -> "Masks":
+        """Varre ``*_base.txt`` e ``*_periods.txt`` escolhendo uma palavra por frase.
+
+        ``mastered`` default é ``word_vocab.mastered_words()``; passar um
+        conjunto explícito serve para testar sem depender da API.
+        """
+        if mastered is None:
+            mastered = word_vocab.mastered_words()
+        tally = {}
+        for _asset, cols in iter_base_rows(warehouse, include_periods=True):
+            sentence = clean_chinese_only(cols[ZHT_COL])
+            if len(sentence) < 2:
+                continue                      # um caractere só: nada a esconder
+            best = None
+            for word, pinyin, translation in parse_pairs(cols[PAIRS_COL]):
+                if not (pinyin and translation):
+                    continue
+                # Dominada não ensina nada escondida: em 因為她失去了兒子 os
+                # cinco pares valem, mas quatro já se sabem e só 失去 pergunta
+                # alguma coisa.
+                if word in mastered:
+                    continue
+                at = sentence.find(word)
+                # A palavra do tamanho da frase deixaria o campo com um ``*`` só,
+                # e produzir a frase inteira sem nenhum mandarim na tela é mais
+                # duro que qualquer outro jogo. Fora tokens que a limpeza do
+                # `sentence` comeu (pontuação, latim): não há o que mascarar.
+                if at < 0 or len(word) >= len(sentence):
+                    continue
+                if best is None or at < best[0]:
+                    best = (at, word)
+            if best:
+                counts = tally.setdefault(sentence, {})
+                counts[best[1]] = counts.get(best[1], 0) + 1
+
+        # 0,5% das frases aparecem em duas linhas com escolhas diferentes. A mais
+        # frequente vence, como no `_scan_warehouse`: a varredura é ordenada, e
+        # com isso reempacotar a mesma coleção devolve o mesmo bundle.
+        return cls({s: max(c.items(), key=lambda kv: kv[1])[0] for s, c in tally.items()},
+                   mastered)
+
+    def mask(self, sentence: str):
+        """``("我不想*你，我愛你。", "失去")`` ou ``None`` se a frase não servir.
+
+        Um ``*`` só para a palavra inteira, mesmo com 2+ caracteres: o número de
+        asteriscos entregaria o tamanho da resposta.
+        """
+        word = self.choices.get(sentence)
+        if not word:
+            return None
+        at = sentence.find(word)
+        if at < 0:
+            return None
+        return sentence[:at] + MASK + sentence[at + len(word):], word

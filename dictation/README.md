@@ -4,8 +4,8 @@ Página estática para treinar as frases de uma coleção, no Chrome do celular.
 largura total e, embaixo, um campo com a frase em chinês; acertando, o item é marcado como feito e
 o carrossel avança.
 
-São **cinco jogos**, que se alternam a cada frase — 1, 2, 3, 4, 5, 1… — então um bloco de 150 sai
-30 de cada:
+São **seis jogos**, que giram num **ciclo de 10 posições** — 1, 2, 3, 3, 3, 4, 4, 4, 6, 5 — então
+um bloco de 150 sai 15 ciclos redondos: **15/15/45/45/15/15**.
 
 | Jogo | Imagem | Grid | Como se joga |
 |---|---|---|---|
@@ -14,6 +14,10 @@ São **cinco jogos**, que se alternam a cada frase — 1, 2, 3, 4, 5, 1… — e
 | 3 | **só a tradução** | **caracteres** embaralhados | Tocar os caracteres na ordem |
 | 4 | **só o mandarim** | 5 **traduções** | Escolher a tradução certa |
 | 5 | completa | a **decomposição** de cada caractere | Tocar as decomposições na ordem |
+| 6 | **só a tradução** | — | Digitar a palavra que virou `*` e confirmar com Enter |
+
+Não é um jogo por posição porque **o 3 e o 4 valem o triplo**: montar por caractere e escolher a
+tradução são os dois que mais exigem ler o chinês, e é neles que vale gastar as frases.
 
 A imagem muda de jogo para jogo porque a legenda queimada **mostra a resposta**: sem escondê-la, o
 jogo 3 seria copiar o que está na tela em vez de recordar. Cada jogo vê só a metade que não é a
@@ -25,10 +29,14 @@ vermelho e não escreve nada — o campo é sempre um começo correto da frase, 
 precisa haver) como desfazer. O jogo 4 é o único de clique único: acertou, escreve a tradução no
 campo e avança.
 
+Os de **teclado** são o 1 e o 6: campo editável, rascunho guardado e Enter para validar. O 6 abre
+com a frase já no campo e o `*` selecionado, então a primeira tecla o substitui — no celular seria
+ruim ter de mirar o cursor no meio da frase.
+
 A página em si continua independente do resto do repo: sem build, sem dependência de runtime, é um
 `index.html`. Tudo que os jogos precisam — segmentação em palavras, pinyin, distratores, traduções
-erradas, decomposições, embaralhamento — é calculado pelo `make_bundle.py` e viaja embutido no
-arquivo, porque no celular não há rede nem servidor para consultar. Ver `wordgrid.py`,
+erradas, decomposições, máscaras, embaralhamento — é calculado pelo `make_bundle.py` e viaja
+embutido no arquivo, porque no celular não há rede nem servidor para consultar. Ver `wordgrid.py`,
 `translations.py` e `hanzi_decomp.py`.
 
 Continua sendo **uma imagem por frase**, a que aquele jogo usa: o bundle não fica maior.
@@ -76,13 +84,13 @@ O mesmo `index.html` atende aos dois modos: se houver dados embutidos ele os usa
 
 ## As três imagens por frase
 
-Os jogos 3 e 4 precisam de imagens que escondem metade da legenda. Elas são gravadas pelo **salvar
-coleção**, marcando "Gerar variantes de imagem", em subpastas da própria coleção:
+Os jogos 3, 4 e 6 precisam de imagens que escondem metade da legenda. Elas são gravadas pelo
+**salvar coleção**, marcando "Gerar variantes de imagem", em subpastas da própria coleção:
 
 ```
 warehouse/collections/<coleção>/
   001_amor81_line0120.png              completa   → jogos 1, 2 e 5
-  so_traducao/001_amor81_line0120.png  só a tradução → jogo 3
+  so_traducao/001_amor81_line0120.png  só a tradução → jogos 3 e 6
   so_mandarim/001_amor81_line0120.png  só o mandarim → jogo 4
 ```
 
@@ -127,14 +135,15 @@ guarda entradas onde o campo pinyin traz a tradução (`暗示` → `suggest`), 
 valida a estrutura de cada sílaba antes de aceitar uma entrada, e nesses casos a versão do
 warehouse é quem prevalece.
 
-O jogo 4 varre a coluna portuguesa dos mesmos bases (~141 mil traduções, ~1s). O jogo 5 consulta a
+O jogo 4 varre a coluna portuguesa dos mesmos bases (~141 mil traduções, ~1s) e o jogo 6 varre a
+coluna 4 dos mesmos arquivos mais os `*_periods.txt` (~170 mil frases, ~1s). O jogo 5 consulta a
 **hanzi-api**, que não tem busca em lote — é um `GET` por caractere, e cada um incrementa o
 contador `calls` daquele caractere no servidor. Por isso o resultado fica em
 `dictation/.hanzi_cache.json`: um caractere é consultado uma vez na vida e reempacotar não toca
 mais na API. Apagar o arquivo força a reconsulta, o que vale a pena de vez em quando — o
 enriquecimento é assíncrono, e um caractere sem decomposição hoje pode ter daqui a um mês.
 
-Se a hanzi-api estiver fora do ar e o cache vazio, o jogo 5 sai do rodízio (sem decomposição ele
+Se a hanzi-api estiver fora do ar e o cache vazio, o jogo 5 sai do ciclo (sem decomposição ele
 seria o jogo 3 com a imagem que mostra a resposta). Nada disso quebra o empacotamento.
 
 Reempacotar a mesma coleção dá **exatamente o mesmo arquivo**: o embaralhamento é semeado pelo nome
@@ -147,16 +156,19 @@ A numeração dos nomes é fixada pelo total de blocos, não pelo recorte — re
 
 Quem escolhe o jogo de cada frase é o `make_bundle.py`, pela posição dela no bloco. Uma frase que
 não dá para montar — um caractere só, um caractere que o léxico não conhece, uma tradução sem
-concorrentes de pontuação parecida — **cai para o jogo 1** em vez de sumir; a saída do script conta
-quantas foram (`jogos 32/30/30/28/30, 2 rebaixada(s)`).
+concorrentes de pontuação parecida, nenhuma palavra ensinada para esconder — **cai para o jogo 1**
+em vez de sumir; a saída do script conta quantas foram
+(`jogos 17/15/45/44/15/14, 2 rebaixada(s)`).
 
-**O rodízio é só sobre os jogos que a coleção suporta.** Uma coleção salva sem as variantes de
-imagem não tem como jogar 3 nem 4; alternar 1..5 assim mandaria 60% das frases para o jogo 1.
-Nesse caso o rodízio vira `1, 2, 5` e o script diz o motivo:
+**O ciclo é só sobre os jogos que a coleção suporta.** Uma coleção salva sem as variantes de
+imagem não tem como jogar 3, 4 nem 6; manter o ciclo inteiro assim mandaria 70% das frases para o
+jogo 1. As posições dos jogos que faltam são **removidas**, e não substituídas — assim o que sobra
+mantém as proporções entre si. O script diz o motivo:
 
 ```
-   jogos disponíveis: 1/2/5
+   ciclo: 1|2|4|4|4|5
    ⚠️  sem so_traducao/: o jogo 3 sai de cena
+   ⚠️  sem so_traducao/: o jogo 6 sai de cena
 ```
 
 **Jogo 2 — montar por pinyin.** Cada palavra da frase vira um botão com o seu pinyin, e ganha mais
@@ -220,18 +232,83 @@ jogo 1 — seriam todos botões inteiros, viraria o jogo 3 com a imagem que most
 
 O grid fica com ~17 botões na mediana e 25 no p90, no mesmo corpo de letra do jogo 3.
 
+**Jogo 6 — completar a palavra.** A imagem mostra só a tradução, e o campo abre com a frase em
+mandarim e um buraco no lugar da primeira palavra que a legenda ensina:
+
+```
+imagem: só "NÃO QUERO TE PERDER, EU TE AMO."
+campo:  我不想*你我愛你
+digita: 失去          →  我不想失去你我愛你   ✓
+```
+
+**Um `*` só**, mesmo quando a palavra tem dois ou três caracteres: o número de asteriscos entregaria
+o tamanho da resposta. E **nenhuma pista** — nem o pinyin nem a tradução da palavra escondida. O que
+se tem é a frase portuguesa na imagem e o resto do mandarim no campo.
+
+A palavra sai dos pares da **própria legenda** (a coluna 4 do base, `失去 (shī qù): perder`), não do
+léxico dos jogos 2/3/5. É a diferença entre esconder `失去` e esconder `我`: o léxico tem pinyin e
+tradução para `我` também, enquanto a coluna 4 lista só o que aquela legenda se propôs a ensinar.
+Entre os pares vale o **primeiro na ordem da frase**, não na ordem da lista.
+
+**As dominadas ficam de fora.** O base preserva pinyin e tradução de tudo, inclusive do que você já
+sabe, então "ter os dois campos" não basta:
+
+```
+因為她失去了兒子          ["因為 (yīn wèi): porque", "她 (tā): ela",
+PORQUE ELA PERDEU O FILHO. "失去 (shī qù): perdeu", "了 (le): partícula",
+                           "兒子 (ér zi): filho"]
+
+  因為, 她, 了, 兒子  já dominadas  →  esconder qualquer uma não pergunta nada
+  失去               ainda ensina  →  因為她*了兒子
+```
+
+Sem o filtro sairia `*她失去了兒子`, que é escolher a primeira da lista em vez da única que
+importa. O critério é o mesmo do `word_vocab.count_learnable`: tem pinyin, tem tradução e **não
+está dominada**.
+
+A busca é pela frase, e não pelo nome do arquivo: a chave do mapa é a frase limpa, que é o que o
+`index.json` guarda em `sentence`. Assim uma coleção montada a partir dos `*_periods.txt` (ver
+`collection_builder.active_base_for`) acha os seus pares do mesmo jeito, e um base regravado não
+desloca nada. As 0,5% de frases que aparecem em duas linhas com escolhas diferentes ficam com a
+mais frequente, para o empacotamento continuar determinístico.
+
+Varrendo bases e períodos, **81,5% das frases jogam o 6**. As outras caem para o jogo 1:
+
+| | | |
+|---|---|---|
+| 3,3% | menos de dois caracteres | não há frase em volta do buraco |
+| 3,8% | nenhum par com pinyin *e* tradução na frase | a legenda não ensinou nada ali |
+| 8,6% | **todas as palavras ensinadas já dominadas** | não sobrou o que perguntar |
+| 2,7% | a palavra é a frase inteira | sobraria só um `*`, e produzir a frase toda sem nenhum mandarim na tela é mais duro que qualquer outro jogo |
+
+Os 8,6% são o preço do filtro de maestria — a cobertura sem ele seria 89,5%. São frases que não
+tinham mesmo o que perguntar, então o jogo 1 é o destino honesto delas.
+
+**A maestria é a única coisa do jogo 6 que não sai do disco.** Com a word-api fora do ar,
+`mastered_words()` devolve conjunto vazio, o filtro não corta nada e o jogo volta a esconder palavra
+sabida. Falha aberta, como o resto do repo — mas o empacotamento avisa, em vez de deixar passar
+calado:
+
+```
+   ⚠️  word-api sem palavras dominadas: o jogo 6 pode esconder palavra que você já sabe
+```
+
 ## Controles
 
 - **Swipe** para navegar; os botões `‹` `›` fazem o mesmo. Todas as imagens ficam acessíveis, mesmo
   as já feitas.
 - A página abre na **primeira imagem ainda não feita**.
-- No jogo 1, **Enter** (ou a tecla "OK" do teclado) valida o que você digitou. A comparação é
-  **literal**: um espaço a mais reprova. Nos outros jogos o Enter não faz nada — não há o que enviar.
-- Errando, fica vermelho e treme: o campo no jogo 1, o botão tocado nos demais.
-- Sair de uma frase pela metade e voltar **não perde o caminho andado** — nem o que você digitou no
-  jogo 1, nem os botões já tocados nos jogos 2, 3 e 5, nem os componentes verdes de um caractere
-  que ficou pela metade. O campo é um só na página, mas o conteúdo é de cada frase: chegando a uma
-  frase do jogo 1 ele vem vazio e já com o cursor dentro.
+- Nos jogos 1 e 6, **Enter** (ou a tecla "OK" do teclado) valida o que está no campo. A comparação é
+  **literal** e contra a frase inteira, nos dois: um espaço a mais reprova, e no jogo 6 o que se
+  envia é a frase já com o buraco preenchido, não a palavra sozinha. Nos jogos de montar o Enter não
+  faz nada — não há o que enviar.
+- Errando, fica vermelho e treme: o campo nos jogos 1 e 6, o botão tocado nos demais.
+- Sair de uma frase pela metade e voltar **não perde o caminho andado** — nem o que você digitou nos
+  jogos 1 e 6, nem os botões já tocados nos jogos 2, 3 e 5, nem os componentes verdes de um
+  caractere que ficou pela metade. Voltando ao jogo 6 com a máscara ainda intacta, o `*` continua
+  selecionado; se você já tinha mexido, o cursor vai para o fim para não apagar o que foi digitado.
+  O campo é um só na página, mas o conteúdo é de cada frase: chegando a uma
+  frase do jogo 1 ele vem vazio e já com o cursor dentro, e a uma do jogo 6, com a frase mascarada.
 - No menu **⋮**, **Exportar index.json** baixa o índice com os `done` atualizados. O arquivo sai no
   formato de sempre (`index`, `source`, `sentence`, `done`) — os dados dos jogos não vão junto,
   porque são remontados a cada empacotamento.

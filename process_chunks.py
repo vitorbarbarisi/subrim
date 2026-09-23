@@ -366,6 +366,10 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
     if rate > 0:
         print(f"⏸️  Modo COM PAUSAS ativo: {rate:.2f}s por caractere")
 
+    # Estilo da faixa atrás da legenda (independente do modo com pausas).
+    if os.environ.get("BURN_BOX_OPAQUE") == "1":
+        print("🎨 Fundo OPACO ativo: a faixa apaga o vídeo atrás da legenda")
+
     pending = [e for e in entries if not (source_dir / e["processed"]).exists()]
     done_already = len(entries) - len(pending)
     print(f"📊 Total de chunks: {len(entries)}")
@@ -870,7 +874,11 @@ def wrap_portuguese_to_chinese_width(portuguese_text: str, font_path: str, max_w
 
 def create_subtitle_background_filter(subtitle_area_height: int, subtitle_width: int, video_width: int, video_height: int, bottom_margin: int, time_condition: str = None) -> str:
     """
-    Create a semi-transparent black background filter for the subtitle area.
+    Create a black background filter for the subtitle area.
+
+    Por padrão o fundo é semitransparente (50%), deixando o vídeo aparecer por
+    baixo. Com BURN_BOX_OPAQUE=1 ele fica totalmente opaco, apagando o que está
+    atrás para a legenda ficar 100% legível.
 
     Args:
         subtitle_area_height: Height of the subtitle area in pixels
@@ -891,8 +899,11 @@ def create_subtitle_background_filter(subtitle_area_height: int, subtitle_width:
     bg_x = (video_width - bg_width) // 2
     bg_y = video_height - subtitle_area_height - bottom_margin
 
-    # Create semi-transparent black background with 50% opacity
-    background_filter = f"drawbox=x={bg_x}:y={bg_y}:width={bg_width}:height={bg_height}:color=black@0.5:t=fill"
+    # Fundo opaco (BURN_BOX_OPAQUE=1) apaga o que está atrás; padrão é 50%.
+    # Lido aqui dentro, e não no import, porque a queima roda em workers do
+    # ProcessPoolExecutor (spawn no macOS reimporta o módulo).
+    alpha = "1.0" if os.environ.get("BURN_BOX_OPAQUE") == "1" else "0.5"
+    background_filter = f"drawbox=x={bg_x}:y={bg_y}:width={bg_width}:height={bg_height}:color=black@{alpha}:t=fill"
 
     # Add time condition if provided
     if time_condition:

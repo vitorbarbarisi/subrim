@@ -588,10 +588,18 @@ class App(tk.Tk):
         t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         t.bind("<<TreeviewSelect>>", self._on_asset_select)
+        # Menu de contexto. No Tk do Aqua o botão direito chega como Button-2
+        # (Button-3 é o do meio) — o inverso de X11/Windows — e Control+clique é
+        # o clique secundário histórico do macOS. Os três são gestos de menu.
+        for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+            t.bind(seq, self._assets_context_menu)
 
         for phase, (_, color) in PHASES.items():
             t.tag_configure(phase, foreground=color)
         self._tree = t
+
+        self._assets_menu = tk.Menu(self, tearoff=0)
+        self._assets_menu.add_command(label="Transcrever...", command=self._transcrever_selected)
 
         # Right: detail panel
         detail = ttk.Frame(pw, padding=12)
@@ -607,6 +615,8 @@ class App(tk.Tk):
         ttk.Separator(detail, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=8)
         ttk.Label(detail, text="Pipeline", font=("", 10, "bold")).pack(anchor=tk.W)
 
+        ttk.Label(detail, text="Modo", foreground="#888").pack(anchor=tk.W)
+
         # Opção "queimar com pausas" (default: sem pausas)
         self._burn_pause_on = tk.BooleanVar(value=False)
         self._burn_pause_rate = tk.StringVar(value="0.3")
@@ -618,6 +628,15 @@ class App(tk.Tk):
                                            width=6, state=tk.DISABLED)
         self._burn_pause_entry.pack(side=tk.LEFT, padx=(6, 2))
         ttk.Label(prow, text="s/caractere", foreground="#888").pack(side=tk.LEFT)
+
+        ttk.Label(detail, text="Estilo", foreground="#888").pack(anchor=tk.W,
+                                                                 pady=(6, 0))
+
+        # Fundo opaco atrás da legenda: vale com ou sem pausas, e também no batch.
+        self._burn_box_opaque_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(detail, text="Queimar com fundo opaco",
+                        variable=self._burn_box_opaque_on).pack(anchor=tk.W,
+                                                                pady=(2, 2))
 
         self._run_btn = ttk.Button(detail, text="▶  Iniciar / Retomar",
                                    command=self._run_selected, state=tk.DISABLED)
@@ -2798,6 +2817,53 @@ class App(tk.Tk):
         if self._selected:
             subprocess.Popen(["open", str(self._selected["path"])])
 
+    def _assets_context_menu(self, event):
+        """Menu flutuante com 'Transcrever...' no botão direito (ou Control+clique)."""
+        row = self._tree.identify_row(event.y)
+        if not row:
+            return "break"   # cabeçalho ou área vazia: não abre menu
+        if row not in self._tree.selection():
+            self._tree.selection_set(row)
+        self._tree.focus(row)
+        self._selected = detect_status(ASSETS / row)
+        self._update_detail(self._selected)
+
+        # Recursivo (ao contrário de has_video): pastas como a do youtube_monitor
+        # guardam os mp4 uma subpasta abaixo (uma por canal), não soltos aqui.
+        has_any_mp4 = next(self._selected["path"].rglob("*.mp4"), None) is not None
+        self._assets_menu.entryconfigure(
+            0, state=tk.NORMAL if has_any_mp4 else tk.DISABLED)
+        try:
+            self._assets_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._assets_menu.grab_release()
+        return "break"
+
+    def _whisper_python(self) -> Path:
+        return REPO / "whisper_env_py313" / "bin" / "python3"
+
+    def _transcrever_selected(self):
+        if not self._selected:
+            return
+        name = self._selected["name"]
+        py = self._whisper_python()
+        if not py.exists():
+            messagebox.showerror(
+                "Ambiente Whisper ausente",
+                f"Não encontrei {py}.\nVeja README_TRANSCRIBE.md para criar o venv.")
+            return
+        if not messagebox.askyesno(
+                "Transcrever",
+                f"Transcrever vídeo(s) de '{name}' para .zht.srt?\n\n"
+                "Se houver mais de um .mp4 na pasta, cada um será movido para uma "
+                "pasta própria (nome = nome do vídeo) antes de transcrever."):
+            return
+        self._launch(
+            [str(py), str(REPO / "transcribe_asset.py"), name],
+            label=f"Transcrever: {name}",
+            on_done=self._refresh_assets,
+        )
+
     # ── Source / download logic ────────────────────────────────────────────────
     def _refresh_sources(self):
         self._src_tree.delete(*self._src_tree.get_children())
@@ -2895,6 +2961,8 @@ class App(tk.Tk):
             pause_rate = self._pause_rate_value()
 
         debug_ds = self._ds_debug_on.get()
+        # Estilo da queima: vale para todo launch, inclusive o batch.
+        box_opaque = self._burn_box_opaque_on.get()
 
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -2902,6 +2970,10 @@ class App(tk.Tk):
                 env["BURN_PAUSE_RATE"] = f"{pause_rate}"
             else:
                 env.pop("BURN_PAUSE_RATE", None)
+            if box_opaque:
+                env["BURN_BOX_OPAQUE"] = "1"
+            else:
+                env.pop("BURN_BOX_OPAQUE", None)
             if debug_ds:
                 env["DEEPSEEK_DEBUG"] = "1"
             else:
