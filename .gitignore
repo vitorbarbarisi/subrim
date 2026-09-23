@@ -41,5 +41,11 @@ warehouse/screenshots/
 # Archive files
 *.zip
 
+# YouTube channel monitor: cookies são credencial, sem regra *.txt existente
+cookies.txt
+youtube_monitor.lock
+logs/
+!youtube_channels.example.json
+
 # Log de depuração das chamadas à DeepSeek (grande, e regenerado a cada execução)
 deepseek_debug.log

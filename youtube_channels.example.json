@@ -1,0 +1,16 @@
+{
+  "defaults": {
+    "lookback_hours": 2,
+    "cookies_file": "cookies.txt",
+    "max_candidates_per_channel": 20,
+    "yt_dlp_path": "yt-dlp",
+    "min_free_disk_gb": 2
+  },
+  "channels": [
+    {
+      "name": "canal_exemplo",
+      "url": "https://www.youtube.com/@canalexemplo/videos",
+      "enabled": true
+    }
+  ]
+}
