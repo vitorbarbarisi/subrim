@@ -367,7 +367,9 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
         print(f"⏸️  Modo COM PAUSAS ativo: {rate:.2f}s por caractere")
 
     # Estilo da faixa atrás da legenda (independente do modo com pausas).
-    if os.environ.get("BURN_BOX_OPAQUE") == "1":
+    if os.environ.get("BURN_BOX_OPAQUE") == "0":
+        print("🎨 Fundo semitransparente (50%): o vídeo aparece atrás da legenda")
+    else:
         print("🎨 Fundo OPACO ativo: a faixa apaga o vídeo atrás da legenda")
 
     pending = [e for e in entries if not (source_dir / e["processed"]).exists()]
@@ -876,9 +878,9 @@ def create_subtitle_background_filter(subtitle_area_height: int, subtitle_width:
     """
     Create a black background filter for the subtitle area.
 
-    Por padrão o fundo é semitransparente (50%), deixando o vídeo aparecer por
-    baixo. Com BURN_BOX_OPAQUE=1 ele fica totalmente opaco, apagando o que está
-    atrás para a legenda ficar 100% legível.
+    Por padrão o fundo é totalmente opaco, apagando o que está atrás para a
+    legenda ficar 100% legível. Com BURN_BOX_OPAQUE=0 ele volta a ser
+    semitransparente (50%), deixando o vídeo aparecer por baixo.
 
     Args:
         subtitle_area_height: Height of the subtitle area in pixels
@@ -899,10 +901,10 @@ def create_subtitle_background_filter(subtitle_area_height: int, subtitle_width:
     bg_x = (video_width - bg_width) // 2
     bg_y = video_height - subtitle_area_height - bottom_margin
 
-    # Fundo opaco (BURN_BOX_OPAQUE=1) apaga o que está atrás; padrão é 50%.
+    # Padrão é opaco (apaga o que está atrás); BURN_BOX_OPAQUE=0 volta a 50%.
     # Lido aqui dentro, e não no import, porque a queima roda em workers do
     # ProcessPoolExecutor (spawn no macOS reimporta o módulo).
-    alpha = "1.0" if os.environ.get("BURN_BOX_OPAQUE") == "1" else "0.5"
+    alpha = "0.5" if os.environ.get("BURN_BOX_OPAQUE") == "0" else "1.0"
     background_filter = f"drawbox=x={bg_x}:y={bg_y}:width={bg_width}:height={bg_height}:color=black@{alpha}:t=fill"
 
     # Add time condition if provided

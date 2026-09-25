@@ -636,7 +636,7 @@ class App(tk.Tk):
                                                                  pady=(6, 0))
 
         # Fundo opaco atrás da legenda: vale com ou sem pausas, e também no batch.
-        self._burn_box_opaque_on = tk.BooleanVar(value=False)
+        self._burn_box_opaque_on = tk.BooleanVar(value=True)
         ttk.Checkbutton(detail, text="Queimar com fundo opaco",
                         variable=self._burn_box_opaque_on).pack(anchor=tk.W,
                                                                 pady=(2, 2))
@@ -3006,10 +3006,8 @@ class App(tk.Tk):
                 env["BURN_PAUSE_RATE"] = f"{pause_rate}"
             else:
                 env.pop("BURN_PAUSE_RATE", None)
-            if box_opaque:
-                env["BURN_BOX_OPAQUE"] = "1"
-            else:
-                env.pop("BURN_BOX_OPAQUE", None)
+            # Sempre explícito: sem a variável o process_chunks assume opaco.
+            env["BURN_BOX_OPAQUE"] = "1" if box_opaque else "0"
             if debug_ds:
                 env["DEEPSEEK_DEBUG"] = "1"
             else:
