@@ -4,7 +4,8 @@
     "cookies_file": "cookies.txt",
     "max_candidates_per_channel": 20,
     "yt_dlp_path": "yt-dlp",
-    "min_free_disk_gb": 2
+    "min_free_disk_gb": 2,
+    "force_progressive": false
   },
   "channels": [
     {

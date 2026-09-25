@@ -71,6 +71,12 @@ def _parse_iso(s: Optional[str]) -> Optional[datetime]:
         return None
 
 
+def _error_summary(stderr: str) -> str:
+    """Linhas ERROR do yt-dlp; os WARNING (ex.: versão antiga) vêm antes e escondiam a causa."""
+    errors = [ln.strip() for ln in stderr.splitlines() if ln.startswith("ERROR")]
+    return " | ".join(dict.fromkeys(errors))[:500] or stderr.strip()[-300:] or "yt-dlp retornou erro sem detalhes"
+
+
 def _format_age(delta: timedelta) -> str:
     total_minutes = int(delta.total_seconds() // 60)
     hours, minutes = divmod(total_minutes, 60)
@@ -241,7 +247,7 @@ def list_channel_video_ids(yt_bin: str, channel_url: str, max_candidates: int) -
     except subprocess.TimeoutExpired:
         raise ChannelListError("timeout ao listar vídeos do canal")
     if result.returncode != 0:
-        raise ChannelListError(result.stderr.strip()[:500] or "yt-dlp retornou erro sem detalhes")
+        raise ChannelListError(_error_summary(result.stderr))
     try:
         data = json.loads(result.stdout)
     except json.JSONDecodeError as e:
@@ -262,7 +268,7 @@ def get_video_details(yt_bin: str, video_id: str, cookies_file: Path) -> Optiona
         print(f"   ⚠️  Timeout ao obter detalhes de {video_id}")
         return None
     if result.returncode != 0:
-        print(f"   ⚠️  Falha ao obter detalhes de {video_id}: {result.stderr.strip()[:300]}")
+        print(f"   ⚠️  Falha ao obter detalhes de {video_id}: {_error_summary(result.stderr)}")
         return None
     try:
         info = json.loads(result.stdout)
@@ -520,6 +526,10 @@ def main() -> int:
     parser.add_argument("--yt-dlp-path", help="Caminho do binário yt-dlp (padrão: procura no PATH)")
     parser.add_argument("--no-lock", action="store_true",
                         help="Pula o lock de execução única — uso manual apenas, nunca no cron")
+    parser.add_argument("--force-progressive", action="store_true",
+                        help="Ignora o ffmpeg e força o formato progressivo (qualidade menor, "
+                             "mas contorna o 403/SABR que o formato bestvideo+bestaudio pode dar "
+                             "em algumas redes/versões do yt-dlp)")
     parser.add_argument("-v", "--verbose", action="store_true", help="Log mais detalhado")
     args = parser.parse_args()
 
@@ -542,8 +552,11 @@ def main() -> int:
             print("❌ yt-dlp não encontrado. Instale com: pip install yt-dlp")
             return 1
 
-        has_ffmpeg = check_ffmpeg()
-        if not has_ffmpeg:
+        force_progressive = args.force_progressive or bool(cfg["defaults"].get("force_progressive"))
+        has_ffmpeg = check_ffmpeg() and not force_progressive
+        if force_progressive:
+            print("ℹ️  Formato progressivo forçado (--force-progressive/config) — ffmpeg ignorado.")
+        elif not has_ffmpeg:
             print("⚠️  ffmpeg não encontrado — downloads ficarão limitados a streams progressivos.")
             print("   Instale com: sudo apt install ffmpeg")
 
