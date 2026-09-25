@@ -404,7 +404,16 @@ class App(tk.Tk):
         self._proc = None
         self._proc_lock = threading.Lock()
         self._proc_on_done = None   # callback de encadeamento do _launch
+        # Fila de lote (Iniciar/Clean-up com vários assets): (cmd, label) em série.
+        self._queue: list = []
+        self._queue_total = 0
         self._selected = None
+        self._selected_many: list = []   # seleção múltipla na lista de Assets
+        # Ordenação da lista de Assets (clique no cabeçalho, como nas Coleções)
+        self._assets_sort_col = None
+        self._assets_sort_reverse = False
+        self._assets_headers = {"name": "Asset", "status": "Status",
+                                "progress": "Progresso", "duration": "Duração"}
 
         # DeepSeek debug viewer
         self._ds_debug_on = tk.BooleanVar(value=False)   # injeta DEEPSEEK_DEBUG=1
@@ -576,11 +585,12 @@ class App(tk.Tk):
         pw.add(list_f, weight=3)
 
         cols = ("name", "status", "progress", "duration")
-        t = ttk.Treeview(list_f, columns=cols, show="headings", selectmode="browse")
-        t.heading("name",     text="Asset",     anchor=tk.W)
-        t.heading("status",   text="Status",    anchor=tk.CENTER)
-        t.heading("progress", text="Progresso", anchor=tk.CENTER)
-        t.heading("duration", text="Duração",   anchor=tk.CENTER)
+        # extended: ⇧+clique seleciona intervalo, ⌘+clique alterna (Aqua).
+        t = ttk.Treeview(list_f, columns=cols, show="headings", selectmode="extended")
+        for c in cols:
+            t.heading(c, text=self._assets_headers[c],
+                      anchor=tk.W if c == "name" else tk.CENTER,
+                      command=lambda c=c: self._assets_sort(c))
         t.column("name",     width=230, anchor=tk.W,      stretch=True)
         t.column("status",   width=120, anchor=tk.CENTER, stretch=False)
         t.column("progress", width=90,  anchor=tk.CENTER, stretch=False)
@@ -591,6 +601,8 @@ class App(tk.Tk):
         t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
         t.bind("<<TreeviewSelect>>", self._on_asset_select)
+        t.bind("<Shift-Down>", lambda _: self._assets_extend_selection(1)  or "break")
+        t.bind("<Shift-Up>",   lambda _: self._assets_extend_selection(-1) or "break")
         # Menu de contexto. No Tk do Aqua o botão direito chega como Button-2
         # (Button-3 é o do meio) — o inverso de X11/Windows — e Control+clique é
         # o clique secundário histórico do macOS. Os três são gestos de menu.
@@ -2705,6 +2717,9 @@ class App(tk.Tk):
             assets = [a for a in assets if flt in a["name"].lower()]
         if inc:
             assets = [a for a in assets if a["phase"] != "complete"]
+        if self._assets_sort_col:
+            assets.sort(key=self._assets_sort_key(self._assets_sort_col),
+                        reverse=self._assets_sort_reverse)
 
         # Preserva seleção/foco/scroll para o refresh periódico não "deselecionar".
         prev_sel = set(self._tree.selection())
@@ -2752,9 +2767,44 @@ class App(tk.Tk):
         sel = self._tree.selection()
         if not sel:
             return
+        if len(sel) > 1:
+            self._selected = None
+            self._selected_many = [detect_status(ASSETS / n) for n in sel]
+            self._update_detail_multi(self._selected_many)
+            return
+        self._selected_many = []
         s = detect_status(ASSETS / sel[0])
         self._selected = s
         self._update_detail(s)
+
+    def _assets_extend_selection(self, direction: int):
+        """Estende a seleção com Shift+Seta (espelha o Warehouse e as Coleções)."""
+        focused = self._tree.focus()
+        if not focused:
+            return
+        nxt = self._tree.next(focused) if direction > 0 else self._tree.prev(focused)
+        if not nxt:
+            return
+        self._tree.selection_add(nxt)
+        self._tree.focus(nxt)
+        self._tree.see(nxt)
+
+    def _update_detail_multi(self, lst: list):
+        """Painel de detalhe para vários assets: lista + botões de lote."""
+        lines = [f"{len(lst)} assets selecionados"]
+        lines += [f"  • {a['name']}   {PHASES[a['phase']][0]}" for a in lst]
+        self._detail_text.set("\n".join(lines))
+
+        n_run = sum(1 for a in lst if a["has_video"])
+        n_up = sum(1 for a in lst if a.get("uploaded"))
+        self._run_btn.config(text=f"▶  Iniciar / Retomar ({n_run})",
+                             state=tk.NORMAL if n_run else tk.DISABLED)
+        self._cleanup_btn.config(text=f"🧹  Clean-up (arquivar) ({n_up})",
+                                 state=tk.NORMAL if n_up else tk.DISABLED)
+        self._force_btn.config(state=tk.DISABLED)
+        self._open_btn.config(state=tk.DISABLED)
+        for var in self._phase_marks.values():
+            var.set("")
 
     def _update_detail(self, s: dict):
         phase_lbl, _ = PHASES[s["phase"]]
@@ -2773,11 +2823,13 @@ class App(tk.Tk):
                 lines.append(f"Chunks:  {s['chunks_done']}/{s['chunks_total']} ({s['progress']}%)")
         self._detail_text.set("\n".join(lines))
 
-        self._run_btn.config(state=tk.NORMAL if s["has_video"] else tk.DISABLED)
+        self._run_btn.config(text="▶  Iniciar / Retomar",
+                             state=tk.NORMAL if s["has_video"] else tk.DISABLED)
         self._force_btn.config(state=tk.NORMAL if s.get("merged") else tk.DISABLED)
         self._open_btn.config(state=tk.NORMAL)
         # Clean-up só faz sentido após o upload ao Drive estar registrado.
-        self._cleanup_btn.config(state=tk.NORMAL if s.get("uploaded") else tk.DISABLED)
+        self._cleanup_btn.config(text="🧹  Clean-up (arquivar)",
+                                 state=tk.NORMAL if s.get("uploaded") else tk.DISABLED)
 
         p = s["phase"]
         n, tot = s["chunks_done"], s["chunks_total"]
@@ -2804,6 +2856,14 @@ class App(tk.Tk):
         )
 
     def _run_selected(self):
+        if self._selected_many:
+            names = [a["name"] for a in self._selected_many if a["has_video"]]
+            self._run_queue([
+                ([sys.executable, str(REPO / "video_burner.py"), n, "--exact"],
+                 f"Pipeline: {n}")
+                for n in names
+            ])
+            return
         if not self._selected:
             return
         self._launch(
@@ -2833,6 +2893,9 @@ class App(tk.Tk):
         )
 
     def _cleanup_selected(self):
+        if self._selected_many:
+            self._cleanup_many(self._selected_many)
+            return
         if not self._selected:
             return
         name = self._selected["name"]
@@ -2855,6 +2918,77 @@ class App(tk.Tk):
                 label=f"Clean-up: {name}",
             )
 
+    def _cleanup_many(self, lst: list):
+        """Clean-up em lote: uma confirmação só, depois um cleanup_asset por vez."""
+        ok = [a["name"] for a in lst if a.get("uploaded")]
+        skip = [a["name"] for a in lst if not a.get("uploaded")]
+        if not ok:
+            return
+        msg = (f"Arquivar {len(ok)} asset(s)?\n\n"
+               + "\n".join(f"  • {n}" for n in ok)
+               + "\n\nApós validar o upload no Drive, o vídeo merged de cada um é "
+               "copiado para assets/final/, o vídeo original e o base.txt vão para "
+               "o warehouse e as pastas do asset (e _sub) serão REMOVIDAS do disco. "
+               "Esta ação é irreversível.")
+        if skip:
+            msg += ("\n\nSerão PULADOS (sem upload registrado no Drive):\n"
+                    + "\n".join(f"  • {n}" for n in skip))
+        if messagebox.askyesno("Confirmar clean-up em lote", msg):
+            self._run_queue([
+                ([sys.executable, str(REPO / "cleanup_asset.py"), n], f"Clean-up: {n}")
+                for n in ok
+            ])
+
+    # ── Fila de lote ───────────────────────────────────────────────────────────
+    def _run_queue(self, items: list):
+        """Roda ``(cmd, label)`` em série, encadeados pelo ``on_done`` do _launch.
+
+        Cada asset é independente: a falha de um não interrompe os demais. O
+        "Parar" esvazia a fila (ver _stop)."""
+        if not items:
+            return
+        with self._proc_lock:
+            if self._proc and self._proc.poll() is None:
+                messagebox.showwarning("Processo em execução",
+                                       "Aguarde ou pare o processo atual antes de iniciar outro.")
+                return
+        self._queue = list(items)
+        self._queue_total = len(items)
+        self._launch_next()
+
+    def _launch_next(self):
+        if not self._queue:
+            if self._queue_total:
+                self._log_line(f"✅ Lote concluído: {self._queue_total} item(ns)", "success")
+            self._queue_total = 0
+            return
+        cmd, label = self._queue.pop(0)
+        i = self._queue_total - len(self._queue)
+        self._log_line(f"━━ Lote {i}/{self._queue_total}: {label} ━━", "cmd")
+        self._launch(cmd, label=f"{label} [{i}/{self._queue_total}]",
+                     on_done=self._launch_next)
+
+    # ── Ordenação da lista de Assets ───────────────────────────────────────────
+    def _assets_sort(self, col: str):
+        """Ordena a lista pela coluna clicada (toggle asc/desc), como nas Coleções."""
+        reverse = (self._assets_sort_col == col) and not self._assets_sort_reverse
+        self._assets_sort_col = col
+        self._assets_sort_reverse = reverse
+        arrow = " ▼" if reverse else " ▲"
+        for c, base in self._assets_headers.items():
+            self._tree.heading(c, text=base + (arrow if c == col else ""))
+        self._refresh_assets()
+
+    def _assets_sort_key(self, col: str):
+        phase_order = list(PHASES)
+        return {
+            "name":     lambda a: a["name"].lower(),
+            "status":   lambda a: phase_order.index(a["phase"]),
+            # "—" (vazio/aguardando) fica antes de 0% na ordem crescente
+            "progress": lambda a: -1 if a["phase"] in ("empty", "ready") else a["progress"],
+            "duration": lambda a: (self._duration_cache.get(a["name"]) or (0, 0, -1))[2],
+        }[col]
+
     def _open_folder(self):
         if self._selected:
             subprocess.Popen(["open", str(self._selected["path"])])
@@ -2864,9 +2998,11 @@ class App(tk.Tk):
         row = self._tree.identify_row(event.y)
         if not row:
             return "break"   # cabeçalho ou área vazia: não abre menu
-        if row not in self._tree.selection():
-            self._tree.selection_set(row)
+        # O menu age só sobre o item clicado: desfaz uma seleção múltipla, senão
+        # os botões de lote continuariam apontando para os outros itens.
+        self._tree.selection_set(row)
         self._tree.focus(row)
+        self._selected_many = []
         self._selected = detect_status(ASSETS / row)
         self._update_detail(self._selected)
 
@@ -3066,6 +3202,12 @@ class App(tk.Tk):
         self._refresh_sources()
 
     def _stop(self):
+        # Parar interrompe o lote inteiro, não só o item em execução.
+        if self._queue:
+            self._log_line(f"⏹  Lote cancelado: {len(self._queue)} item(ns) não iniciado(s)",
+                           "warning")
+        self._queue = []
+        self._queue_total = 0
         with self._proc_lock:
             if self._proc:
                 self._proc.terminate()
