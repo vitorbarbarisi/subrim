@@ -319,7 +319,7 @@ def list_assets() -> list:
     dirs = sorted(
         d for d in ASSETS.iterdir()
         if d.is_dir() and not d.name.endswith("_sub")
-        and d.name not in ("source", "text")
+        and d.name not in ("source", "text", "final")
     )
     return [detect_status(d) for d in dirs]
 
@@ -2845,8 +2845,9 @@ class App(tk.Tk):
         if messagebox.askyesno(
                 "Confirmar clean-up",
                 f"Arquivar '{name}'?\n\n"
-                "Após validar o upload no Drive, o vídeo original e o base.txt vão "
-                "para o warehouse e as pastas\n"
+                "Após validar o upload no Drive, o vídeo merged é copiado para "
+                "assets/final/, o vídeo original e o base.txt vão para o "
+                "warehouse e as pastas\n"
                 f"  • assets/{name}/\n  • assets/{name}_sub/\n"
                 "serão REMOVIDAS do disco. Esta ação é irreversível."):
             self._launch(

@@ -94,7 +94,10 @@ class VideoBurner:
 
         directories = []
         for item in self.assets_dir.iterdir():
-            if item.is_dir() and item.name.startswith(prefix) and not item.name.endswith("_sub"):
+            # final/source/text são pastas de apoio em assets/, não assets.
+            if (item.is_dir() and item.name.startswith(prefix)
+                    and not item.name.endswith("_sub")
+                    and item.name not in ("final", "source", "text")):
                 directories.append(item)
 
         directories.sort(key=lambda x: x.name)

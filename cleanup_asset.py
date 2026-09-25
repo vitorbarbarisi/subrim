@@ -8,12 +8,14 @@ já finalizado (merge + upload ao Drive concluídos) ele:
   1. Verifica se o upload para o Google Drive ocorreu DE VERDADE (consulta a API
      usando o file_id gravado no marcador <asset>_drive.json). Se o arquivo não
      existir/estiver na lixeira, interrompe com erro e NADA mais é feito.
-  2. Renomeia o arquivo base (ex.: 'capítulo ... _secs_base.txt') para o padrão
+  2. Copia o vídeo merged (o produto final queimado) para assets/final/<asset>.mp4,
+     conferindo o tamanho. Se falhar, interrompe antes de mover ou apagar algo.
+  3. Renomeia o arquivo base (ex.: 'capítulo ... _secs_base.txt') para o padrão
      do asset: '<asset>_base.txt' (ex.: clone40_base.txt).
-  3. Envia o vídeo original (<asset>.mp4) e o arquivo base para o warehouse/.
-  4. Verifica se o envio foi feito corretamente (existência + tamanho). Se sim,
+  4. Envia o vídeo original (<asset>.mp4) e o arquivo base para o warehouse/.
+  5. Verifica se o envio foi feito corretamente (existência + tamanho). Se sim,
      remove DEFINITIVAMENTE as pastas assets/<asset>/ e assets/<asset>_sub/.
-  5. Gera o <asset>_periods.txt ao lado do base — o mesmo conteúdo reagrupado
+  6. Gera o <asset>_periods.txt ao lado do base — o mesmo conteúdo reagrupado
      por períodos completos, que é de onde saem os frames no arquivamento
      (ver periods_base.py). O base não é alterado.
 
@@ -36,6 +38,15 @@ import json
 REPO = Path(__file__).resolve().parent
 ASSETS = REPO / "assets"
 WAREHOUSE = REPO / "warehouse"
+# Cópia local do vídeo final (merged) de cada asset arquivado.
+FINAL = ASSETS / "final"
+
+
+def find_merged(asset: str, asset_dir: Path, sub_dir: Path) -> Path | None:
+    """Vídeo merged do asset: no _sub (preferindo o chromecast) ou na pasta do asset."""
+    return (next(iter(sub_dir.glob(f"{asset}_chromecast_merged.mp4")), None)
+            or next(iter(sub_dir.glob("*_merged.mp4")), None)
+            or next(iter(asset_dir.glob("*_merged.mp4")), None))
 
 
 # ─── Etapa 1: validar upload no Drive ───────────────────────────────────────────
@@ -109,8 +120,7 @@ def verify_drive_upload(asset: str, sub_dir: Path) -> bool:
           f"({drive_size / 1e9:.2f} GB, id={drive_info.get('id')})")
 
     # Confronto opcional com o arquivo merged local, se ainda existir.
-    merged = next(iter(sub_dir.glob(f"{asset}_chromecast_merged.mp4")), None) \
-        or next(iter(sub_dir.glob("*_merged.mp4")), None)
+    merged = find_merged(asset, sub_dir.parent / asset, sub_dir)
     if merged and drive_size:
         local_size = merged.stat().st_size
         if local_size != drive_size:
@@ -122,10 +132,52 @@ def verify_drive_upload(asset: str, sub_dir: Path) -> bool:
     return True
 
 
-# ─── Etapa 2: renomear o arquivo base ───────────────────────────────────────────
+# ─── Etapa 2: copiar o vídeo final para assets/final ────────────────────────────
+def copy_merged_to_final(asset: str, asset_dir: Path, sub_dir: Path) -> bool:
+    """Copia o merged para ``assets/final/<asset>.mp4`` e confere o tamanho.
+
+    Roda antes de qualquer coisa ser movida ou apagada: se falhar, o clean-up
+    para com o asset intacto. Um destino já presente com o mesmo tamanho conta
+    como feito (retomada de um clean-up que falhou mais adiante).
+    """
+    print("\n📋 ETAPA 2: Cópia do vídeo final para assets/final")
+
+    merged = find_merged(asset, asset_dir, sub_dir)
+    if merged is None:
+        print("❌ Vídeo merged não encontrado. Abortando — nada será removido.")
+        return False
+
+    size = merged.stat().st_size
+    dest = FINAL / f"{asset}.mp4"
+    if dest.exists():
+        if dest.stat().st_size == size:
+            print(f"✅ Já existe em assets/final/{dest.name} com o mesmo tamanho.")
+            return True
+        print(f"❌ Já existe assets/final/{dest.name} com tamanho diferente. "
+              "Abortando para não sobrescrever.")
+        return False
+
+    FINAL.mkdir(parents=True, exist_ok=True)
+    print(f"📦 Copiando: {merged.name}  →  assets/final/{dest.name} "
+          f"({size / 1e9:.2f} GB)")
+    try:
+        shutil.copy2(merged, dest)
+    except OSError as e:
+        print(f"❌ Falha ao copiar: {e}. Abortando — nada será removido.")
+        return False
+
+    if not dest.exists() or dest.stat().st_size != size:
+        print(f"❌ Verificação falhou para assets/final/{dest.name} "
+              "(ausente ou tamanho divergente). Abortando — nada será removido.")
+        return False
+    print("✅ Cópia confirmada (existência + tamanho conferem).")
+    return True
+
+
+# ─── Etapa 3: renomear o arquivo base ───────────────────────────────────────────
 def rename_base_file(asset: str, asset_dir: Path) -> Path | None:
     """Renomeia o '*_base.txt' do asset para '<asset>_base.txt'. Retorna o novo caminho."""
-    print("\n📋 ETAPA 2: Renomear o arquivo base")
+    print("\n📋 ETAPA 3: Renomear o arquivo base")
 
     target = asset_dir / f"{asset}_base.txt"
     if target.exists():
@@ -148,7 +200,7 @@ def rename_base_file(asset: str, asset_dir: Path) -> Path | None:
     return target
 
 
-# ─── Etapa 3: localizar o vídeo original ─────────────────────────────────────────
+# ─── Localizar o vídeo original ─────────────────────────────────────────────────
 def find_original_video(asset: str, asset_dir: Path) -> Path | None:
     """Retorna o vídeo original do asset (preferindo '<asset>.mp4')."""
     preferred = asset_dir / f"{asset}.mp4"
@@ -166,10 +218,10 @@ def find_original_video(asset: str, asset_dir: Path) -> Path | None:
     return None
 
 
-# ─── Etapas 3+4: enviar ao warehouse e remover as pastas ─────────────────────────
+# ─── Etapas 4+5: enviar ao warehouse e remover as pastas ─────────────────────────
 def send_to_warehouse_and_cleanup(asset: str, asset_dir: Path, sub_dir: Path,
                                   video: Path, base: Path) -> bool:
-    print("\n📋 ETAPA 3: Envio para o warehouse")
+    print("\n📋 ETAPA 4: Envio para o warehouse")
     WAREHOUSE.mkdir(parents=True, exist_ok=True)
 
     dest_video = WAREHOUSE / f"{asset}.mp4"
@@ -189,7 +241,7 @@ def send_to_warehouse_and_cleanup(asset: str, asset_dir: Path, sub_dir: Path,
     print(f"📦 Movendo base:   {base.name}  →  warehouse/{dest_base.name}")
     shutil.move(str(base), str(dest_base))
 
-    print("\n📋 ETAPA 4: Verificação do envio e limpeza")
+    print("\n📋 ETAPA 5: Verificação do envio e limpeza")
     ok = True
     if not dest_video.exists() or dest_video.stat().st_size != video_size:
         print(f"❌ Verificação falhou para {dest_video.name} (ausente ou tamanho divergente).")
@@ -216,11 +268,12 @@ def send_to_warehouse_and_cleanup(asset: str, asset_dir: Path, sub_dir: Path,
     print(f"\n🎉 Clean-up de '{asset}' concluído com sucesso!")
     print(f"   • warehouse/{dest_video.name}")
     print(f"   • warehouse/{dest_base.name}")
+    print(f"   • assets/final/{asset}.mp4")
     print("   • pastas do asset removidas do disco.")
     return True
 
 
-# ─── Etapa 5: arquivo de períodos ───────────────────────────────────────────────
+# ─── Etapa 6: arquivo de períodos ───────────────────────────────────────────────
 def _generate_periods(base_in_warehouse: Path) -> None:
     """Gera o ``<asset>_periods.txt`` ao lado do base recém-enviado.
 
@@ -228,7 +281,7 @@ def _generate_periods(base_in_warehouse: Path) -> None:
     arquivamento sabe gerar o arquivo sozinho se ele faltar. Falhar aqui não
     pode desfazer nada.
     """
-    print("\n📋 ETAPA 5: Arquivo de períodos")
+    print("\n📋 ETAPA 6: Arquivo de períodos")
     try:
         import periods_base
 
@@ -277,7 +330,11 @@ Exemplo:
     if not verify_drive_upload(asset, sub_dir):
         return 1
 
-    # Etapa 2 — renomear base.
+    # Etapa 2 — cópia do merged para assets/final (bloqueante).
+    if not copy_merged_to_final(asset, asset_dir, sub_dir):
+        return 1
+
+    # Etapa 3 — renomear base.
     base = rename_base_file(asset, asset_dir)
     if base is None:
         return 1
@@ -287,7 +344,7 @@ Exemplo:
     if video is None:
         return 1
 
-    # Etapas 3 + 4 — enviar ao warehouse e (se confirmado) remover as pastas.
+    # Etapas 4 + 5 — enviar ao warehouse e (se confirmado) remover as pastas.
     if not send_to_warehouse_and_cleanup(asset, asset_dir, sub_dir, video, base):
         return 1
 
