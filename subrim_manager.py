@@ -450,6 +450,9 @@ class App(tk.Tk):
         # Expected chunk-total cache: asset_name -> (base_mtime, total)
         self._chunk_total_cache: dict = {}
         self._total_fill_running = False
+        # Duração do vídeo: asset_name -> (video_path, mtime, seconds)
+        self._duration_cache: dict = {}
+        self._duration_fill_running = False
         # Total de chunks lido ao vivo dos logs do pipeline: asset_name -> total
         self._live_chunk_total: dict = {}
         self._log_current_asset = None
@@ -572,16 +575,16 @@ class App(tk.Tk):
         list_f = ttk.Frame(pw)
         pw.add(list_f, weight=3)
 
-        cols = ("name", "status", "progress", "chunks")
+        cols = ("name", "status", "progress", "duration")
         t = ttk.Treeview(list_f, columns=cols, show="headings", selectmode="browse")
         t.heading("name",     text="Asset",     anchor=tk.W)
         t.heading("status",   text="Status",    anchor=tk.CENTER)
         t.heading("progress", text="Progresso", anchor=tk.CENTER)
-        t.heading("chunks",   text="Chunks",    anchor=tk.CENTER)
+        t.heading("duration", text="Duração",   anchor=tk.CENTER)
         t.column("name",     width=230, anchor=tk.W,      stretch=True)
         t.column("status",   width=120, anchor=tk.CENTER, stretch=False)
         t.column("progress", width=90,  anchor=tk.CENTER, stretch=False)
-        t.column("chunks",   width=120, anchor=tk.CENTER, stretch=False)
+        t.column("duration", width=90,  anchor=tk.CENTER, stretch=False)
 
         vsb = ttk.Scrollbar(list_f, orient=tk.VERTICAL, command=t.yview)
         t.configure(yscrollcommand=vsb.set)
@@ -2576,6 +2579,21 @@ class App(tk.Tk):
         except Exception:
             return 0.0
 
+    @staticmethod
+    def _source_video(asset_path: Path):
+        """Vídeo de referência do asset: o chromecast do ``_sub`` se existir,
+        senão o mp4 original. Retorna ``None`` se não houver vídeo."""
+        sub = asset_path.parent / f"{asset_path.name}_sub"
+        if sub.exists():
+            cc = sorted(sub.glob("*_chromecast.mp4"))
+            if cc:
+                return cc[0]
+        for cand in sorted(asset_path.glob("*.mp4")):
+            if not any(s in cand.name for s in
+                       ("_chromecast", "_merged", "_processed", "_chunk")):
+                return cand
+        return None
+
     def _compute_chunk_total(self, asset_path: Path):
         """Calcula quantos chunks o split vai gerar (total previsto) para o asset.
 
@@ -2587,18 +2605,7 @@ class App(tk.Tk):
             return None
         base = bases[0]
 
-        sub = asset_path.parent / f"{asset_path.name}_sub"
-        video = None
-        if sub.exists():
-            cc = sorted(sub.glob("*_chromecast.mp4"))
-            if cc:
-                video = cc[0]
-        if video is None:
-            for cand in sorted(asset_path.glob("*.mp4")):
-                if not any(s in cand.name for s in
-                           ("_chromecast", "_merged", "_processed", "_chunk")):
-                    video = cand
-                    break
+        video = self._source_video(asset_path)
         if video is None:
             return None
 
@@ -2643,6 +2650,47 @@ class App(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _maybe_fill_durations(self, assets: list):
+        """Preenche o cache de durações em background (um ffprobe por vídeo)."""
+        pending = []
+        for a in assets:
+            if not a["has_video"]:
+                continue
+            video = self._source_video(a["path"])
+            if video is None:
+                continue
+            try:
+                mtime = video.stat().st_mtime
+            except OSError:
+                continue
+            cached = self._duration_cache.get(a["name"])
+            if cached is None or cached[0] != video or cached[1] != mtime:
+                pending.append((a["name"], video, mtime))
+
+        if not pending or self._duration_fill_running:
+            return
+        self._duration_fill_running = True
+
+        def worker():
+            try:
+                for name, video, mtime in pending:
+                    secs = self._video_duration(video)
+                    self._duration_cache[name] = (video, mtime, secs)
+            finally:
+                self._duration_fill_running = False
+                self.after(0, self._refresh_assets)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _format_duration(self, name: str) -> str:
+        """Coluna Duração: ``M:SS`` ou ``H:MM:SS``; ``—`` se ainda desconhecida."""
+        cached = self._duration_cache.get(name)
+        if not cached or cached[2] <= 0:
+            return "—"
+        h, rem = divmod(int(round(cached[2])), 3600)
+        m, s = divmod(rem, 60)
+        return f"{h}:{m:02d}:{s:02d}" if h else f"{m}:{s:02d}"
+
     def _refresh_assets(self, *_):
         flt = self._filter_var.get().strip().lower()
         inc = self._only_inc.get()
@@ -2666,9 +2714,9 @@ class App(tk.Tk):
         for a in assets:
             lbl, _ = PHASES[a["phase"]]
             prog   = f"{a['progress']}%" if a["phase"] not in ("empty", "ready") else "—"
-            chunks = self._format_chunks(a)
+            dur    = self._format_duration(a["name"])
             self._tree.insert("", tk.END, iid=a["name"],
-                              values=(a["name"], lbl, prog, chunks), tags=(a["phase"],))
+                              values=(a["name"], lbl, prog, dur), tags=(a["phase"],))
             names.add(a["name"])
 
         # Restaura o estado se os itens ainda existirem após o refresh.
@@ -2685,19 +2733,7 @@ class App(tk.Tk):
         self._count_var.set(f"{complete}/{total} completos")
 
         self._maybe_fill_totals(assets)
-
-    def _format_chunks(self, a: dict) -> str:
-        """Coluna Chunks: indicador binário (✓ ou ○) pois processamento é paralelo.
-
-        Como chunks agora queimam em paralelo, não há progresso granular a mostrar.
-        Indicador simples: ✓ se todos processados, ○ se não.
-        """
-        if a["phase"] in ("empty", "ready") or not a["has_base"]:
-            return "—"
-        done, generated = a["chunks_done"], a["chunks_total"]
-        if generated > 0 and done == generated:
-            return "✓"
-        return "○"
+        self._maybe_fill_durations(assets)
 
     def _chunk_total_for(self, name: str):
         """Total previsto de chunks: prioriza o valor lido ao vivo dos logs."""
