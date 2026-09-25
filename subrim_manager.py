@@ -644,6 +644,12 @@ class App(tk.Tk):
         self._burn_pause_entry.pack(side=tk.LEFT, padx=(6, 2))
         ttk.Label(prow, text="s/caractere", foreground="#888").pack(side=tk.LEFT)
 
+        # Extrai o áudio do vídeo original (<asset>.mp3); o clean-up o leva para
+        # assets/final/. Vale também no batch.
+        self._extract_audio_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(detail, text="Extrair audio no assets/final",
+                        variable=self._extract_audio_on).pack(anchor=tk.W, pady=(2, 2))
+
         ttk.Label(detail, text="Estilo", foreground="#888").pack(anchor=tk.W,
                                                                  pady=(6, 0))
 
@@ -2908,8 +2914,8 @@ class App(tk.Tk):
         if messagebox.askyesno(
                 "Confirmar clean-up",
                 f"Arquivar '{name}'?\n\n"
-                "Após validar o upload no Drive, o vídeo merged é copiado para "
-                "assets/final/, o vídeo original e o base.txt vão para o "
+                "Após validar o upload no Drive, o vídeo merged (e o áudio .mp3, "
+                "se houver) é copiado para assets/final/, o vídeo original e o base.txt vão para o "
                 "warehouse e as pastas\n"
                 f"  • assets/{name}/\n  • assets/{name}_sub/\n"
                 "serão REMOVIDAS do disco. Esta ação é irreversível."):
@@ -2926,8 +2932,8 @@ class App(tk.Tk):
             return
         msg = (f"Arquivar {len(ok)} asset(s)?\n\n"
                + "\n".join(f"  • {n}" for n in ok)
-               + "\n\nApós validar o upload no Drive, o vídeo merged de cada um é "
-               "copiado para assets/final/, o vídeo original e o base.txt vão para "
+               + "\n\nApós validar o upload no Drive, o vídeo merged de cada um "
+               "(e o áudio .mp3, se houver) é copiado para assets/final/, o vídeo original e o base.txt vão para "
                "o warehouse e as pastas do asset (e _sub) serão REMOVIDAS do disco. "
                "Esta ação é irreversível.")
         if skip:
@@ -3142,6 +3148,7 @@ class App(tk.Tk):
         # Estilo da queima: vale para todo launch, inclusive o batch.
         box_opaque = self._burn_box_opaque_on.get()
         top_translation = self._burn_top_translation_on.get()
+        extract_audio = self._extract_audio_on.get()
 
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -3152,6 +3159,7 @@ class App(tk.Tk):
             # Sempre explícito: sem a variável o process_chunks assume opaco.
             env["BURN_BOX_OPAQUE"] = "1" if box_opaque else "0"
             env["BURN_TOP_TRANSLATION"] = "1" if top_translation else "0"
+            env["EXTRACT_AUDIO"] = "1" if extract_audio else "0"
             if debug_ds:
                 env["DEEPSEEK_DEBUG"] = "1"
             else:

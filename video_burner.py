@@ -117,7 +117,48 @@ class VideoBurner:
                 return True
         
         return False
-    
+
+    def extract_audio(self, directory: Path) -> bool:
+        """Extrai o áudio do vídeo original para ``<asset>/<asset>.mp3``.
+
+        Opção "Extrair audio no assets/final" (EXTRACT_AUDIO=1): o clean-up leva
+        esse mp3 para assets/final/ junto do merged. Idempotente, e uma falha só
+        avisa — o áudio é um extra, não motivo para parar o pipeline.
+        """
+        name = directory.name
+        out = directory / f"{name}.mp3"
+        if out.exists() and out.stat().st_size > 0:
+            self.log(f"Áudio já extraído: {out.name}")
+            return True
+
+        video = directory / f"{name}.mp4"
+        if not video.exists():
+            cands = [m for m in sorted(directory.glob("*.mp4"))
+                     if not any(s in m.name for s in
+                                ("_chromecast", "_merged", "_processed", "_chunk"))]
+            video = cands[0] if len(cands) == 1 else None
+        if video is None:
+            self.log(f"Extrair áudio: vídeo original de {name} não encontrado "
+                     f"(ou ambíguo) — pulando", "WARNING")
+            return False
+
+        # Grava num .part e renomeia no fim: uma interrupção não deixa um mp3
+        # truncado que pareça pronto (e seria pulado pela checagem acima).
+        tmp = out.with_name(out.name + ".part")
+        self.log(f"Extraindo áudio: {video.name} → {out.name}")
+        r = subprocess.run(
+            ["ffmpeg", "-i", str(video), "-vn", "-c:a", "libmp3lame", "-q:a", "2",
+             "-f", "mp3", "-y", str(tmp)],
+            capture_output=True, text=True,
+        )
+        if r.returncode != 0 or not tmp.exists() or tmp.stat().st_size == 0:
+            tmp.unlink(missing_ok=True)
+            self.log(f"Falha ao extrair o áudio de {name}: {r.stderr[-300:]}", "WARNING")
+            return False
+        tmp.rename(out)
+        self.log(f"✓ Áudio extraído: {out.name} ({out.stat().st_size / 1e6:.1f} MB)")
+        return True
+
     def run_script(self, script: str, directory: str, args: List[str] = None) -> bool:
         """Run a Python script with the given directory and arguments"""
         if args is None:
@@ -212,7 +253,11 @@ class VideoBurner:
         """Process a single directory through the complete pipeline"""
         dir_name = directory.name
         self.log(f"Processando diretório: {dir_name}")
-        
+
+        # Antes da retomada: assim um asset já processado também ganha o mp3.
+        if os.environ.get("EXTRACT_AUDIO") == "1":
+            self.extract_audio(directory)
+
         # Retomada: se o merge já existe, NÃO pular o diretório. O envio ao Drive
         # é etapa obrigatória — verifica se o upload foi feito e, se não, retenta.
         if not force and self.is_processed(directory):

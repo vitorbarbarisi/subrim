@@ -8,8 +8,9 @@ já finalizado (merge + upload ao Drive concluídos) ele:
   1. Verifica se o upload para o Google Drive ocorreu DE VERDADE (consulta a API
      usando o file_id gravado no marcador <asset>_drive.json). Se o arquivo não
      existir/estiver na lixeira, interrompe com erro e NADA mais é feito.
-  2. Copia o vídeo merged (o produto final queimado) para assets/final/<asset>.mp4,
-     conferindo o tamanho. Se falhar, interrompe antes de mover ou apagar algo.
+  2. Copia o vídeo merged (o produto final queimado) para assets/final/<asset>.mp4
+     e, se houver, o áudio <asset>.mp3 extraído pelo pipeline, conferindo o
+     tamanho. Se falhar, interrompe antes de mover ou apagar algo.
   3. Renomeia o arquivo base (ex.: 'capítulo ... _secs_base.txt') para o padrão
      do asset: '<asset>_base.txt' (ex.: clone40_base.txt).
   4. Envia o vídeo original (<asset>.mp4) e o arquivo base para o warehouse/.
@@ -134,21 +135,31 @@ def verify_drive_upload(asset: str, sub_dir: Path) -> bool:
 
 # ─── Etapa 2: copiar o vídeo final para assets/final ────────────────────────────
 def copy_merged_to_final(asset: str, asset_dir: Path, sub_dir: Path) -> bool:
-    """Copia o merged para ``assets/final/<asset>.mp4`` e confere o tamanho.
+    """Copia o merged para ``assets/final/<asset>.mp4`` e, se existir, o áudio
+    ``<asset>.mp3`` extraído pelo pipeline (opção "Extrair audio").
 
     Roda antes de qualquer coisa ser movida ou apagada: se falhar, o clean-up
     para com o asset intacto. Um destino já presente com o mesmo tamanho conta
     como feito (retomada de um clean-up que falhou mais adiante).
     """
-    print("\n📋 ETAPA 2: Cópia do vídeo final para assets/final")
+    print("\n📋 ETAPA 2: Cópia do vídeo final (e áudio) para assets/final")
 
     merged = find_merged(asset, asset_dir, sub_dir)
     if merged is None:
         print("❌ Vídeo merged não encontrado. Abortando — nada será removido.")
         return False
+    if not _copy_verified(merged, FINAL / f"{asset}.mp4"):
+        return False
 
-    size = merged.stat().st_size
-    dest = FINAL / f"{asset}.mp4"
+    audio = asset_dir / f"{asset}.mp3"
+    if audio.exists():
+        return _copy_verified(audio, FINAL / audio.name)
+    return True
+
+
+def _copy_verified(src: Path, dest: Path) -> bool:
+    """Copia ``src`` → ``dest`` e confere existência + tamanho."""
+    size = src.stat().st_size
     if dest.exists():
         if dest.stat().st_size == size:
             print(f"✅ Já existe em assets/final/{dest.name} com o mesmo tamanho.")
@@ -157,11 +168,11 @@ def copy_merged_to_final(asset: str, asset_dir: Path, sub_dir: Path) -> bool:
               "Abortando para não sobrescrever.")
         return False
 
-    FINAL.mkdir(parents=True, exist_ok=True)
-    print(f"📦 Copiando: {merged.name}  →  assets/final/{dest.name} "
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    print(f"📦 Copiando: {src.name}  →  assets/final/{dest.name} "
           f"({size / 1e9:.2f} GB)")
     try:
-        shutil.copy2(merged, dest)
+        shutil.copy2(src, dest)
     except OSError as e:
         print(f"❌ Falha ao copiar: {e}. Abortando — nada será removido.")
         return False
@@ -269,6 +280,8 @@ def send_to_warehouse_and_cleanup(asset: str, asset_dir: Path, sub_dir: Path,
     print(f"   • warehouse/{dest_video.name}")
     print(f"   • warehouse/{dest_base.name}")
     print(f"   • assets/final/{asset}.mp4")
+    if (FINAL / f"{asset}.mp3").exists():
+        print(f"   • assets/final/{asset}.mp3")
     print("   • pastas do asset removidas do disco.")
     return True
 
