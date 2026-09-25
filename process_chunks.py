@@ -371,6 +371,8 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
         print("🎨 Fundo semitransparente (50%): o vídeo aparece atrás da legenda")
     else:
         print("🎨 Fundo OPACO ativo: a faixa apaga o vídeo atrás da legenda")
+    if _top_translation_enabled():
+        print("📝 Tradução no topo ativa: a frase traduzida vai em amarelo no topo")
 
     pending = [e for e in entries if not (source_dir / e["processed"]).exists()]
     done_already = len(entries) - len(pending)
@@ -901,10 +903,7 @@ def create_subtitle_background_filter(subtitle_area_height: int, subtitle_width:
     bg_x = (video_width - bg_width) // 2
     bg_y = video_height - subtitle_area_height - bottom_margin
 
-    # Padrão é opaco (apaga o que está atrás); BURN_BOX_OPAQUE=0 volta a 50%.
-    # Lido aqui dentro, e não no import, porque a queima roda em workers do
-    # ProcessPoolExecutor (spawn no macOS reimporta o módulo).
-    alpha = "0.5" if os.environ.get("BURN_BOX_OPAQUE") == "0" else "1.0"
+    alpha = _box_alpha()
     background_filter = f"drawbox=x={bg_x}:y={bg_y}:width={bg_width}:height={bg_height}:color=black@{alpha}:t=fill"
 
     # Add time condition if provided
@@ -912,6 +911,85 @@ def create_subtitle_background_filter(subtitle_area_height: int, subtitle_width:
         background_filter += f":enable='{time_condition}'"
 
     return background_filter
+
+
+def _box_alpha() -> str:
+    """Opacidade das tarjas pretas: padrão opaco; BURN_BOX_OPAQUE=0 volta a 50%.
+
+    Lido na chamada, e não no import, porque a queima roda em workers do
+    ProcessPoolExecutor (spawn no macOS reimporta o módulo)."""
+    return "0.5" if os.environ.get("BURN_BOX_OPAQUE") == "0" else "1.0"
+
+
+def _top_translation_enabled() -> bool:
+    """BURN_TOP_TRANSLATION=1 queima a frase traduzida no topo (lido na chamada,
+    pelo mesmo motivo de ``_box_alpha``)."""
+    return os.environ.get("BURN_TOP_TRANSLATION") == "1"
+
+
+def _top_translation_filters(portuguese_text: str, latin_font_path: str,
+                             base_chinese_font_size: int, video_width: int,
+                             time_condition: str) -> Tuple[str, List[str]]:
+    """Tarja com a frase traduzida no topo, como nas Coleções.
+
+    Replica a geometria de ``video_screenshoter_r36s.add_subtitles_to_frame``
+    (fonte 60% do hanzi, amarelo escuro, tarja centralizada a ``18*_s`` do topo),
+    para o vídeo queimado ficar igual à imagem da coleção.
+
+    Returns:
+        (drawbox da tarja, [drawtext por linha]) — ou ("", []) sem texto.
+    """
+    text = (portuguese_text or "").strip()
+    if not text:
+        return "", []
+
+    _s = base_chinese_font_size / 36
+    font_size = max(18, int(base_chinese_font_size * 0.6))
+    top_margin = max(12, int(18 * _s))
+    line_gap = max(2, int(4 * _s))
+    side_padding = max(20, int(20 * _s))
+    line_height = font_size + line_gap
+    max_width = video_width - side_padding * 2
+
+    # Quebra por largura real (mesma lógica do wrap_portuguese_to_width das
+    # Coleções); sem a fonte, cai na estimativa por caractere.
+    try:
+        from PIL import ImageFont
+        font = ImageFont.truetype(latin_font_path, font_size)
+        lines, cur = [], []
+        for word in text.split():
+            cand = " ".join(cur + [word])
+            if cur and font.getlength(cand) > max_width:
+                lines.append(" ".join(cur))
+                cur = [word]
+            else:
+                cur.append(word)
+        if cur:
+            lines.append(" ".join(cur))
+        text_w = max(int(font.getlength(l)) for l in lines)
+    except Exception:
+        lines = wrap_portuguese_to_chinese_width(text, latin_font_path, max_width, font_size)
+        text_w = max(int(len(l) * font_size * 0.6) for l in lines)
+    if not lines:
+        return "", []
+
+    box_w = min(video_width, text_w + int(40 * _s))
+    box_h = line_height * len(lines) + int(16 * _s)
+    box_x = (video_width - box_w) // 2
+    box = (f"drawbox=x={box_x}:y={top_margin}:width={box_w}:height={box_h}"
+           f":color=black@{_box_alpha()}:t=fill:enable='{time_condition}'")
+
+    texts = []
+    ty = top_margin + int(8 * _s)
+    for line in lines:
+        esc = escape_ffmpeg_text(line)
+        if esc and esc.strip():
+            texts.append(
+                f"drawtext=text={esc}:x=(w-text_w)/2:y={ty}"
+                f":fontfile='{latin_font_path}':fontsize={font_size}"
+                f":fontcolor=0xCC9900:enable='{time_condition}'")
+        ty += line_height
+    return box, texts
 
 
 def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, str, float]], video_width: int = 1920, video_height: int = 1080) -> str:
@@ -948,6 +1026,8 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
 
     print(f"   📝 Tamanhos adaptativos: Chinês={base_chinese_font_size}px, Pinyin={base_pinyin_font_size}px, PT={base_portuguese_font_size}px")
     print(f"   📏 Largura máxima das legendas: {max_subtitle_width_pixels}px ({(max_subtitle_width_pixels/video_width)*100:.1f}% da tela)")
+
+    top_translation = _top_translation_enabled()
 
     # Sort subtitles by time and validate content
     valid_subtitles = {}
@@ -1241,6 +1321,16 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
         # Create time conditions for FFmpeg enable parameter
         end_time = begin_time + duration
         time_condition = f"between(t,{begin_time:.3f},{end_time:.3f})"
+
+        # Frase traduzida no topo (opcional). A tarja vai junto das faixas de
+        # fundo: o filtro final descarta de filter_parts o que não é drawtext.
+        if top_translation:
+            top_box, top_texts = _top_translation_filters(
+                portuguese_text, latin_font_path, base_chinese_font_size,
+                video_width, time_condition)
+            if top_box:
+                background_filters.append(top_box)
+                filter_parts.extend(top_texts)
 
         # Remove borders since we have background
         chinese_border_width = 0

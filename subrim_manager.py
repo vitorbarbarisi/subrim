@@ -640,6 +640,11 @@ class App(tk.Tk):
         ttk.Checkbutton(detail, text="Queimar com fundo opaco",
                         variable=self._burn_box_opaque_on).pack(anchor=tk.W,
                                                                 pady=(2, 2))
+        # Frase traduzida em amarelo no topo, como nas Coleções (também no batch).
+        self._burn_top_translation_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(detail, text="Queimar com tradução no topo",
+                        variable=self._burn_top_translation_on).pack(anchor=tk.W,
+                                                                     pady=(2, 2))
 
         self._run_btn = ttk.Button(detail, text="▶  Iniciar / Retomar",
                                    command=self._run_selected, state=tk.DISABLED)
@@ -2999,6 +3004,7 @@ class App(tk.Tk):
         debug_ds = self._ds_debug_on.get()
         # Estilo da queima: vale para todo launch, inclusive o batch.
         box_opaque = self._burn_box_opaque_on.get()
+        top_translation = self._burn_top_translation_on.get()
 
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -3008,6 +3014,7 @@ class App(tk.Tk):
                 env.pop("BURN_PAUSE_RATE", None)
             # Sempre explícito: sem a variável o process_chunks assume opaco.
             env["BURN_BOX_OPAQUE"] = "1" if box_opaque else "0"
+            env["BURN_TOP_TRANSLATION"] = "1" if top_translation else "0"
             if debug_ds:
                 env["DEEPSEEK_DEBUG"] = "1"
             else:
