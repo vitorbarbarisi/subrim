@@ -616,9 +616,22 @@ class App(tk.Tk):
         self._assets_menu = tk.Menu(self, tearoff=0)
         self._assets_menu.add_command(label="Transcrever...", command=self._transcrever_selected)
 
-        # Right: detail panel
-        detail = ttk.Frame(pw, padding=12)
-        pw.add(detail, weight=1)
+        # Right: detail panel — rolável inteiro (texto, opções, botões e fases),
+        # para caber em janelas baixas e em seleções múltiplas longas.
+        detail_outer = ttk.Frame(pw)
+        pw.add(detail_outer, weight=1)
+        dcanvas = tk.Canvas(detail_outer, highlightthickness=0, borderwidth=0)
+        dvsb = ttk.Scrollbar(detail_outer, orient=tk.VERTICAL, command=dcanvas.yview)
+        dcanvas.configure(yscrollcommand=dvsb.set)
+        dvsb.pack(side=tk.RIGHT, fill=tk.Y)
+        dcanvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        detail = ttk.Frame(dcanvas, padding=12)
+        dwin = dcanvas.create_window((0, 0), window=detail, anchor=tk.NW)
+        detail.bind("<Configure>",
+                    lambda _: dcanvas.configure(scrollregion=dcanvas.bbox("all")))
+        # O frame interno acompanha a largura visível (botões com fill=X).
+        dcanvas.bind("<Configure>", lambda e: dcanvas.itemconfigure(dwin, width=e.width))
+        self._detail_canvas = dcanvas
 
         ttk.Label(detail, text="Detalhes", font=("", 11, "bold")).pack(anchor=tk.W)
         ttk.Separator(detail, orient=tk.HORIZONTAL).pack(fill=tk.X, pady=6)
@@ -694,6 +707,21 @@ class App(tk.Tk):
             ttk.Label(row, textvariable=var, width=6, font=("Menlo", 10)).pack(side=tk.LEFT)
             ttk.Label(row, text=label, font=("", 9)).pack(side=tk.LEFT)
             self._phase_marks[key] = var
+
+        # Roda do mouse/trackpad em qualquer ponto do painel rola o Canvas: uma
+        # bindtag própria em cada widget, em vez de bind_all (que roubaria o
+        # scroll da lista de Assets ao lado).
+        def _detail_wheel(event):
+            if dcanvas.yview() == (0.0, 1.0):
+                return "break"   # conteúdo cabe inteiro: nada a rolar
+            dcanvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+        self.bind_class("DetailScroll", "<MouseWheel>", _detail_wheel)
+        stack = [dcanvas]
+        while stack:
+            w = stack.pop()
+            w.bindtags(("DetailScroll",) + w.bindtags())
+            stack.extend(w.winfo_children())
 
         self._refresh_assets()
 
