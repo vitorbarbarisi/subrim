@@ -806,7 +806,10 @@ def escape_ffmpeg_text(text: str) -> str:
     text = text.replace(';', '\\;')    # Semicolon
     text = text.replace(',', '\\,')    # Comma (critical for FFmpeg parsing)
     text = text.replace("'", "\\'")    # Single quote (begins a quoted section in the filtergraph)
-    # NOTE: colons and parentheses don't need escaping in the unquoted text= value
+    # Colon separates drawtext options; needs two escape levels (filtergraph +
+    # option parser) — a single "\:" is consumed by the filtergraph and breaks.
+    text = text.replace(':', '\\\\:')
+    # NOTE: parentheses don't need escaping in the unquoted text= value
 
     return text
 
