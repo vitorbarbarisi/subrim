@@ -608,6 +608,7 @@ class App(tk.Tk):
         # o clique secundário histórico do macOS. Os três são gestos de menu.
         for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
             t.bind(seq, self._assets_context_menu)
+        t.bind("<Double-1>", self._assets_open_video)
 
         for phase, (_, color) in PHASES.items():
             t.tag_configure(phase, foreground=color)
@@ -615,6 +616,9 @@ class App(tk.Tk):
 
         self._assets_menu = tk.Menu(self, tearoff=0)
         self._assets_menu.add_command(label="Transcrever...", command=self._transcrever_selected)
+        self._assets_menu.add_command(
+            label="Abrir vídeo",
+            command=lambda: self._selected and self._open_asset_video(self._selected["name"]))
         self._assets_menu.add_separator()
         self._assets_menu.add_command(label="Excluir...", command=self._excluir_selected)
 
@@ -2647,6 +2651,11 @@ class App(tk.Tk):
             cc = sorted(sub.glob("*_chromecast.mp4"))
             if cc:
                 return cc[0]
+        return App._original_video(asset_path)
+
+    @staticmethod
+    def _original_video(asset_path: Path):
+        """O mp4 original do asset (sem os derivados do pipeline), ou ``None``."""
         for cand in sorted(asset_path.glob("*.mp4")):
             if not any(s in cand.name for s in
                        ("_chromecast", "_merged", "_processed", "_chunk")):
@@ -3057,6 +3066,32 @@ class App(tk.Tk):
         if self._selected:
             subprocess.Popen(["open", str(self._selected["path"])])
 
+    def _asset_video(self, name: str):
+        """Vídeo a abrir: o merged se o asset já foi processado, senão o original."""
+        path, sub = ASSETS / name, ASSETS / f"{name}_sub"
+        if sub.exists():
+            merged = (sorted(sub.glob("*_chromecast_merged.mp4"))
+                      or sorted(sub.glob("*_merged.mp4")))
+            if merged:
+                return merged[0]
+        merged = sorted(path.glob("*_merged.mp4"))
+        if merged:
+            return merged[0]
+        return self._original_video(path)
+
+    def _open_asset_video(self, name: str):
+        video = self._asset_video(name)
+        if video:
+            subprocess.Popen(["open", str(video)])
+        else:
+            self._log_line(f"⚠️ {name}: nenhum vídeo para abrir", "warning")
+
+    def _assets_open_video(self, event):
+        """Duplo clique: abre o vídeo do asset no player padrão."""
+        row = self._tree.identify_row(event.y)
+        if row:
+            self._open_asset_video(row)
+
     def _assets_context_menu(self, event):
         """Menu flutuante com 'Transcrever...' no botão direito (ou Control+clique)."""
         row = self._tree.identify_row(event.y)
@@ -3075,6 +3110,8 @@ class App(tk.Tk):
         has_any_mp4 = next(self._selected["path"].rglob("*.mp4"), None) is not None
         self._assets_menu.entryconfigure(
             0, state=tk.NORMAL if has_any_mp4 else tk.DISABLED)
+        self._assets_menu.entryconfigure(
+            1, state=tk.NORMAL if self._asset_video(row) else tk.DISABLED)
         try:
             self._assets_menu.tk_popup(event.x_root, event.y_root)
         finally:
