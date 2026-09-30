@@ -615,6 +615,8 @@ class App(tk.Tk):
 
         self._assets_menu = tk.Menu(self, tearoff=0)
         self._assets_menu.add_command(label="Transcrever...", command=self._transcrever_selected)
+        self._assets_menu.add_separator()
+        self._assets_menu.add_command(label="Excluir...", command=self._excluir_selected)
 
         # Right: detail panel — rolável inteiro (texto, opções, botões e fases),
         # para caber em janelas baixas e em seleções múltiplas longas.
@@ -3075,6 +3077,41 @@ class App(tk.Tk):
             label=f"Transcrever: {name}",
             on_done=self._refresh_assets,
         )
+
+    def _excluir_selected(self):
+        """Move a pasta do asset (e a _sub, se houver) para a Lixeira do macOS."""
+        if not self._selected:
+            return
+        with self._proc_lock:
+            if self._proc and self._proc.poll() is None:
+                messagebox.showwarning("Processo em execução",
+                                       "Aguarde ou pare o processo atual antes de excluir.")
+                return
+        name = self._selected["name"]
+        targets = [p for p in (ASSETS / name, ASSETS / f"{name}_sub") if p.exists()]
+        if not targets:
+            return
+        msg = (f"Tem certeza que deseja excluir '{name}'?\n\n"
+               "Serão movidas para a Lixeira:\n"
+               + "\n".join(f"  • assets/{p.name}/" for p in targets))
+        if not messagebox.askyesno("Excluir asset", msg,
+                                   icon=messagebox.WARNING, default=messagebox.NO):
+            return
+        for p in targets:
+            # Finder em vez de shutil.rmtree: vai para a Lixeira, recuperável.
+            path = str(p.resolve()).replace("\\", "\\\\").replace('"', '\\"')
+            res = subprocess.run(
+                ["osascript", "-e",
+                 f'tell application "Finder" to delete POSIX file "{path}"'],
+                capture_output=True, text=True)
+            if res.returncode != 0:
+                messagebox.showerror("Erro ao excluir",
+                                     f"Não foi possível excluir {p}:\n{res.stderr.strip()}")
+                break
+        else:
+            self._log_line(f"🗑 Excluído: {name}", "success")
+        self._selected = None
+        self._refresh_assets()
 
     # ── Source / download logic ────────────────────────────────────────────────
     def _refresh_sources(self):
