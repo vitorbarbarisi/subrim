@@ -664,6 +664,12 @@ class App(tk.Tk):
         self._extract_audio_on = tk.BooleanVar(value=False)
         ttk.Checkbutton(detail, text="Extrair audio no assets/final",
                         variable=self._extract_audio_on).pack(anchor=tk.W, pady=(2, 2))
+        # Envio ao Google Drive ao fim do pipeline (default: ligado). Desligado,
+        # o Clean-up também deixa de exigir o upload. Vale também no batch.
+        self._drive_upload_on = tk.BooleanVar(value=True)
+        ttk.Checkbutton(detail, text="Enviar para o drive",
+                        variable=self._drive_upload_on,
+                        command=self._on_drive_toggle).pack(anchor=tk.W, pady=(2, 2))
 
         ttk.Label(detail, text="Estilo", foreground="#888").pack(anchor=tk.W,
                                                                  pady=(6, 0))
@@ -2832,7 +2838,7 @@ class App(tk.Tk):
         self._detail_text.set("\n".join(lines))
 
         n_run = sum(1 for a in lst if a["has_video"])
-        n_up = sum(1 for a in lst if a.get("uploaded"))
+        n_up = sum(1 for a in lst if self._can_cleanup(a))
         self._run_btn.config(text=f"▶  Iniciar / Retomar ({n_run})",
                              state=tk.NORMAL if n_run else tk.DISABLED)
         self._cleanup_btn.config(text=f"🧹  Clean-up (arquivar) ({n_up})",
@@ -2865,7 +2871,7 @@ class App(tk.Tk):
         self._open_btn.config(state=tk.NORMAL)
         # Clean-up só faz sentido após o upload ao Drive estar registrado.
         self._cleanup_btn.config(text="🧹  Clean-up (arquivar)",
-                                 state=tk.NORMAL if s.get("uploaded") else tk.DISABLED)
+                                 state=tk.NORMAL if self._can_cleanup(s) else tk.DISABLED)
 
         p = s["phase"]
         n, tot = s["chunks_done"], s["chunks_total"]
@@ -2888,8 +2894,26 @@ class App(tk.Tk):
         )
         self._phase_marks["drive"].set(
             "✓" if s.get("uploaded") else
+            "—" if not self._drive_upload_on.get() else
             ("⏳" if p == "merged" else "○")
         )
+
+    def _on_drive_toggle(self):
+        if self._selected_many:
+            self._update_detail_multi(self._selected_many)
+        elif self._selected:
+            self._update_detail(self._selected)
+
+    def _can_cleanup(self, a: dict) -> bool:
+        """Com o envio ao Drive desligado, basta o merge; senão exige o upload."""
+        return bool(a.get("uploaded")
+                    or (not self._drive_upload_on.get() and a.get("merged")))
+
+    def _cleanup_cmd(self, a: dict) -> list:
+        cmd = [sys.executable, str(REPO / "cleanup_asset.py"), a["name"]]
+        if not a.get("uploaded"):
+            cmd.append("--skip-drive")
+        return cmd
 
     def _run_selected(self):
         if self._selected_many:
@@ -2935,7 +2959,7 @@ class App(tk.Tk):
         if not self._selected:
             return
         name = self._selected["name"]
-        if not self._selected.get("uploaded"):
+        if not self._can_cleanup(self._selected):
             messagebox.showwarning(
                 "Upload pendente",
                 f"O asset '{name}' ainda não tem upload registrado no Drive.\n"
@@ -2944,25 +2968,29 @@ class App(tk.Tk):
         if messagebox.askyesno(
                 "Confirmar clean-up",
                 f"Arquivar '{name}'?\n\n"
-                "Após validar o upload no Drive, o vídeo merged (e o áudio .mp3, "
+                + ("Após validar o upload no Drive, " if self._selected.get("uploaded")
+                   else "Sem verificação no Drive (envio desativado), ")
+                + "o vídeo merged (e o áudio .mp3, "
                 "se houver) é copiado para assets/final/, o vídeo original e o base.txt vão para o "
                 "warehouse e as pastas\n"
                 f"  • assets/{name}/\n  • assets/{name}_sub/\n"
                 "serão REMOVIDAS do disco. Esta ação é irreversível."):
             self._launch(
-                [sys.executable, str(REPO / "cleanup_asset.py"), name],
+                self._cleanup_cmd(self._selected),
                 label=f"Clean-up: {name}",
             )
 
     def _cleanup_many(self, lst: list):
         """Clean-up em lote: uma confirmação só, depois um cleanup_asset por vez."""
-        ok = [a["name"] for a in lst if a.get("uploaded")]
-        skip = [a["name"] for a in lst if not a.get("uploaded")]
+        ok = [a for a in lst if self._can_cleanup(a)]
+        skip = [a["name"] for a in lst if not self._can_cleanup(a)]
         if not ok:
             return
         msg = (f"Arquivar {len(ok)} asset(s)?\n\n"
-               + "\n".join(f"  • {n}" for n in ok)
-               + "\n\nApós validar o upload no Drive, o vídeo merged de cada um "
+               + "\n".join(f"  • {a['name']}"
+                           + ("" if a.get("uploaded") else "  (sem Drive)") for a in ok)
+               + "\n\nApós validar o upload no Drive (exceto os marcados sem Drive), "
+               "o vídeo merged de cada um "
                "(e o áudio .mp3, se houver) é copiado para assets/final/, o vídeo original e o base.txt vão para "
                "o warehouse e as pastas do asset (e _sub) serão REMOVIDAS do disco. "
                "Esta ação é irreversível.")
@@ -2971,8 +2999,8 @@ class App(tk.Tk):
                     + "\n".join(f"  • {n}" for n in skip))
         if messagebox.askyesno("Confirmar clean-up em lote", msg):
             self._run_queue([
-                ([sys.executable, str(REPO / "cleanup_asset.py"), n], f"Clean-up: {n}")
-                for n in ok
+                (self._cleanup_cmd(a), f"Clean-up: {a['name']}")
+                for a in ok
             ])
 
     # ── Fila de lote ───────────────────────────────────────────────────────────
@@ -3214,6 +3242,7 @@ class App(tk.Tk):
         box_opaque = self._burn_box_opaque_on.get()
         top_translation = self._burn_top_translation_on.get()
         extract_audio = self._extract_audio_on.get()
+        drive_upload = self._drive_upload_on.get()
 
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -3225,6 +3254,7 @@ class App(tk.Tk):
             env["BURN_BOX_OPAQUE"] = "1" if box_opaque else "0"
             env["BURN_TOP_TRANSLATION"] = "1" if top_translation else "0"
             env["EXTRACT_AUDIO"] = "1" if extract_audio else "0"
+            env["DRIVE_UPLOAD"] = "1" if drive_upload else "0"
             if debug_ds:
                 env["DEEPSEEK_DEBUG"] = "1"
             else:

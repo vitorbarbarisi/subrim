@@ -666,7 +666,9 @@ Requisitos:
 
             # Etapa 4: Envio para o Google Drive
             print(f"\n📋 ETAPA 4: Upload para o Google Drive")
-            if not upload_to_drive(output_file, args.directory):
+            if os.environ.get("DRIVE_UPLOAD", "1") == "0":
+                print("⏭  Upload para o Drive desativado (DRIVE_UPLOAD=0)")
+            elif not upload_to_drive(output_file, args.directory):
                 print("⚠️  Merge concluído, mas o upload para o Drive não foi realizado")
             return 0
         else:

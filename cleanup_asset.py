@@ -319,6 +319,8 @@ Exemplo:
         """,
     )
     parser.add_argument("asset", help="Nome do asset (sem _sub)")
+    parser.add_argument("--skip-drive", action="store_true",
+                        help="Não exige o upload ao Drive (envio desativado no pipeline).")
     args = parser.parse_args()
     asset = args.asset
 
@@ -336,11 +338,15 @@ Exemplo:
         return 1
     if not sub_dir.exists():
         print(f"\n❌ Pasta _sub não encontrada: {sub_dir}")
-        print("   Sem ela não há marcador de upload para validar. Abortando.")
+        print("   Sem ela não há merged nem marcador de upload. Abortando.")
         return 1
 
-    # Etapa 1 — bloqueante: sem upload confirmado, nada é feito.
-    if not verify_drive_upload(asset, sub_dir):
+    # Etapa 1 — bloqueante: sem upload confirmado, nada é feito (exceto com
+    # --skip-drive, quando o envio ao Drive foi desativado no pipeline).
+    if args.skip_drive:
+        print("📋 ETAPA 1: Verificação do upload no Google Drive")
+        print("⏭  Pulada (--skip-drive: envio ao Drive desativado)")
+    elif not verify_drive_upload(asset, sub_dir):
         return 1
 
     # Etapa 2 — cópia do merged para assets/final (bloqueante).

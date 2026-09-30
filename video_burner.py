@@ -258,8 +258,15 @@ class VideoBurner:
         if os.environ.get("EXTRACT_AUDIO") == "1":
             self.extract_audio(directory)
 
-        # Retomada: se o merge já existe, NÃO pular o diretório. O envio ao Drive
-        # é etapa obrigatória — verifica se o upload foi feito e, se não, retenta.
+        # Envio ao Drive: ligado por padrão; o subrim_manager exporta DRIVE_UPLOAD=0
+        # quando o checkbox "Enviar para o drive" está desmarcado.
+        drive_on = os.environ.get("DRIVE_UPLOAD", "1") != "0"
+
+        # Retomada: se o merge já existe, NÃO pular o diretório. Com o envio ao
+        # Drive ligado, verifica se o upload foi feito e, se não, retenta.
+        if not force and self.is_processed(directory) and not drive_on:
+            self.log(f"✓ {dir_name} já processado (envio ao Drive desativado)")
+            return True
         if not force and self.is_processed(directory):
             self.log(f"Diretório {dir_name}: merge já existe — verificando envio ao Drive")
             if not self.run_script("merge_chunks.py", dir_name, ["--ensure-upload"]):
@@ -324,7 +331,11 @@ class VideoBurner:
             self.log(f"✗ {dir_name} processamento incompleto - _merged.mp4 não encontrado", "ERROR")
             return False
 
-        # Phase 3: Envio ao Google Drive (etapa final OBRIGATÓRIA, com verificação e retry).
+        if not drive_on:
+            self.log(f"✓ {dir_name} processado com sucesso (envio ao Drive desativado)")
+            return True
+
+        # Phase 3: Envio ao Google Drive (etapa final, com verificação e retry).
         self.log(f"Fase 3: Envio ao Google Drive para {dir_name}")
         if not self.run_script("merge_chunks.py", dir_name, ["--ensure-upload"]):
             self.log(f"Falha no envio ao Drive para {dir_name}", "ERROR")
