@@ -259,7 +259,9 @@ PHASES = {
 
 
 # ─── Status detection ──────────────────────────────────────────────────────────
-def detect_status(path: Path) -> dict:
+def detect_status(path: Path, drive_required: bool = True) -> dict:
+    """``drive_required=False`` (envio ao Drive desmarcado): basta o merge para o
+    asset contar como completo, em vez de ficar eternamente em "Falta Drive"."""
     sub = path.parent / f"{path.name}_sub"
 
     has_video = bool(list(path.glob("*.mp4")))
@@ -279,7 +281,7 @@ def detect_status(path: Path) -> dict:
     denominator = max(n_total, n_done)
     progress = int(n_done / denominator * 100) if denominator > 0 else 0
 
-    if merged and uploaded:
+    if merged and (uploaded or not drive_required):
         phase, progress = "complete", 100
     elif merged:
         # Merge pronto, mas o envio ao Drive (Fase 5) ainda não foi confirmado.
@@ -305,13 +307,13 @@ def detect_status(path: Path) -> dict:
         "has_base":     bool(bases),
         "chunks_total": n_total,
         "chunks_done":  n_done,
-        "complete":     bool(merged and uploaded),
+        "complete":     bool(merged and (uploaded or not drive_required)),
         "merged":       bool(merged),
         "uploaded":     uploaded,
     }
 
 
-def list_assets() -> list:
+def list_assets(drive_required: bool = True) -> list:
     if not ASSETS.exists():
         return []
     # "text" é a pasta do modo Texto, não um asset de vídeo — sem esta exclusão
@@ -321,7 +323,7 @@ def list_assets() -> list:
         if d.is_dir() and not d.name.endswith("_sub")
         and d.name not in ("source", "text", "final")
     )
-    return [detect_status(d) for d in dirs]
+    return [detect_status(d, drive_required) for d in dirs]
 
 
 def list_texts() -> list:
@@ -2763,7 +2765,7 @@ class App(tk.Tk):
         flt = self._filter_var.get().strip().lower()
         inc = self._only_inc.get()
 
-        assets = list_assets()
+        assets = list_assets(self._drive_upload_on.get())
         if flt:
             assets = [a for a in assets if flt in a["name"].lower()]
         if inc:
@@ -2820,11 +2822,11 @@ class App(tk.Tk):
             return
         if len(sel) > 1:
             self._selected = None
-            self._selected_many = [detect_status(ASSETS / n) for n in sel]
+            self._selected_many = [detect_status(ASSETS / n, self._drive_upload_on.get()) for n in sel]
             self._update_detail_multi(self._selected_many)
             return
         self._selected_many = []
-        s = detect_status(ASSETS / sel[0])
+        s = detect_status(ASSETS / sel[0], self._drive_upload_on.get())
         self._selected = s
         self._update_detail(s)
 
@@ -2908,10 +2910,10 @@ class App(tk.Tk):
         )
 
     def _on_drive_toggle(self):
-        if self._selected_many:
-            self._update_detail_multi(self._selected_many)
-        elif self._selected:
-            self._update_detail(self._selected)
+        # O status "Falta Drive" x "Completo" depende do checkbox: recalcula a
+        # lista e o painel da seleção atual.
+        self._refresh_assets()
+        self._on_asset_select(None)
 
     def _can_cleanup(self, a: dict) -> bool:
         """Com o envio ao Drive desligado, basta o merge; senão exige o upload."""
@@ -3102,7 +3104,7 @@ class App(tk.Tk):
         self._tree.selection_set(row)
         self._tree.focus(row)
         self._selected_many = []
-        self._selected = detect_status(ASSETS / row)
+        self._selected = detect_status(ASSETS / row, self._drive_upload_on.get())
         self._update_detail(self._selected)
 
         # Recursivo (ao contrário de has_video): pastas como a do youtube_monitor
