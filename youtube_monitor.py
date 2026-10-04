@@ -21,6 +21,7 @@ navegador logado no YouTube.
 
 import argparse
 import fcntl
+import glob
 import json
 import os
 import re
@@ -468,7 +469,7 @@ def download_video(yt_bin: str, video_id: str, cookies_file: Path, out_template:
 
 def find_downloaded_file(local_dir: Path, prefix: str, video_id: str) -> Optional[Path]:
     matches = [
-        p for p in local_dir.glob(f"{prefix}_{video_id}.*")
+        p for p in local_dir.glob(f"{glob.escape(f'{prefix}_{video_id}')}.*")
         if p.suffix not in NON_VIDEO_SUFFIXES
     ]
     return sorted(matches)[0] if matches else None
@@ -484,7 +485,7 @@ def select_and_normalize_subtitle(local_dir: Path, prefix: str, video_id: str,
     a mais, se houver."""
     base = f"{prefix}_{video_id}"
     by_lang: Dict[str, Path] = {}
-    for p in sorted(local_dir.glob(f"{base}.*.srt")):
+    for p in sorted(local_dir.glob(f"{glob.escape(base)}.*.srt")):
         lang = p.name[len(base) + 1:-len(".srt")]
         by_lang[lang] = p
 
