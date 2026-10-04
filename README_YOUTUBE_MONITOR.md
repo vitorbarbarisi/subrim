@@ -63,6 +63,7 @@ Edite `youtube_channels.json`:
     {
       "name": "meu_canal",
       "url": "https://www.youtube.com/@meucanal/videos",
+      "prefix": "meucanal",
       "enabled": true
     }
   ]
@@ -70,6 +71,13 @@ Edite `youtube_channels.json`:
 ```
 - `name` vira o nome da subpasta dentro de
   `assets/youtube_monitor_downloads/` — evite espaços e caracteres especiais.
+- `prefix`: prefixo dos arquivos baixados — o vídeo sai como
+  `<prefix>_<título>_<id>.mp4` e, depois de transcrito, vira o asset
+  `<prefix>_…`. No upload ao Drive (merge_chunks.py), assets que começam com
+  `<prefix>_` de algum canal vão para `videos/<prefix>` (como `clone40` →
+  `videos/clone`). Só letras, números e hífen — sem `_`. Sem prefixo, o nome
+  fica `<título>_<id>` como antes.
+- `enabled`: `false` faz o monitor pular o canal.
 - `url` deve apontar para a aba **Vídeos** do canal (`/videos` no final), não
   para a página inicial do canal.
 - `lookback_hours` maior que o intervalo do cron (padrão 1h) dá folga contra
@@ -85,6 +93,13 @@ Edite `youtube_channels.json`:
   item do canal).
 
 ## 📋 Como usar
+
+### Gerenciar canais pela interface
+
+No subrim_manager, aba **Downloads & Scraping**, a seção **YouTube Monitor**
+edita este mesmo JSON: `+` adiciona canal, `−` remove (com confirmação),
+duplo clique no prefixo edita e clique em "Ativo" liga/desliga. Cada mudança
+é gravada na hora, e a próxima execução do cron já usa o estado novo.
 
 ### Testar sem baixar nada
 ```bash

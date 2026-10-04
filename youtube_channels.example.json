@@ -13,11 +13,13 @@
     {
       "name": "canal_exemplo",
       "url": "https://www.youtube.com/@canalexemplo/videos",
+      "prefix": "exemplo",
       "enabled": true
     },
     {
       "name": "canal_com_legenda_exemplo",
       "url": "https://www.youtube.com/@canalcomlegenda/videos",
+      "prefix": "legendado",
       "enabled": false,
       "sub_langs": "zh-Hant,zh"
     }

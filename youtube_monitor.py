@@ -147,8 +147,10 @@ def release_lock(lock_fh) -> None:
 # Config (youtube_channels.json)
 # --------------------------------------------------------------------------
 
-def load_channels_config(path: Path) -> dict:
+def load_channels_config(path: Path, required: bool = True) -> dict:
     if not path.exists():
+        if not required:
+            return {"defaults": {}, "channels": []}
         raise SystemExit(
             f"❌ Config não encontrada: {path}\n"
             f"   Copie youtube_channels.example.json para {path.name} e edite a lista de canais."
@@ -157,6 +159,32 @@ def load_channels_config(path: Path) -> dict:
     cfg.setdefault("defaults", {})
     cfg.setdefault("channels", [])
     return cfg
+
+
+def save_channels_config(path: Path, cfg: dict) -> None:
+    """Grava o config de forma atômica (tmp + replace): o cron pode ler o
+    arquivo a qualquer momento e nunca deve pegar um JSON pela metade."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(json.dumps(cfg, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    os.replace(tmp, path)
+
+
+PREFIX_RE = re.compile(r"^[A-Za-z0-9-]+$")
+
+
+def is_valid_prefix(prefix: str) -> bool:
+    """Prefixo de canal: letras, dígitos e hífen. Sem '_' — ele separa o
+    prefixo do resto do nome do asset (``<prefixo>_<título>_<id>``)."""
+    return bool(PREFIX_RE.match(prefix or ""))
+
+
+def channel_prefixes(path: Path = DEFAULT_CONFIG) -> List[str]:
+    """Prefixos não vazios dos canais do config (usado pelo upload ao Drive)."""
+    try:
+        cfg = load_channels_config(path, required=False)
+    except Exception:
+        return []
+    return [c["prefix"] for c in cfg["channels"] if c.get("prefix")]
 
 
 def channel_settings(cfg: dict, channel: dict) -> dict:
@@ -515,7 +543,7 @@ def select_videos_to_process(state: MonitorState, channel_name: str, candidate_i
 
 def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path,
                   download_format: str, has_ffmpeg: bool, sub_langs: str, download_timeout: float,
-                  state: MonitorState, dry_run: bool) -> None:
+                  state: MonitorState, dry_run: bool, channel_prefix: str = "") -> None:
     vid = video["id"]
     entry = state.video_entry(channel_name, vid)
     if entry is None:
@@ -535,7 +563,11 @@ def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path
 
     local_dir = DOWNLOADS_DIR / channel_name
     local_dir.mkdir(parents=True, exist_ok=True)
-    prefix = sanitize_name(video.get("title") or vid)
+    # <prefixo do canal>_<título>: o prefixo agrupa os vídeos do canal (ex.: a
+    # pasta videos/<prefixo> no Drive), como o "clone" dos assets clone40…
+    stem = sanitize_name(video.get("title") or vid)
+    if channel_prefix:
+        stem = f"{channel_prefix}_{stem}"
 
     local_path = None
     if entry.get("local_path"):
@@ -550,11 +582,11 @@ def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path
         state.save()
         return
 
-    out_template = local_dir / f"{prefix}_{vid}.%(ext)s"
+    out_template = local_dir / f"{stem}_{vid}.%(ext)s"
     print(f"   ⬇️  Baixando {channel_name}/{vid} — {video.get('title')}")
     ok = download_video(yt_bin, vid, cookies_file, out_template, download_format, has_ffmpeg,
                          sub_langs=sub_langs, timeout=download_timeout)
-    found = find_downloaded_file(local_dir, prefix, vid) if ok else None
+    found = find_downloaded_file(local_dir, stem, vid) if ok else None
     if not ok or found is None:
         state.upsert_video(
             channel_name, vid, status="failed",
@@ -566,7 +598,7 @@ def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path
 
     subtitle_path = None
     if sub_langs:
-        subtitle_path = select_and_normalize_subtitle(local_dir, prefix, vid, sub_langs)
+        subtitle_path = select_and_normalize_subtitle(local_dir, stem, vid, sub_langs)
         if subtitle_path:
             print(f"   📝 Legenda encontrada e reaproveitada: {subtitle_path.name}")
 
@@ -602,7 +634,8 @@ def process_channel(channel: dict, cfg: dict, state: MonitorState, yt_bin: str, 
         print("   ✅ Nada novo dentro da janela configurada")
     for video in to_process:
         handle_video(name, video, yt_bin, cookies_file, download_format, has_ffmpeg,
-                     settings["sub_langs"], settings["download_timeout_seconds"], state, dry_run)
+                     settings["sub_langs"], settings["download_timeout_seconds"], state, dry_run,
+                     channel_prefix=channel.get("prefix") or "")
 
     if not dry_run:
         state.set_last_checked(name)

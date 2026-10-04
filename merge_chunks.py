@@ -124,12 +124,28 @@ def _drive_find_or_create_folder(token: str, name: str, parent_id: str) -> str:
     return folder_id
 
 
+def _drive_prefix(asset_name: str) -> str:
+    """Pasta de destino em videos/: o prefixo do canal do youtube_monitor quando
+    o asset começa com ``<prefixo>_`` (o maior que casar), senão o nome do asset
+    sem dígitos finais (``clone40`` → ``clone``)."""
+    try:
+        from youtube_monitor import channel_prefixes
+        prefixes = channel_prefixes()
+    except Exception:
+        prefixes = []
+    for p in sorted(prefixes, key=len, reverse=True):
+        if asset_name.startswith(p + "_"):
+            return p
+    return re.sub(r"\d+$", "", asset_name) or asset_name
+
+
 def upload_to_drive(file_path: Path, asset_name: str) -> bool:
     """Envia o vídeo final ao Google Drive via upload resumável.
 
-    O arquivo é gravado em ``videos/<prefixo>``, onde ``<prefixo>`` é o nome do
-    asset sem os dígitos finais (ex.: ``clone40`` → ``videos/clone``). As pastas
-    são criadas no Drive se não existirem.
+    O arquivo é gravado em ``videos/<prefixo>`` (ver ``_drive_prefix``: prefixo
+    do canal do youtube_monitor, ou o asset sem os dígitos finais, ex.:
+    ``clone40`` → ``videos/clone``). As pastas são criadas no Drive se não
+    existirem.
 
     Usa as credenciais de ``google_drive_config.json`` (refresh_token). Falhas
     são logadas explicitamente e retornam ``False`` sem interromper o merge —
@@ -159,8 +175,7 @@ def upload_to_drive(file_path: Path, asset_name: str) -> bool:
         print(str(e))
         return False
 
-    # Destino: videos/<prefixo>, onde prefixo = asset sem dígitos finais.
-    prefix = re.sub(r"\d+$", "", asset_name) or asset_name
+    prefix = _drive_prefix(asset_name)
     root_id = cfg.get("folder_id") or "root"
     try:
         videos_id = _drive_find_or_create_folder(token, "videos", root_id)

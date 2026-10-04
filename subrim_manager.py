@@ -17,6 +17,7 @@ from tkinter import ttk
 
 # Maestria de vocabulário (word-api). Só stdlib, seguro importar no topo.
 import word_vocab
+import youtube_monitor as ytm
 from app_identity import set_app_name
 
 APP_NAME = "Subrim Manager"
@@ -1502,7 +1503,7 @@ class App(tk.Tk):
 
         # Globoplay Scraper
         gp = ttk.LabelFrame(right, text="  Globoplay Scraper  ", padding=10)
-        gp.pack(fill=tk.X)
+        gp.pack(fill=tk.X, pady=(0, 12))
 
         ttk.Label(gp, text="URL da série:").grid(row=0, column=0, sticky=tk.W, pady=3)
         self._gp_url = tk.StringVar()
@@ -1520,6 +1521,43 @@ class App(tk.Tk):
 
         ttk.Button(gp, text="▶ Iniciar Scraping", command=self._run_gp).grid(row=3, column=2, sticky=tk.E, pady=(8, 0))
         gp.columnconfigure(1, weight=1)
+
+        # YouTube Monitor: editor do youtube_channels.json. Cada mudança é gravada
+        # na hora — o cron relê o JSON a cada execução, então a próxima já usa o
+        # estado novo.
+        ym = ttk.LabelFrame(right, text="  YouTube Monitor  ", padding=10)
+        ym.pack(fill=tk.BOTH, expand=True)
+
+        ym_btns = ttk.Frame(ym)
+        ym_btns.pack(side=tk.BOTTOM, fill=tk.X, pady=(6, 0))
+        ttk.Button(ym_btns, text="+", width=3, command=self._ytm_add_dialog).pack(side=tk.LEFT)
+        ttk.Button(ym_btns, text="−", width=3, command=self._ytm_remove).pack(side=tk.LEFT, padx=4)
+        ttk.Button(ym_btns, text="↺", width=3, command=self._ytm_refresh).pack(side=tk.LEFT)
+        ttk.Label(ym_btns, text="Duplo clique no prefixo edita · clique em Ativo alterna",
+                  foreground="#888", font=("", 9)).pack(side=tk.RIGHT)
+
+        ym_cols = ("name", "url", "prefix", "active")
+        yt_tree = ttk.Treeview(ym, columns=ym_cols, show="headings", height=6,
+                               selectmode="browse")
+        yt_tree.heading("name",   text="Canal",   anchor=tk.W)
+        yt_tree.heading("url",    text="URL",     anchor=tk.W)
+        yt_tree.heading("prefix", text="Prefixo", anchor=tk.W)
+        yt_tree.heading("active", text="Ativo",   anchor=tk.CENTER)
+        yt_tree.column("name",   width=110, anchor=tk.W)
+        yt_tree.column("url",    width=200, anchor=tk.W)
+        yt_tree.column("prefix", width=90,  anchor=tk.W, stretch=False)
+        yt_tree.column("active", width=50,  anchor=tk.CENTER, stretch=False)
+        vsb_ym = ttk.Scrollbar(ym, orient=tk.VERTICAL, command=yt_tree.yview)
+        yt_tree.configure(yscrollcommand=vsb_ym.set)
+        yt_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb_ym.pack(side=tk.RIGHT, fill=tk.Y)
+        yt_tree.bind("<Button-1>", self._ytm_on_click)
+        yt_tree.bind("<Double-1>", self._ytm_on_double_click)
+        self._ytm_tree = yt_tree
+        self._ytm_cfg = {"defaults": {}, "channels": []}
+        self._ytm_editor = None
+
+        self._ytm_refresh()
 
     # ── Collections Tab ──────────────────────────────────────────────────────────
     def _build_collections_tab(self):
@@ -3257,6 +3295,151 @@ class App(tk.Tk):
             cmd.append("--headless")
         self._launch(cmd, label=f"Scraping: {name}")
 
+    # ── YouTube Monitor (youtube_channels.json) ──────────────────────────────────
+    def _ytm_refresh(self):
+        """Relê o JSON do disco e redesenha a tabela."""
+        try:
+            self._ytm_cfg = ytm.load_channels_config(ytm.DEFAULT_CONFIG, required=False)
+        except Exception as e:
+            messagebox.showerror("YouTube Monitor",
+                                 f"Não foi possível ler {ytm.DEFAULT_CONFIG.name}:\n{e}")
+            self._ytm_cfg = {"defaults": {}, "channels": []}
+        tree = self._ytm_tree
+        sel = tree.selection()
+        tree.delete(*tree.get_children())
+        for i, ch in enumerate(self._ytm_cfg["channels"]):
+            tree.insert("", tk.END, iid=str(i), values=(
+                ch.get("name", ""), ch.get("url", ""), ch.get("prefix", ""),
+                "☑" if ch.get("enabled", True) else "☐"))
+        if sel and tree.exists(sel[0]):
+            tree.selection_set(sel[0])
+
+    def _ytm_save(self) -> bool:
+        """Grava o config (atômico) e redesenha. Em erro, volta ao que está no disco."""
+        try:
+            ytm.save_channels_config(ytm.DEFAULT_CONFIG, self._ytm_cfg)
+        except Exception as e:
+            messagebox.showerror("YouTube Monitor", f"Falha ao salvar o config:\n{e}")
+            self._ytm_refresh()
+            return False
+        self._ytm_refresh()
+        return True
+
+    def _ytm_prefix_error(self, prefix: str, skip_index: int = None):
+        """Mensagem de erro para um prefixo inválido/duplicado, ou None se ok."""
+        if not prefix:
+            return "Informe um prefixo."
+        if not ytm.is_valid_prefix(prefix):
+            return "Prefixo só pode ter letras, números e hífen (sem espaços nem '_')."
+        for i, ch in enumerate(self._ytm_cfg["channels"]):
+            if i != skip_index and ch.get("prefix") == prefix:
+                return f"O prefixo '{prefix}' já é usado pelo canal '{ch.get('name')}'."
+        return None
+
+    def _ytm_on_click(self, event):
+        tree = self._ytm_tree
+        if tree.identify_region(event.x, event.y) != "cell":
+            return
+        if tree.identify_column(event.x) != "#4":   # coluna Ativo
+            return
+        row = tree.identify_row(event.y)
+        if not row:
+            return
+        ch = self._ytm_cfg["channels"][int(row)]
+        ch["enabled"] = not ch.get("enabled", True)
+        tree.selection_set(row)
+        self._ytm_save()
+
+    def _ytm_on_double_click(self, event):
+        tree = self._ytm_tree
+        if tree.identify_column(event.x) != "#3":   # coluna Prefixo
+            return
+        row = tree.identify_row(event.y)
+        if row:
+            self._ytm_edit_prefix(row)
+        return "break"
+
+    def _ytm_edit_prefix(self, row: str):
+        """Entry sobreposto à célula do prefixo: Enter/sair confirma, Esc cancela."""
+        tree = self._ytm_tree
+        bbox = tree.bbox(row, "prefix")
+        if not bbox:
+            return
+        if self._ytm_editor is not None:
+            self._ytm_editor.destroy()
+        idx = int(row)
+        current = self._ytm_cfg["channels"][idx].get("prefix", "")
+        var = tk.StringVar(value=current)
+        ent = ttk.Entry(tree, textvariable=var)
+        x, y, w, h = bbox
+        ent.place(x=x, y=y, width=w, height=h)
+        ent.focus_set()
+        ent.select_range(0, tk.END)
+        self._ytm_editor = ent
+        done = {"v": False}
+
+        def _close():
+            done["v"] = True
+            self._ytm_editor = None
+            ent.destroy()
+
+        def _commit(_=None):
+            if done["v"]:
+                return
+            new = var.get().strip()
+            if new == current:
+                _close()
+                return
+            err = self._ytm_prefix_error(new, skip_index=idx)
+            if err:
+                _close()
+                messagebox.showwarning("Prefixo inválido", err)
+                return
+            _close()
+            self._ytm_cfg["channels"][idx]["prefix"] = new
+            self._ytm_save()
+
+        def _cancel(_=None):
+            if not done["v"]:
+                _close()
+
+        ent.bind("<Return>", _commit)
+        ent.bind("<KP_Enter>", _commit)
+        ent.bind("<FocusOut>", _commit)
+        ent.bind("<Escape>", _cancel)
+
+    def _ytm_add_dialog(self):
+        AddChannelDialog(self)
+
+    def _ytm_add_channel(self, name: str, url: str, prefix: str, enabled: bool) -> bool:
+        # Relê antes de alterar: o JSON pode ter sido editado fora da UI.
+        self._ytm_refresh()
+        self._ytm_cfg["channels"].append(
+            {"name": name, "url": url, "prefix": prefix, "enabled": enabled})
+        if not self._ytm_save():
+            return False
+        last = str(len(self._ytm_cfg["channels"]) - 1)
+        if self._ytm_tree.exists(last):
+            self._ytm_tree.selection_set(last)
+            self._ytm_tree.see(last)
+        return True
+
+    def _ytm_remove(self):
+        sel = self._ytm_tree.selection()
+        if not sel:
+            messagebox.showinfo("YouTube Monitor", "Selecione um canal para remover.")
+            return
+        idx = int(sel[0])
+        name = self._ytm_cfg["channels"][idx].get("name", "")
+        if not messagebox.askyesno(
+                "Remover canal",
+                f"Remover o canal “{name}” do monitor?\n\n"
+                "Vídeos já baixados e o histórico não são apagados.",
+                icon=messagebox.WARNING, parent=self):
+            return
+        del self._ytm_cfg["channels"][idx]
+        self._ytm_save()
+
     # ── Queimar com pausas ──────────────────────────────────────────────────────
     def _on_pause_toggle(self):
         self._burn_pause_entry.config(
@@ -3440,6 +3623,84 @@ class App(tk.Tk):
 
 
 # ─── Dialog: Salvar coleção (Coleções) ──────────────────────────────────────────
+class AddChannelDialog(tk.Toplevel):
+    """Pop-up modal para adicionar um canal ao YouTube Monitor."""
+
+    def __init__(self, app: App):
+        super().__init__(app)
+        self.app = app
+        self.title("Adicionar canal")
+        self.resizable(False, False)
+        self.transient(app)
+
+        f = ttk.Frame(self, padding=18)
+        f.pack(fill=tk.BOTH, expand=True)
+
+        self._url_var = tk.StringVar()
+        self._name_var = tk.StringVar()
+        self._prefix_var = tk.StringVar()
+        self._enabled_var = tk.BooleanVar(value=True)
+        self._name_edited = False
+
+        ttk.Label(f, text="URL:").grid(row=0, column=0, sticky=tk.W, pady=3)
+        url_e = ttk.Entry(f, textvariable=self._url_var, width=44)
+        url_e.grid(row=0, column=1, sticky=tk.EW, pady=3)
+        ttk.Label(f, text="Nome:").grid(row=1, column=0, sticky=tk.W, pady=3)
+        name_e = ttk.Entry(f, textvariable=self._name_var)
+        name_e.grid(row=1, column=1, sticky=tk.EW, pady=3)
+        ttk.Label(f, text="Prefixo:").grid(row=2, column=0, sticky=tk.W, pady=3)
+        ttk.Entry(f, textvariable=self._prefix_var, width=18).grid(row=2, column=1, sticky=tk.W, pady=3)
+        ttk.Checkbutton(f, text="Ativo", variable=self._enabled_var).grid(
+            row=3, column=1, sticky=tk.W, pady=(4, 0))
+        ttk.Label(f, text="O nome não pode ser alterado depois (identifica o canal no histórico).",
+                  foreground="#888", font=("", 9)).grid(row=4, column=0, columnspan=2,
+                                                        sticky=tk.W, pady=(8, 0))
+
+        btns = ttk.Frame(f)
+        btns.grid(row=5, column=0, columnspan=2, sticky=tk.EW, pady=(14, 0))
+        ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+        ttk.Button(btns, text="Adicionar", command=self._ok).pack(side=tk.RIGHT)
+        f.columnconfigure(1, weight=1)
+
+        # Nome sugerido a partir do @handle da URL, até o usuário mexer nele.
+        self._url_var.trace_add("write", self._suggest_name)
+        name_e.bind("<Key>", lambda _e: setattr(self, "_name_touched", True))
+        self.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+
+        self.update_idletasks()
+        x = app.winfo_rootx() + (app.winfo_width() - self.winfo_width()) // 2
+        y = app.winfo_rooty() + (app.winfo_height() - self.winfo_height()) // 3
+        self.geometry(f"+{max(x, 0)}+{max(y, 0)}")
+        self.grab_set()
+        url_e.focus_set()
+
+    def _suggest_name(self, *_):
+        if self._name_edited:
+            return
+        m = re.search(r"youtube\.com/@([^/?#]+)", self._url_var.get())
+        self._name_var.set(ytm.sanitize_name(m.group(1)) if m else "")
+
+    def _ok(self):
+        url = self._url_var.get().strip()
+        name = ytm.sanitize_name(self._name_var.get()) if self._name_var.get().strip() else ""
+        prefix = self._prefix_var.get().strip()
+        err = None
+        if not url:
+            err = "Informe a URL do canal."
+        elif not name:
+            err = "Informe o nome do canal."
+        elif any(ch.get("name") == name for ch in self.app._ytm_cfg["channels"]):
+            err = f"Já existe um canal chamado '{name}'."
+        else:
+            err = self.app._ytm_prefix_error(prefix)
+        if err:
+            messagebox.showwarning("Adicionar canal", err, parent=self)
+            return
+        if self.app._ytm_add_channel(name, url, prefix, self._enabled_var.get()):
+            self.destroy()
+
+
 class SaveCollectionDialog(tk.Toplevel):
     """Escolha do formato (original OU r36s) e do filtro de nota 0 antes de salvar.
 
