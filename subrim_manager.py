@@ -113,6 +113,23 @@ def _natural_key(s: str):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
 
 
+def _wh_group_list(stems: list) -> list:
+    """Stems (sem "_base") agrupados como na lista do Warehouse.
+
+    Devolve ``[(key, nome, [stems])]``: grupos por nome, "Outros" (key None)
+    por último; dentro do grupo, ordem natural do nome legível."""
+    prefixes, signatures = _wh_channel_rules()
+    keys = _wh_group_keys(stems, prefixes, signatures)
+    groups: dict = {}
+    for stem in stems:
+        groups.setdefault(keys[stem], []).append(stem)
+    order = sorted(groups, key=lambda k: (k is None,
+                                          _wh_readable_name(k).lower() if k else ""))
+    return [(k, _wh_readable_name(k) if k else "Outros",
+             sorted(groups[k], key=lambda s: _natural_key(_wh_readable_name(s))))
+            for k in order]
+
+
 # Uma "palavra" precisa ter ao menos um caractere com conteúdo (CJK, letra ou
 # dígito). Sem isso, pontuação solta que sobra do parsing entrava na tabela
 # como se fosse vocabulário. A regra mora no word_vocab, que é o módulo comum
@@ -522,6 +539,8 @@ class App(tk.Tk):
         self._col_index = 0
         # Filtro de assets: None = todos (sem filtro); set = só esses assets.
         self._col_asset_filter = None
+        # Grupos abertos no pop-up de filtro (lembrados na sessão).
+        self._col_filter_open: set = set()
         self._col_render_token = 0
         self._col_audio_token = 0
         self._col_audio_proc = None  # subprocess.Popen do afplay em curso, ou None
@@ -565,6 +584,8 @@ class App(tk.Tk):
             s.theme_use("aqua")
         except tk.TclError:
             pass
+        # Checkbox de grupo no pop-up de filtro de assets (Coleções).
+        s.configure("Group.TCheckbutton", font=("", 12, "bold"))
 
     # ── UI construction ────────────────────────────────────────────────────────
     def _build_ui(self):
@@ -1133,20 +1154,11 @@ class App(tk.Tk):
                     status, tag = "Falta vídeo", "missing"
             rows.append((bf, _wh_readable_name(bf.stem), status, tag))
 
-        prefixes, signatures = _wh_channel_rules()
-        keys = _wh_group_keys([bf.stem.replace("_base", "") for bf in bases],
-                              prefixes, signatures)
-        groups: dict = {}
-        for row in rows:
-            groups.setdefault(keys[row[0].stem.replace("_base", "")], []).append(row)
-
-        def _group_order(k):
-            return (k is None, _wh_readable_name(k).lower() if k else "")
-
-        for key in sorted(groups, key=_group_order):
-            members = sorted(groups[key], key=lambda r: _natural_key(r[1]))
+        by_stem = {row[0].stem.replace("_base", ""): row for row in rows}
+        groups = _wh_group_list(list(by_stem))
+        for key, nome, stems in groups:
+            members = [by_stem[st] for st in stems]
             gid = f"grp:{key or ''}"
-            nome = _wh_readable_name(key) if key else "Outros"
             n_ok  = sum(1 for r in members if r[3] == "ok")
             n_arq = sum(1 for r in members if r[3] == "archived")
             n_mis = sum(1 for r in members if r[3] == "missing")
@@ -1161,7 +1173,7 @@ class App(tk.Tk):
                 self._wh_tree.insert(gid, tk.END, iid=str(bf), text=readable,
                                      values=(status,), tags=(tag,))
 
-        n_grupos = sum(1 for k in groups if k)
+        n_grupos = sum(1 for k, _, _ in groups if k)
         grupos = f" · {n_grupos} grupo(s)"
         if texto:
             self._wh_count_var.set(f"{len(bases)} texto(s) arquivado(s){grupos}")
@@ -2226,6 +2238,7 @@ class App(tk.Tk):
         entre os dois escopos.
         """
         self._col_asset_filter = None
+        self._col_filter_open.clear()
         self._col_update_filter_btn()
         self._col_headers["time"] = "Linha" if self._is_text_mode() else "Tempo"
         for c, base in self._col_headers.items():
@@ -4143,14 +4156,18 @@ class SaveCollectionDialog(tk.Toplevel):
 
 # ─── Dialog: Asset Filter (Coleções) ────────────────────────────────────────────
 class AssetFilterDialog(tk.Toplevel):
-    """Pop-up de seleção de assets (checkboxes) para filtrar a busca de coleções."""
+    """Pop-up de seleção de assets (checkboxes) para filtrar a busca de coleções.
+
+    Agrupado por prefixo como a lista do Warehouse (``_wh_group_list``): cada
+    grupo tem uma seta para recolher, um checkbox que marca/desmarca o grupo
+    inteiro (parcial = estado "alternate") e um contador de marcados."""
 
     def __init__(self, app: App):
         super().__init__(app)
         self.app = app
         self.title("Filtrar por assets")
-        self.geometry("320x460")
-        self.minsize(260, 300)
+        self.geometry("620x640")
+        self.minsize(460, 420)
         self.grab_set()
 
         assets = app._col_available_assets()
@@ -4166,6 +4183,10 @@ class AssetFilterDialog(tk.Toplevel):
         top.pack(fill=tk.X, pady=(0, 4))
         ttk.Button(top, text="Marcar todos",  command=self._select_all).pack(side=tk.LEFT)
         ttk.Button(top, text="Desmarcar todos", command=self._clear_all).pack(side=tk.LEFT, padx=4)
+        ttk.Button(top, text="Expandir todos",
+                   command=lambda: self._set_all_open(True)).pack(side=tk.LEFT, padx=(12, 0))
+        ttk.Button(top, text="Recolher todos",
+                   command=lambda: self._set_all_open(False)).pack(side=tk.LEFT, padx=4)
 
         # Área rolável de checkboxes
         canvas_f = ttk.Frame(f)
@@ -4175,7 +4196,9 @@ class AssetFilterDialog(tk.Toplevel):
         inner = ttk.Frame(canvas)
         inner.bind("<Configure>",
                    lambda _: canvas.configure(scrollregion=canvas.bbox("all")))
-        canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        win = canvas.create_window((0, 0), window=inner, anchor=tk.NW)
+        # O conteúdo acompanha a largura do Canvas (contador alinhado à direita).
+        canvas.bind("<Configure>", lambda e: canvas.itemconfigure(win, width=e.width))
         canvas.configure(yscrollcommand=vsb.set)
         canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
         vsb.pack(side=tk.RIGHT, fill=tk.Y)
@@ -4183,18 +4206,15 @@ class AssetFilterDialog(tk.Toplevel):
         # Scroll com mouse no Mac
         def _on_mousewheel(event):
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+        self._wheel = _on_mousewheel
         canvas.bind("<MouseWheel>", _on_mousewheel)
         inner.bind("<MouseWheel>", _on_mousewheel)
 
         self._vars = {}
-        for name in assets:
-            checked = (current is None) or (name in current)
-            var = tk.BooleanVar(value=checked)
-            self._vars[name] = var
-            cb = ttk.Checkbutton(inner, text=name, variable=var)
-            cb.pack(anchor=tk.W, pady=1)
-            # Propaga scroll do mouse para o Canvas
-            cb.bind("<MouseWheel>", _on_mousewheel)
+        self._groups = []   # dicts: key, header, arrow, body, var, cb, count, stems
+        self._bulk = False  # marcando um grupo inteiro: sincroniza só no fim
+        for key, nome, stems in _wh_group_list(assets):
+            self._add_group(inner, key, nome, stems, current)
 
         if not assets:
             ttk.Label(inner, text="(nenhum base.txt no warehouse)",
@@ -4205,13 +4225,85 @@ class AssetFilterDialog(tk.Toplevel):
         ttk.Button(btns, text="Cancelar", command=self.destroy).pack(side=tk.RIGHT, padx=4)
         ttk.Button(btns, text="Aplicar",  command=self._apply).pack(side=tk.RIGHT)
 
-    def _select_all(self):
+    def _add_group(self, parent, key, nome: str, stems: list, current):
+        gid = key or ""
+        g = {"key": gid, "stems": stems}
+        header = ttk.Frame(parent)
+        header.pack(fill=tk.X, pady=(2, 0))
+        arrow = ttk.Label(header, width=2, cursor="hand2")
+        arrow.pack(side=tk.LEFT)
+        var = tk.BooleanVar()
+        cb = ttk.Checkbutton(header, text=f"{nome}  ({len(stems)})", variable=var,
+                             style="Group.TCheckbutton",
+                             command=lambda: self._toggle_group_check(g))
+        cb.pack(side=tk.LEFT)
+        count = ttk.Label(header, foreground="#888")
+        count.pack(side=tk.RIGHT, padx=(0, 6))
+        body = ttk.Frame(parent)
+        g.update(header=header, arrow=arrow, body=body, var=var, cb=cb, count=count)
+
+        for stem in stems:
+            checked = (current is None) or (stem in current)
+            v = tk.BooleanVar(value=checked)
+            v.trace_add("write", lambda *_: self._sync_group(g))
+            self._vars[stem] = v
+            c = ttk.Checkbutton(body, text=_wh_readable_name(stem), variable=v)
+            c.pack(anchor=tk.W, padx=(36, 0), pady=1)
+            c.bind("<MouseWheel>", self._wheel)
+
+        for w in (header, arrow, cb, count, body):
+            w.bind("<MouseWheel>", self._wheel)
+        arrow.bind("<Button-1>", lambda _: self._set_open(g, not g.get("open")))
+        self._groups.append(g)
+        self._set_open(g, gid in self.app._col_filter_open)
+        self._sync_group(g)
+
+    def _set_open(self, g: dict, aberto: bool):
+        g["open"] = aberto
+        g["arrow"].config(text="▾" if aberto else "▸")
+        if aberto:
+            g["body"].pack(fill=tk.X, after=g["header"])
+            self.app._col_filter_open.add(g["key"])
+        else:
+            g["body"].pack_forget()
+            self.app._col_filter_open.discard(g["key"])
+
+    def _set_all_open(self, aberto: bool):
+        for g in self._groups:
+            self._set_open(g, aberto)
+
+    def _sync_group(self, g: dict):
+        """Checkbox do grupo e contador a partir dos filhos."""
+        if self._bulk:
+            return
+        n = sum(1 for s in g["stems"] if self._vars[s].get())
+        total = len(g["stems"])
+        g["var"].set(n == total)
+        g["cb"].state(["alternate"] if 0 < n < total else ["!alternate"])
+        g["count"].config(text=f"{n}/{total}")
+
+    def _toggle_group_check(self, g: dict):
+        # Parcial ou desmarcado → marca tudo; marcado → desmarca tudo.
+        marcar = g["var"].get()
+        self._bulk = True
+        for s in g["stems"]:
+            self._vars[s].set(marcar)
+        self._bulk = False
+        self._sync_group(g)
+
+    def _set_all(self, valor: bool):
+        self._bulk = True
         for v in self._vars.values():
-            v.set(True)
+            v.set(valor)
+        self._bulk = False
+        for g in self._groups:
+            self._sync_group(g)
+
+    def _select_all(self):
+        self._set_all(True)
 
     def _clear_all(self):
-        for v in self._vars.values():
-            v.set(False)
+        self._set_all(False)
 
     def _apply(self):
         selected = {name for name, v in self._vars.items() if v.get()}
