@@ -381,6 +381,34 @@ def list_sources() -> list:
     return result
 
 
+# ─── Processos em execução ─────────────────────────────────────────────────────
+class Job:
+    """Um processo lançado pelo _launch, com a sua própria sub-aba de log.
+
+    Um lote (Iniciar/Clean-up com vários assets) é um Job só: os itens rodam
+    em série dentro dele, na mesma sub-aba. Jobs diferentes rodam em paralelo.
+    """
+    _next_id = 0
+
+    def __init__(self, label: str):
+        Job._next_id += 1
+        self.id = Job._next_id
+        self.label = label
+        self.proc = None
+        self.frame = None
+        self.txt = None
+        self.status = "running"     # running | ok | error | stopped
+        self.returncode = None
+        self.queue: list = []       # itens de lote ainda não iniciados: (cmd, label)
+        self.queue_total = 0
+        self.on_done = None         # callback de encadeamento do _launch
+        self.current_asset = None   # asset anunciado no log (total de chunks)
+        self.stopped = False
+
+    def running(self) -> bool:
+        return self.status == "running"
+
+
 # ─── Main application ──────────────────────────────────────────────────────────
 class App(tk.Tk):
     def __init__(self):
@@ -403,13 +431,12 @@ class App(tk.Tk):
         self._text_mode = False   # espelho do _mode, seguro fora da thread do Tk
         self._text_selected = None
 
+        # Itens: (msg, tag) → sub-aba Geral; (job_id, msg, tag) → sub-aba do job.
         self._log_q: queue.Queue = queue.Queue()
-        self._proc = None
+        # Processos em paralelo: job_id -> Job (inclui os já encerrados cuja
+        # sub-aba ainda está aberta).
+        self._jobs: dict = {}
         self._proc_lock = threading.Lock()
-        self._proc_on_done = None   # callback de encadeamento do _launch
-        # Fila de lote (Iniciar/Clean-up com vários assets): (cmd, label) em série.
-        self._queue: list = []
-        self._queue_total = 0
         self._selected = None
         self._selected_many: list = []   # seleção múltipla na lista de Assets
         # Ordenação da lista de Assets (clique no cabeçalho, como nas Coleções)
@@ -467,10 +494,10 @@ class App(tk.Tk):
         self._duration_fill_running = False
         # Total de chunks lido ao vivo dos logs do pipeline: asset_name -> total
         self._live_chunk_total: dict = {}
-        self._log_current_asset = None
 
         self._setup_style()
         self._build_ui()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._schedule_refresh()
         self._poll_log()
         self._nota_start_writer()
@@ -490,8 +517,9 @@ class App(tk.Tk):
 
         self._status_var = tk.StringVar(value="Pronto")
         ttk.Label(bar, textvariable=self._status_var, foreground="#777").pack(side=tk.RIGHT, padx=8)
-        self._stop_btn = ttk.Button(bar, text="⏹  Parar", command=self._stop, state=tk.DISABLED)
-        self._stop_btn.pack(side=tk.RIGHT)
+        self._stop_all_btn = ttk.Button(bar, text="⏹  Parar todos", command=self._stop_all,
+                                        state=tk.DISABLED)
+        self._stop_all_btn.pack(side=tk.RIGHT)
 
         # O toggle é empacotado por ÚLTIMO e com expand=True para ficar centrado
         # na barra: o pack só distribui a sobra depois que os widgets de largura
@@ -2501,14 +2529,6 @@ class App(tk.Tk):
         Uma pasta, uma execução: o make_bundle fatia o index.json inteiro em
         blocos de 150, então o ditado quebra considerando a coleção toda.
         """
-        with self._proc_lock:
-            ocupado = self._proc is not None and self._proc.poll() is None
-        if ocupado:
-            self._log_line(
-                f"⚠️  Ditado NÃO gerado para {pasta.name}: já há um processo em "
-                f"execução. Rode depois: python3 dictation/make_bundle.py "
-                f"warehouse/collections/{pasta.name}", "warning")
-            return
         self._launch(
             [sys.executable, str(REPO / "dictation" / "make_bundle.py"), str(pasta)],
             label=f"Ditado: {pasta.name}",
@@ -2521,16 +2541,32 @@ class App(tk.Tk):
         self._nb.add(f, text="  Log  ")
         self._tab_log = f
 
+        # Os botões agem sobre a sub-aba selecionada (Geral ou um processo).
         ctrl = ttk.Frame(f)
         ctrl.pack(fill=tk.X, pady=(0, 4))
-        ttk.Button(ctrl, text="Limpar", command=self._clear_log).pack(side=tk.LEFT)
+        self._job_stop_btn = ttk.Button(ctrl, text="⏹  Parar", command=self._stop,
+                                        state=tk.DISABLED)
+        self._job_stop_btn.pack(side=tk.LEFT)
+        ttk.Button(ctrl, text="Limpar", command=self._clear_log).pack(side=tk.LEFT, padx=(6, 0))
+        self._job_close_btn = ttk.Button(ctrl, text="Fechar", command=self._close_job_tab,
+                                         state=tk.DISABLED)
+        self._job_close_btn.pack(side=tk.LEFT, padx=(6, 0))
         self._autoscroll = tk.BooleanVar(value=True)
         ttk.Checkbutton(ctrl, text="Auto-scroll", variable=self._autoscroll).pack(side=tk.LEFT, padx=8)
         self._log_label = tk.StringVar()
         ttk.Label(ctrl, textvariable=self._log_label, foreground="#888", font=("Menlo", 9)).pack(side=tk.RIGHT)
 
+        # Uma sub-aba por processo; "Geral" (fixa) recebe as mensagens do app.
+        self._log_nb = ttk.Notebook(f)
+        self._log_nb.pack(fill=tk.BOTH, expand=True)
+        self._log_nb.bind("<<NotebookTabChanged>>", lambda _: self._update_job_controls())
+        self._log_general, self._log_txt = self._new_log_pane()
+        self._log_nb.add(self._log_general, text="  Geral  ")
+
+    def _new_log_pane(self):
+        frame = ttk.Frame(self._log_nb)
         txt = scrolledtext.ScrolledText(
-            f, state=tk.DISABLED, font=("Menlo", 10),
+            frame, state=tk.DISABLED, font=("Menlo", 10),
             bg="#1C1C1E", fg="#EBEBF5",
             insertbackground="white", relief=tk.FLAT,
         )
@@ -2540,7 +2576,7 @@ class App(tk.Tk):
         txt.tag_configure("error",   foreground="#FF453A")
         txt.tag_configure("warning", foreground="#FF9F0A")
         txt.tag_configure("info",    foreground="#EBEBF5")
-        self._log_txt = txt
+        return frame, txt
 
     # ── DeepSeek Tab ─────────────────────────────────────────────────────────────
     def _build_deepseek_tab(self):
@@ -3054,32 +3090,27 @@ class App(tk.Tk):
 
     # ── Fila de lote ───────────────────────────────────────────────────────────
     def _run_queue(self, items: list):
-        """Roda ``(cmd, label)`` em série, encadeados pelo ``on_done`` do _launch.
+        """Roda ``(cmd, label)`` em série num job só (uma sub-aba de log).
 
         Cada asset é independente: a falha de um não interrompe os demais. O
-        "Parar" esvazia a fila (ver _stop)."""
+        "Parar" esvazia a fila do job (ver _stop). Outros jobs seguem em paralelo."""
         if not items:
             return
-        with self._proc_lock:
-            if self._proc and self._proc.poll() is None:
-                messagebox.showwarning("Processo em execução",
-                                       "Aguarde ou pare o processo atual antes de iniciar outro.")
-                return
-        self._queue = list(items)
-        self._queue_total = len(items)
-        self._launch_next()
+        job = self._new_job(f"Lote ({len(items)})")
+        job.queue = list(items)
+        job.queue_total = len(items)
+        self._launch_next(job)
 
-    def _launch_next(self):
-        if not self._queue:
-            if self._queue_total:
-                self._log_line(f"✅ Lote concluído: {self._queue_total} item(ns)", "success")
-            self._queue_total = 0
+    def _launch_next(self, job: "Job"):
+        if not job.queue:
+            if job.queue_total and not job.stopped:
+                self._log_line(f"✅ Lote concluído: {job.queue_total} item(ns)", "success", job)
             return
-        cmd, label = self._queue.pop(0)
-        i = self._queue_total - len(self._queue)
-        self._log_line(f"━━ Lote {i}/{self._queue_total}: {label} ━━", "cmd")
-        self._launch(cmd, label=f"{label} [{i}/{self._queue_total}]",
-                     on_done=self._launch_next)
+        cmd, label = job.queue.pop(0)
+        i = job.queue_total - len(job.queue)
+        self._log_line(f"━━ Lote {i}/{job.queue_total}: {label} ━━", "cmd", job)
+        self._launch(cmd, label=f"{label} [{i}/{job.queue_total}]",
+                     on_done=lambda: self._launch_next(job), job=job)
 
     # ── Ordenação da lista de Assets ───────────────────────────────────────────
     def _assets_sort(self, col: str):
@@ -3198,11 +3229,21 @@ class App(tk.Tk):
         names = list(self._tree.selection())
         if not names:
             return
-        with self._proc_lock:
-            if self._proc and self._proc.poll() is None:
-                messagebox.showwarning("Processo em execução",
-                                       "Aguarde ou pare o processo atual antes de excluir.")
-                return
+        # Só bloqueia se algum processo em execução mexe num destes assets
+        # (nome no rótulo, ou batch cujo prefixo os cobre).
+        def _usa(label: str, n: str) -> bool:
+            m = re.match(r"Batch: (.+)\*$", label)
+            if m:
+                return n.startswith(m.group(1))
+            return re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", label) is not None
+        ocupados = [j.label for j in self._running_jobs()
+                    if any(_usa(j.label, n) for n in names)]
+        if ocupados:
+            messagebox.showwarning(
+                "Processo em execução",
+                "Aguarde ou pare antes de excluir:\n"
+                + "\n".join(f"  • {l}" for l in ocupados))
+            return
         targets = [p for n in names
                    for p in (ASSETS / n, ASSETS / f"{n}_sub") if p.exists()]
         if not targets:
@@ -3456,25 +3497,86 @@ class App(tk.Tk):
         return rate if rate > 0 else 0.0
 
     # ── Process management ─────────────────────────────────────────────────────
-    def _launch(self, cmd: list, label: str = "", pause_rate: float = None,
-                on_done=None):
-        """``on_done`` (opcional) roda na thread do Tk quando o processo termina.
+    def _running_jobs(self) -> list:
+        return [j for j in self._jobs.values() if j.running()]
 
-        É o gancho para reagir ao fim de um processo — encadear uma execução
-        seguinte, por exemplo. Sem chamador hoje: o ditado virou uma pasta só.
-        """
-        with self._proc_lock:
-            if self._proc and self._proc.poll() is None:
-                messagebox.showwarning("Processo em execução",
-                                       "Aguarde ou pare o processo atual antes de iniciar outro.")
-                return
-        self._proc_on_done = on_done
+    def _any_running(self) -> bool:
+        return bool(self._running_jobs())
 
+    def _new_job(self, label: str) -> "Job":
+        """Cria o job e a sub-aba de log dele, já selecionada."""
+        job = Job(label)
+        job.frame, job.txt = self._new_log_pane()
+        self._jobs[job.id] = job
+        self._log_nb.add(job.frame, text=self._job_tab_text(job))
         self._nb.select(self._tab_log)
-        self._log_line(f"$ {' '.join(str(c) for c in cmd)}", "cmd")
-        self._status_var.set(f"▶  {label}")
-        self._stop_btn.config(state=tk.NORMAL)
-        self._log_label.set(label)
+        self._log_nb.select(job.frame)
+        return job
+
+    @staticmethod
+    def _job_tab_text(job: "Job") -> str:
+        mark = {"running": "●", "ok": "✓"}.get(job.status, "✗")
+        label = job.label if len(job.label) <= 32 else job.label[:31] + "…"
+        return f" {mark} {label} "
+
+    def _selected_job(self):
+        try:
+            cur = self._log_nb.select()
+        except tk.TclError:
+            return None
+        for j in self._jobs.values():
+            if str(j.frame) == cur:
+                return j
+        return None
+
+    def _update_job_controls(self):
+        """Botões da aba Log (job selecionado) e barra do topo (todos os jobs)."""
+        job = self._selected_job()
+        if job is None:
+            self._job_stop_btn.config(state=tk.DISABLED)
+            self._job_close_btn.config(state=tk.DISABLED)
+            self._log_label.set("")
+        else:
+            self._job_stop_btn.config(state=tk.NORMAL if job.running() else tk.DISABLED)
+            self._job_close_btn.config(state=tk.DISABLED if job.running() else tk.NORMAL)
+            if job.running():
+                self._log_label.set(job.label)
+            elif job.status == "stopped":
+                self._log_label.set("interrompido")
+            else:
+                self._log_label.set(f"código {job.returncode}")
+        running = self._running_jobs()
+        self._stop_all_btn.config(state=tk.NORMAL if running else tk.DISABLED)
+        if not running:
+            self._status_var.set("Pronto")
+        elif len(running) == 1:
+            self._status_var.set(f"▶  {running[0].label}")
+        else:
+            self._status_var.set(f"▶  {len(running)} em execução")
+
+    def _launch(self, cmd: list, label: str = "", pause_rate: float = None,
+                on_done=None, job: "Job" = None):
+        """Roda ``cmd`` em paralelo aos demais, com log numa sub-aba própria.
+
+        ``job`` reaproveita a sub-aba de um job existente (próximo item de um
+        lote). ``on_done`` (opcional) roda na thread do Tk quando o processo
+        termina — é o gancho de encadeamento do lote.
+        """
+        if job is None:
+            if any(j.label == label for j in self._running_jobs()):
+                if not messagebox.askyesno(
+                        "Já em execução",
+                        f"'{label}' já está rodando.\nIniciar outro mesmo assim?"):
+                    return
+            job = self._new_job(label)
+        else:
+            job.status = "running"
+            job.label = label   # no lote, o rótulo acompanha o item corrente
+            self._log_nb.tab(job.frame, text=self._job_tab_text(job))
+        job.on_done = on_done
+
+        self._log_line(f"$ {' '.join(str(c) for c in cmd)}", "cmd", job)
+        self._update_job_controls()
 
         # None = use checkbox value; caller can force 0.0 to disable pauses.
         if pause_rate is None:
@@ -3486,6 +3588,7 @@ class App(tk.Tk):
         top_translation = self._burn_top_translation_on.get()
         extract_audio = self._extract_audio_on.get()
         drive_upload = self._drive_upload_on.get()
+        jid = job.id
 
         def _run():
             env = {**os.environ, "PYTHONUNBUFFERED": "1"}
@@ -3502,12 +3605,20 @@ class App(tk.Tk):
                 env["DEEPSEEK_DEBUG"] = "1"
             else:
                 env.pop("DEEPSEEK_DEBUG", None)
-            p = subprocess.Popen(
-                cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                text=True, cwd=str(REPO), env=env,
-            )
+            try:
+                p = subprocess.Popen(
+                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                    text=True, cwd=str(REPO), env=env,
+                )
+            except OSError as e:
+                self._log_q.put((jid, f"❌ Não foi possível iniciar: {e}", "error"))
+                self.after(0, self._on_job_done, job, -1)
+                return
             with self._proc_lock:
-                self._proc = p
+                job.proc = p
+                parar = job.stopped
+            if parar:   # "Parar" clicado antes do Popen terminar
+                p.terminate()
             for raw in p.stdout:
                 line = raw.rstrip()
                 if not line:
@@ -3522,94 +3633,149 @@ class App(tk.Tk):
                                                           "Completo", "merged", "completed")) else
                     "info"
                 )
-                self._log_q.put((line, tag))
+                self._log_q.put((jid, line, tag))
             p.wait()
             sep = "─" * 70
             tag = "success" if p.returncode == 0 else "error"
-            self._log_q.put((sep, "info"))
-            self._log_q.put((f"Encerrado  (código {p.returncode})", tag))
-            self.after(0, self._on_proc_done)
+            self._log_q.put((jid, sep, "info"))
+            self._log_q.put((jid, f"Encerrado  (código {p.returncode})", tag))
+            self.after(0, self._on_job_done, job, p.returncode)
 
         threading.Thread(target=_run, daemon=True).start()
 
-    def _on_proc_done(self):
-        self._status_var.set("Pronto")
-        self._log_label.set("")
-        self._stop_btn.config(state=tk.DISABLED)
-        # Encadeamento (ex.: próximo bundle de ditado). Zera antes de chamar,
-        # senão um on_done que dispara outro _launch se reencadearia sozinho.
-        seguinte, self._proc_on_done = getattr(self, "_proc_on_done", None), None
-        if seguinte:
+    def _on_job_done(self, job: "Job", returncode: int):
+        # Garante que as últimas linhas do processo entrem antes do status final.
+        self._drain_log_q()
+        with self._proc_lock:
+            job.proc = None
+        job.returncode = returncode
+        job.status = ("stopped" if job.stopped
+                      else "ok" if returncode == 0 else "error")
+        # Encadeamento (próximo item do lote). Zera antes de chamar, senão um
+        # on_done que dispara outro _launch se reencadearia sozinho.
+        seguinte, job.on_done = job.on_done, None
+        if seguinte and not job.stopped:
             try:
                 seguinte()
             except Exception as e:  # noqa: BLE001
-                self._log_line(f"Erro ao continuar depois do processo: {e}", "error")
+                self._log_line(f"Erro ao continuar depois do processo: {e}", "error", job)
+        if job.id in self._jobs and not job.running():
+            # Lote: o ✗ de um item não marca o lote todo; vale o último item.
+            self._log_nb.tab(job.frame, text=self._job_tab_text(job))
+        self._update_job_controls()
         self._refresh_assets()
         self._refresh_sources()
 
-    def _stop(self):
-        # Parar interrompe o lote inteiro, não só o item em execução.
-        if self._queue:
-            self._log_line(f"⏹  Lote cancelado: {len(self._queue)} item(ns) não iniciado(s)",
-                           "warning")
-        self._queue = []
-        self._queue_total = 0
+    def _stop_job(self, job: "Job"):
+        # Parar interrompe o lote inteiro do job, não só o item em execução.
+        if job.queue:
+            self._log_line(f"⏹  Lote cancelado: {len(job.queue)} item(ns) não iniciado(s)",
+                           "warning", job)
+        job.queue = []
         with self._proc_lock:
-            if self._proc:
-                self._proc.terminate()
-        self._log_line("⏹  Processo interrompido pelo usuário", "warning")
+            job.stopped = True
+            if job.proc:
+                job.proc.terminate()
+        self._log_line("⏹  Processo interrompido pelo usuário", "warning", job)
+
+    def _stop(self):
+        job = self._selected_job()
+        if job and job.running():
+            self._stop_job(job)
+
+    def _stop_all(self):
+        for job in self._running_jobs():
+            self._stop_job(job)
+
+    def _close_job_tab(self):
+        job = self._selected_job()
+        if job is None or job.running():
+            return
+        self._log_nb.forget(job.frame)
+        job.frame.destroy()
+        self._jobs.pop(job.id, None)
+        self._update_job_controls()
+
+    def _on_close(self):
+        running = self._running_jobs()
+        if running:
+            nomes = "\n".join(f"  • {j.label}" for j in running[:10])
+            if not messagebox.askyesno(
+                    "Processos em execução",
+                    f"{len(running)} processo(s) em execução:\n{nomes}\n\n"
+                    "Fechar o Subrim Manager e interromper todos?"):
+                return
+            with self._proc_lock:
+                for j in running:
+                    j.queue = []
+                    j.stopped = True
+                    if j.proc:
+                        j.proc.terminate()
+        self.destroy()
 
     # ── Logging ────────────────────────────────────────────────────────────────
-    def _log_line(self, msg: str, tag: str = "info"):
+    def _log_line(self, msg: str, tag: str = "info", job: "Job" = None):
+        """Escreve na sub-aba do ``job`` ou, sem job, na sub-aba Geral."""
+        txt = job.txt if job is not None and job.id in self._jobs else self._log_txt
         ts = datetime.now().strftime("%H:%M:%S")
-        self._log_txt.config(state=tk.NORMAL)
-        self._log_txt.insert(tk.END, f"[{ts}]  {msg}\n", tag)
-        self._log_txt.config(state=tk.DISABLED)
+        txt.config(state=tk.NORMAL)
+        txt.insert(tk.END, f"[{ts}]  {msg}\n", tag)
+        txt.config(state=tk.DISABLED)
         if self._autoscroll.get():
-            self._log_txt.see(tk.END)
+            txt.see(tk.END)
 
     def _clear_log(self):
-        self._log_txt.config(state=tk.NORMAL)
-        self._log_txt.delete("1.0", tk.END)
-        self._log_txt.config(state=tk.DISABLED)
+        job = self._selected_job()
+        txt = job.txt if job else self._log_txt
+        txt.config(state=tk.NORMAL)
+        txt.delete("1.0", tk.END)
+        txt.config(state=tk.DISABLED)
 
     _RE_DIR   = re.compile(r"Processando diret[óo]rio:\s*(.+?)\s*$")
     _RE_CHUNK = re.compile(r"Gerando chunk\s+\d+/(\d+)")
 
-    def _poll_log(self):
+    def _drain_log_q(self) -> bool:
         new_total = False
         try:
             while True:
-                msg, tag = self._log_q.get_nowait()
-                self._log_line(msg, tag)
-                new_total = self._scan_log_for_total(msg) or new_total
+                item = self._log_q.get_nowait()
+                if len(item) == 3:
+                    jid, msg, tag = item
+                    job = self._jobs.get(jid)
+                    self._log_line(msg, tag, job)
+                    if job is not None:
+                        new_total = self._scan_log_for_total(job, msg) or new_total
+                else:
+                    self._log_line(*item)
         except queue.Empty:
             pass
-        if new_total:
+        return new_total
+
+    def _poll_log(self):
+        if self._drain_log_q():
             self._refresh_assets()
         self.after(80, self._poll_log)
 
-    def _scan_log_for_total(self, msg: str) -> bool:
+    def _scan_log_for_total(self, job: "Job", msg: str) -> bool:
         """Extrai o total de chunks anunciado pelo pipeline (ex.: 'chunk 042/109').
 
         Retorna ``True`` quando descobre um total novo, para forçar refresh da tabela."""
         m = self._RE_DIR.search(msg)
         if m:
-            self._log_current_asset = m.group(1).strip()
+            job.current_asset = m.group(1).strip()
             return False
         m = self._RE_CHUNK.search(msg)
-        if m and self._log_current_asset:
+        if m and job.current_asset:
             total = int(m.group(1))
-            if self._live_chunk_total.get(self._log_current_asset) != total:
-                self._live_chunk_total[self._log_current_asset] = total
+            if self._live_chunk_total.get(job.current_asset) != total:
+                self._live_chunk_total[job.current_asset] = total
                 return True
         return False
 
     # ── Auto-refresh ───────────────────────────────────────────────────────────
     def _schedule_refresh(self):
         def _tick():
-            with self._proc_lock:
-                running = self._proc is not None and self._proc.poll() is None
+            running = self._any_running()
             # Só a lista do modo visível: varrer os assets de vídeo enquanto o
             # modo Texto está na tela é I/O de disco que ninguém vê.
             if self._is_text_mode():
