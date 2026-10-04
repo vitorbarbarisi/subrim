@@ -56,6 +56,63 @@ def _wh_readable_name(stem: str) -> str:
     return name.title()
 
 
+# Assinaturas de canal no nome que não trazem o "@<canal>" do YouTube.
+_WH_SIGNATURES = {"公視": "pts"}
+
+
+def _wh_channel_rules():
+    """(prefixos, assinaturas) dos canais do YouTube Monitor, para agrupar.
+
+    Assinatura = "@<nome do canal>" → prefixo (ex.: "@TVBSNEWS01" → "tvbs")."""
+    try:
+        cfg = ytm.load_channels_config(ytm.DEFAULT_CONFIG, required=False)
+    except Exception:  # noqa: BLE001
+        return [], dict(_WH_SIGNATURES)
+    prefixes, signatures = [], {}
+    for c in cfg.get("channels", []):
+        p = c.get("prefix")
+        if not p:
+            continue
+        prefixes.append(p)
+        if c.get("name"):
+            signatures[f"@{c['name']}"] = p
+    signatures.update(_WH_SIGNATURES)
+    return prefixes, signatures
+
+
+def _wh_group_keys(stems: list, prefixes: list, signatures: dict) -> dict:
+    """Grupo de cada stem (sem "_base") da lista do Warehouse; None = "Outros".
+
+    Ordem das regras: prefixo de canal explícito ("acquiring_…"), assinatura do
+    canal no nome ("@TVBSNEWS01", "公視"), letras + número ("clone100" → "clone")
+    e, por fim, série com sufixo numérico compartilhada por ≥2 itens
+    ("Cinco_Relacionamento_Confucio_1/_2")."""
+    out, series = {}, {}
+    for stem in stems:
+        key = next((p.lower() for p in prefixes if stem.startswith(f"{p}_")), None)
+        if key is None:
+            key = next((p.lower() for sig, p in signatures.items() if sig in stem), None)
+        if key is None:
+            m = re.match(r"([A-Za-z]+)\d", stem)
+            if m:
+                key = m.group(1).lower()
+        if key is None:
+            base = re.sub(r"[_ ]?\d+$", "", stem)
+            if base != stem and base:
+                series.setdefault(base, []).append(stem)
+        out[stem] = key
+    for base, members in series.items():
+        if len(members) >= 2:
+            for stem in members:
+                out[stem] = base
+    return out
+
+
+def _natural_key(s: str):
+    """Ordenação natural: 'Clone 37' antes de 'Clone 100'."""
+    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
+
+
 # Uma "palavra" precisa ter ao menos um caractere com conteúdo (CJK, letra ou
 # dígito). Sem isso, pontuação solta que sobra do parsing entrava na tabela
 # como se fosse vocabulário. A regra mora no word_vocab, que é o módulo comum
@@ -568,6 +625,7 @@ class App(tk.Tk):
                 self._nb.hide(tab)
 
         self._wh_archive_btn.config(state=tk.DISABLED)
+        self._wh_open.clear()   # os grupos de um modo não existem no outro
         self._wh_refresh()
         self._col_clear_results()
         if texto:
@@ -926,12 +984,14 @@ class App(tk.Tk):
         left = ttk.Frame(pw)
         pw.add(left, weight=2)
 
-        cols = ("name", "status")
-        wt = ttk.Treeview(left, columns=cols, show="headings", selectmode="extended")
-        wt.heading("name",   text="Nome",   anchor=tk.W)
+        # Árvore de dois níveis: grupo por prefixo ("Clone (32)") → bases. A
+        # coluna #0 é o Nome, com a seta de expandir/recolher.
+        wt = ttk.Treeview(left, columns=("status",), show="tree headings",
+                          selectmode="extended")
+        wt.heading("#0",     text="Nome",   anchor=tk.W)
         wt.heading("status", text="Status", anchor=tk.CENTER)
-        wt.column("name",   width=200, anchor=tk.W,      stretch=True)
-        wt.column("status", width=110, anchor=tk.CENTER, stretch=False)
+        wt.column("#0",     width=200, anchor=tk.W,      stretch=True)
+        wt.column("status", width=160, anchor=tk.CENTER, stretch=False)
         vsb = ttk.Scrollbar(left, orient=tk.VERTICAL, command=wt.yview)
         wt.configure(yscrollcommand=vsb.set)
         wt.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
@@ -939,6 +999,13 @@ class App(tk.Tk):
         wt.tag_configure("ok",       foreground="#27AE60")
         wt.tag_configure("archived", foreground="#2980B9")
         wt.tag_configure("missing",  foreground="#E74C3C")
+        wt.tag_configure("group",    font=("", 12, "bold"))
+        # Grupos abertos sobrevivem ao _wh_refresh (Atualizar, arquivar…).
+        self._wh_open: set = set()
+        wt.bind("<<TreeviewOpen>>",
+                lambda _: self._wh_open.add(self._wh_tree.focus()))
+        wt.bind("<<TreeviewClose>>",
+                lambda _: self._wh_open.discard(self._wh_tree.focus()))
         wt.bind("<<TreeviewSelect>>", self._wh_on_select)
         wt.bind("<Shift-Down>", lambda _: self._wh_extend_selection(1)  or "break")
         wt.bind("<Shift-Up>",   lambda _: self._wh_extend_selection(-1) or "break")
@@ -1022,7 +1089,10 @@ class App(tk.Tk):
         return TEXT_WAREHOUSE if self._is_text_mode() else WAREHOUSE
 
     def _wh_refresh(self):
-        """Recarrega a lista de base.txt do warehouse, ordenada alfabeticamente por nome legível."""
+        """Recarrega a lista de base.txt do warehouse, agrupada por prefixo.
+
+        Grupos ("Clone (32)") em ordem alfabética, "Outros" por último; dentro
+        de cada grupo, ordem natural do nome legível (Clone 37 < Clone 100)."""
         self._wh_tree.delete(*self._wh_tree.get_children())
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
         self._wh_freq_data = []
@@ -1034,45 +1104,82 @@ class App(tk.Tk):
             self._wh_count_var.set(f"{root.name}/ não encontrada")
             return
 
-        bases = sorted(root.glob("*_base.txt"),
-                       key=lambda p: _wh_readable_name(p.stem).lower())
-        # No modo Texto todo base listado JÁ é o arquivo arquivado — não há vídeo
-        # nem cache de frames a considerar, então o status é sempre o mesmo.
-        if self._is_text_mode():
-            for bf in bases:
-                self._wh_tree.insert("", tk.END, iid=str(bf),
-                                     values=(_wh_readable_name(bf.stem), "Arquivado"),
-                                     tags=("archived",))
-            self._wh_count_var.set(f"{len(bases)} texto(s) arquivado(s)")
-            return
-
+        bases = list(root.glob("*_base.txt"))
+        texto = self._is_text_mode()
+        # (base, nome legível, status, tag) de cada item.
+        rows = []
+        complete = archived = 0
         for bf in bases:
-            readable = _wh_readable_name(bf.stem)
-            # vídeo correspondente: mesmo prefixo sem _base, extensão .mp4
             prefix = bf.stem.replace("_base", "")
-            has_video = any(True for _ in WAREHOUSE.glob(f"{prefix}.mp4"))
-            fdir = _wh_frames_dir(prefix)
-            if has_video:
-                status, tag = "Completo", "ok"
-                if (WAREHOUSE / f"{prefix}_periods.txt").exists():
-                    status = "Completo · períodos"
-            elif fdir is not None:
+            # No modo Texto todo base listado JÁ é o arquivo arquivado — não há
+            # vídeo nem cache de frames a considerar, então o status é fixo.
+            if texto:
                 status, tag = "Arquivado", "archived"
-                if fdir.parent == FRAMES_PERIODS:
-                    status = "Arquivado · períodos"
             else:
-                status, tag = "Falta vídeo", "missing"
-            self._wh_tree.insert("", tk.END, iid=str(bf),
-                                 values=(readable, status), tags=(tag,))
+                # vídeo correspondente: mesmo prefixo sem _base, extensão .mp4
+                has_video = any(True for _ in WAREHOUSE.glob(f"{prefix}.mp4"))
+                fdir = _wh_frames_dir(prefix)
+                complete += has_video
+                archived += fdir is not None
+                if has_video:
+                    status, tag = "Completo", "ok"
+                    if (WAREHOUSE / f"{prefix}_periods.txt").exists():
+                        status = "Completo · períodos"
+                elif fdir is not None:
+                    status, tag = "Arquivado", "archived"
+                    if fdir.parent == FRAMES_PERIODS:
+                        status = "Arquivado · períodos"
+                else:
+                    status, tag = "Falta vídeo", "missing"
+            rows.append((bf, _wh_readable_name(bf.stem), status, tag))
 
-        total    = len(bases)
-        complete = sum(1 for bf in bases
-                       if any(True for _ in WAREHOUSE.glob(
-                           f"{bf.stem.replace('_base', '')}.mp4")))
-        archived = sum(1 for bf in bases
-                       if _wh_is_archived(bf.stem.replace("_base", "")))
+        prefixes, signatures = _wh_channel_rules()
+        keys = _wh_group_keys([bf.stem.replace("_base", "") for bf in bases],
+                              prefixes, signatures)
+        groups: dict = {}
+        for row in rows:
+            groups.setdefault(keys[row[0].stem.replace("_base", "")], []).append(row)
+
+        def _group_order(k):
+            return (k is None, _wh_readable_name(k).lower() if k else "")
+
+        for key in sorted(groups, key=_group_order):
+            members = sorted(groups[key], key=lambda r: _natural_key(r[1]))
+            gid = f"grp:{key or ''}"
+            nome = _wh_readable_name(key) if key else "Outros"
+            n_ok  = sum(1 for r in members if r[3] == "ok")
+            n_arq = sum(1 for r in members if r[3] == "archived")
+            n_mis = sum(1 for r in members if r[3] == "missing")
+            resumo = " · ".join(t for t in (
+                f"{n_ok} completo(s)" if n_ok else "",
+                f"{n_arq} arquiv." if n_arq else "",
+                f"{n_mis} falta vídeo" if n_mis else "") if t)
+            self._wh_tree.insert("", tk.END, iid=gid, text=f"{nome}  ({len(members)})",
+                                 values=(resumo,), tags=("group",),
+                                 open=gid in self._wh_open)
+            for bf, readable, status, tag in members:
+                self._wh_tree.insert(gid, tk.END, iid=str(bf), text=readable,
+                                     values=(status,), tags=(tag,))
+
+        n_grupos = sum(1 for k in groups if k)
+        grupos = f" · {n_grupos} grupo(s)"
+        if texto:
+            self._wh_count_var.set(f"{len(bases)} texto(s) arquivado(s){grupos}")
+            return
         extra = f" · {archived} arquivado(s)" if archived else ""
-        self._wh_count_var.set(f"{complete}/{total} com vídeo{extra}")
+        self._wh_count_var.set(f"{complete}/{len(bases)} com vídeo{extra}{grupos}")
+
+    def _wh_selected_bases(self) -> list:
+        """Bases da seleção, na ordem da árvore; um grupo vale todos os filhos."""
+        tree = self._wh_tree
+        sel = set(tree.selection())
+        out = []
+        for gid in tree.get_children():
+            filhos = tree.get_children(gid)
+            for iid in filhos:
+                if gid in sel or iid in sel:
+                    out.append(Path(iid))
+        return out
 
     def _wh_extend_selection(self, direction: int):
         """Estende a seleção com Shift+Seta (espelha a aba Coleções)."""
@@ -1089,8 +1196,7 @@ class App(tk.Tk):
     def _wh_archivable_selection(self):
         """Bases selecionadas que ainda têm mp4 original (candidatas a arquivar)."""
         out = []
-        for iid in self._wh_tree.selection():
-            bf = Path(iid)
+        for bf in self._wh_selected_bases():
             prefix = bf.stem.replace("_base", "")
             mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
             if mp4:
@@ -1108,7 +1214,7 @@ class App(tk.Tk):
             state=(tk.NORMAL if (n and not self._wh_archiving) else tk.DISABLED))
         # Gerar períodos não precisa de mp4 — vale para qualquer base selecionado.
         self._wh_periods_btn.config(
-            state=(tk.NORMAL if (self._wh_tree.selection() and not self._wh_archiving)
+            state=(tk.NORMAL if (self._wh_selected_bases() and not self._wh_archiving)
                    else tk.DISABLED))
 
     def _wh_on_select(self, _=None):
@@ -1118,7 +1224,11 @@ class App(tk.Tk):
             return
         # Detalhes: mostra o item com foco (ou o primeiro da seleção).
         focus = self._wh_tree.focus()
-        bf = Path(focus if focus in sel else sel[0])
+        item = focus if focus in sel else sel[0]
+        if item.startswith("grp:"):
+            self._wh_show_group(item)
+            return
+        bf = Path(item)
         prefix = bf.stem.replace("_base", "")
         self._wh_selected_base = bf
 
@@ -1172,6 +1282,25 @@ class App(tk.Tk):
 
         threading.Thread(target=_work, daemon=True).start()
 
+    def _wh_show_group(self, gid: str):
+        """Detalhes de um grupo: contagem por status; a frequência fica vazia."""
+        self._wh_selected_base = None
+        self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
+        self._wh_freq_data = []
+        self._wh_freq_shown.set("")
+        tree = self._wh_tree
+        filhos = tree.get_children(gid)
+        tags = [tree.item(i, "tags")[0] for i in filhos]
+        self._wh_detail.set(
+            f"Grupo   : {tree.item(gid, 'text')}\n"
+            f"\n"
+            f"Bases          : {len(filhos)}\n"
+            f"  Completos    : {tags.count('ok')}\n"
+            f"  Arquivados   : {tags.count('archived')}\n"
+            f"  Falta vídeo  : {tags.count('missing')}\n"
+            f"\n"
+            f"Arquivar / Gerar períodos agem sobre o grupo inteiro.")
+
     def _wh_periods_selected(self):
         """(Re)gera o ``*_periods.txt`` dos bases selecionados.
 
@@ -1187,7 +1316,7 @@ class App(tk.Tk):
             return
         import periods_base
 
-        bases = [Path(iid) for iid in self._wh_tree.selection()]
+        bases = self._wh_selected_bases()
         if not bases:
             return
 
