@@ -69,6 +69,18 @@ class ChannelListError(Exception):
     pass
 
 
+class RateLimitedError(Exception):
+    """O YouTube limitou a sessão (dura até ~1h). Insistir só prolonga o
+    bloqueio — a execução inteira para e a próxima do cron tenta de novo."""
+
+
+RATE_LIMIT_MARKERS = ("rate-limited", "HTTP Error 429")
+
+
+def _is_rate_limited(text: str) -> bool:
+    return any(m in (text or "") for m in RATE_LIMIT_MARKERS)
+
+
 # --------------------------------------------------------------------------
 # Utilidades de tempo / nomes
 # --------------------------------------------------------------------------
@@ -205,6 +217,9 @@ def channel_settings(cfg: dict, channel: dict) -> dict:
         # --write-auto-subs) — legenda auto-gerada não tem a qualidade necessária
         # para substituir a transcrição do Whisper.
         "sub_langs": channel.get("sub_langs") or defaults.get("sub_langs", ""),
+        # Altura máxima do vídeo (ex.: 1080). 0/ausente = melhor disponível (pode
+        # ser 4K — ~4x maior em disco sem ganho para queimar legenda).
+        "max_height": int(channel.get("max_height") or defaults.get("max_height") or 0),
     }
 
 
@@ -295,9 +310,25 @@ def check_ffmpeg() -> bool:
         return False
 
 
+CHANNEL_ROOT_RE = re.compile(
+    r"^(https?://(?:www\.|m\.)?youtube\.com/(?:@[^/?#]+|channel/[^/?#]+|c/[^/?#]+|user/[^/?#]+))/?$"
+)
+
+
+def channel_videos_url(channel_url: str) -> str:
+    """Raiz do canal (``youtube.com/@handle``) → aba Vídeos (``.../videos``).
+
+    Na raiz, o --flat-playlist devolve as abas do canal ("Videos", "Shorts")
+    como entradas, não os vídeos — e o canal nunca teria candidatos.
+    """
+    m = CHANNEL_ROOT_RE.match(channel_url.strip())
+    return f"{m.group(1)}/videos" if m else channel_url
+
+
 def list_channel_video_ids(yt_bin: str, channel_url: str, max_candidates: int) -> List[str]:
     """Listagem barata via --flat-playlist (sem timestamp confiável)."""
-    cmd = [yt_bin, "--flat-playlist", "--playlist-end", str(max_candidates), "-J", channel_url]
+    cmd = [yt_bin, "--flat-playlist", "--playlist-end", str(max_candidates), "-J",
+           channel_videos_url(channel_url)]
     try:
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
     except subprocess.TimeoutExpired:
@@ -324,6 +355,8 @@ def get_video_details(yt_bin: str, video_id: str, cookies_file: Path) -> Optiona
         print(f"   ⚠️  Timeout ao obter detalhes de {video_id}")
         return None
     if result.returncode != 0:
+        if _is_rate_limited(result.stderr):
+            raise RateLimitedError(f"ao obter detalhes de {video_id}")
         print(f"   ⚠️  Falha ao obter detalhes de {video_id}: {_error_summary(result.stderr)}")
         return None
     try:
@@ -363,6 +396,7 @@ def _run_streamed(cmd: List[str], timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> 
     print(f"      $ {' '.join(str(c) for c in cmd[:6])} …", flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
     deadline = time.monotonic() + timeout
+    rate_limited = False
     while True:
         remaining = deadline - time.monotonic()
         if remaining <= 0:
@@ -380,6 +414,7 @@ def _run_streamed(cmd: List[str], timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> 
         if line == "":
             break  # EOF — processo terminou
         print(f"      {line.rstrip()}", flush=True)
+        rate_limited = rate_limited or _is_rate_limited(line)
 
     try:
         rc = proc.wait(timeout=30)
@@ -390,12 +425,14 @@ def _run_streamed(cmd: List[str], timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> 
         return False
     if rc != 0:
         print(f"   ❌ yt-dlp encerrou com código {rc}")
+        if rate_limited:
+            raise RateLimitedError("durante o download")
     return rc == 0
 
 
 def download_video(yt_bin: str, video_id: str, cookies_file: Path, out_template: Path,
                     download_format: str, has_ffmpeg: bool, sub_langs: str = "",
-                    timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> bool:
+                    timeout: float = DEFAULT_DOWNLOAD_TIMEOUT, max_height: int = 0) -> bool:
     cmd = [
         yt_bin,
         "--cookies", str(cookies_file),
@@ -403,12 +440,20 @@ def download_video(yt_bin: str, video_id: str, cookies_file: Path, out_template:
         "--fragment-retries", "10",
         "--retry-sleep", "exp=1:5",
         "--sleep-requests", "1",
+        # Pausa aleatória antes de cada vídeo: baixar um histórico inteiro em
+        # sequência, sem intervalo, rendeu rate limit do YouTube após ~10 vídeos.
+        "--sleep-interval", "5",
+        "--max-sleep-interval", "15",
         "--throttled-rate", "100K",
         "--output", str(out_template),
         "--newline",
         "--no-warnings",
     ]
     cmd += ["--format", download_format]
+    if max_height:
+        # Ordenação, não filtro: o "best" dos seletores vira o melhor até
+        # max_height; se o vídeo não tiver nada abaixo disso, pega o menor acima.
+        cmd += ["-S", f"res:{max_height}"]
     if "+" in download_format:   # alguma alternativa mescla vídeo+áudio (ffmpeg)
         cmd += ["--merge-output-format", "mp4"]
     if sub_langs:
@@ -504,9 +549,25 @@ def select_videos_to_process(state: MonitorState, channel_name: str, candidate_i
             })
             continue
 
-        details = get_video_details(yt_bin, vid, cookies_file)
-        if details is None:
-            continue  # falha transitória; a listagem vai trazê-lo de novo na próxima execução
+        if entry and entry.get("uploaded_at"):
+            # Já consultado antes: a data de publicação não muda, não pergunta
+            # de novo ao YouTube (sem isso, todo candidato fora da janela era
+            # consultado a cada execução do cron).
+            details = {
+                "id": vid,
+                "title": entry.get("title") or vid,
+                "uploaded_at": _parse_iso(entry.get("uploaded_at")),
+                "webpage_url": entry.get("url") or f"https://www.youtube.com/watch?v={vid}",
+            }
+        else:
+            details = get_video_details(yt_bin, vid, cookies_file)
+            if details is None:
+                continue  # falha transitória; a listagem vai trazê-lo de novo na próxima execução
+            if details["uploaded_at"] is not None:
+                state.upsert_video(
+                    channel_name, vid, title=details["title"], url=details["webpage_url"],
+                    uploaded_at=_iso(details["uploaded_at"]),
+                )
         if details["uploaded_at"] is None:
             print(f"   ⚠️  Sem data de publicação confiável para {vid} — ignorando por segurança")
             continue
@@ -543,7 +604,8 @@ def select_videos_to_process(state: MonitorState, channel_name: str, candidate_i
 
 def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path,
                   download_format: str, has_ffmpeg: bool, sub_langs: str, download_timeout: float,
-                  state: MonitorState, dry_run: bool, channel_prefix: str = "") -> None:
+                  state: MonitorState, dry_run: bool, channel_prefix: str = "",
+                  max_height: int = 0) -> None:
     vid = video["id"]
     entry = state.video_entry(channel_name, vid)
     if entry is None:
@@ -584,8 +646,17 @@ def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path
 
     out_template = local_dir / f"{stem}_{vid}.%(ext)s"
     print(f"   ⬇️  Baixando {channel_name}/{vid} — {video.get('title')}")
-    ok = download_video(yt_bin, vid, cookies_file, out_template, download_format, has_ffmpeg,
-                         sub_langs=sub_langs, timeout=download_timeout)
+    try:
+        ok = download_video(yt_bin, vid, cookies_file, out_template, download_format, has_ffmpeg,
+                             sub_langs=sub_langs, timeout=download_timeout, max_height=max_height)
+    except RateLimitedError:
+        # "failed" garante a nova tentativa numa próxima execução, mesmo fora da janela.
+        state.upsert_video(
+            channel_name, vid, status="failed",
+            attempts=entry.get("attempts", 0) + 1, last_error="rate_limited",
+        )
+        state.save()
+        raise
     found = find_downloaded_file(local_dir, stem, vid) if ok else None
     if not ok or found is None:
         state.upsert_video(
@@ -635,7 +706,8 @@ def process_channel(channel: dict, cfg: dict, state: MonitorState, yt_bin: str, 
     for video in to_process:
         handle_video(name, video, yt_bin, cookies_file, download_format, has_ffmpeg,
                      settings["sub_langs"], settings["download_timeout_seconds"], state, dry_run,
-                     channel_prefix=channel.get("prefix") or "")
+                     channel_prefix=channel.get("prefix") or "",
+                     max_height=settings["max_height"])
 
     if not dry_run:
         state.set_last_checked(name)
@@ -667,6 +739,9 @@ def main() -> int:
                         help="Sobrescreve sub_langs padrão de todos os canais (ex.: 'zh-Hant,zh'). "
                              "Baixa a legenda real (não auto-gerada) nesses idiomas, em ordem de "
                              "preferência, e reaproveita no lugar da transcrição via Whisper.")
+    parser.add_argument("--max-height", type=int,
+                        help="Altura máxima do vídeo (ex.: 1080); 0 = melhor disponível. "
+                             "Sobrescreve max_height do config")
     parser.add_argument("--channel", action="append",
                         help="Restringe a execução a um canal (campo 'name' do config; repetível)")
     parser.add_argument("--dry-run", action="store_true",
@@ -699,6 +774,11 @@ def main() -> int:
             cfg["defaults"]["max_candidates_per_channel"] = args.max_candidates
         if args.sub_langs is not None:
             cfg["defaults"]["sub_langs"] = args.sub_langs
+        if args.max_height is not None:
+            # Sobrescreve inclusive o max_height definido por canal.
+            cfg["defaults"]["max_height"] = args.max_height
+            for ch in cfg["channels"]:
+                ch.pop("max_height", None)
 
         yt_bin = resolve_yt_dlp(args.yt_dlp_path or cfg["defaults"].get("yt_dlp_path"))
         if yt_bin is None:
@@ -764,8 +844,15 @@ def main() -> int:
                 print(f"   ⚠️  Espaço em disco abaixo do mínimo configurado — pulando canal '{channel.get('name')}'")
                 any_channel_failed = True
                 continue
-            ok = process_channel(channel, cfg, state, yt_bin, download_format, has_ffmpeg,
-                                 args.dry_run, verbose=args.verbose)
+            try:
+                ok = process_channel(channel, cfg, state, yt_bin, download_format, has_ffmpeg,
+                                     args.dry_run, verbose=args.verbose)
+            except RateLimitedError as e:
+                state.save()
+                print(f"\n⛔ YouTube limitou a sessão ({e}) — encerrando esta execução; "
+                      "a próxima tenta de novo (o bloqueio dura até ~1h).")
+                any_channel_failed = True
+                break
             any_channel_failed = any_channel_failed or not ok
 
         print(f"\n🏁 Fim: {now_iso()}")

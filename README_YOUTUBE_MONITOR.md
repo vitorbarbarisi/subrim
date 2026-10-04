@@ -88,6 +88,14 @@ Edite `youtube_channels.json`:
   um yt-dlp travado numa conexão que nunca erra nem progride (ver seção
   "Proteção" abaixo).
 - `sub_langs` (padrão vazio = desativado): ver seção "Legendas" abaixo.
+- `max_height` (padrão vazio = melhor disponível): altura máxima do vídeo,
+  ex.: `1080`. Sem limite, muitos canais vêm em 4K (~4x maior em disco, sem
+  ganho para queimar legenda). `--max-height` sobrescreve na linha de comando.
+- Baixar o histórico inteiro de um canal:
+  `python3 youtube_monitor.py --channel <nome> --lookback-hours 1000000 --max-candidates 1000`.
+  Há pausa de 5–15s entre vídeos; se o YouTube limitar a sessão ("rate-limited"),
+  a execução para, os vídeos pendentes ficam como `failed` e o cron retoma
+  sozinho nas próximas horas.
 - Qualquer campo de `defaults` pode ser sobrescrito por canal (ex.: um canal
   com cookies próprios: adicione `"cookies_file": "outro_cookies.txt"` no
   item do canal).
