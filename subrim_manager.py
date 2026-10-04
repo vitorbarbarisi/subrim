@@ -3099,21 +3099,30 @@ class App(tk.Tk):
         row = self._tree.identify_row(event.y)
         if not row:
             return "break"   # cabeçalho ou área vazia: não abre menu
-        # O menu age só sobre o item clicado: desfaz uma seleção múltipla, senão
-        # os botões de lote continuariam apontando para os outros itens.
-        self._tree.selection_set(row)
-        self._tree.focus(row)
-        self._selected_many = []
-        self._selected = detect_status(ASSETS / row, self._drive_upload_on.get())
-        self._update_detail(self._selected)
+        sel = self._tree.selection()
+        if row in sel and len(sel) > 1:
+            # Clique dentro de uma seleção múltipla: mantém a seleção. Só o
+            # Excluir age em lote; Transcrever e Abrir vídeo são de um item só.
+            self._assets_menu.entryconfigure(0, state=tk.DISABLED)
+            self._assets_menu.entryconfigure(1, state=tk.DISABLED)
+            self._assets_menu.entryconfigure(3, label=f"Excluir {len(sel)} itens...")
+        else:
+            # Fora da seleção: o menu age só sobre o item clicado, senão os
+            # botões de lote continuariam apontando para os outros itens.
+            self._tree.selection_set(row)
+            self._tree.focus(row)
+            self._selected_many = []
+            self._selected = detect_status(ASSETS / row, self._drive_upload_on.get())
+            self._update_detail(self._selected)
 
-        # Recursivo (ao contrário de has_video): pastas como a do youtube_monitor
-        # guardam os mp4 uma subpasta abaixo (uma por canal), não soltos aqui.
-        has_any_mp4 = next(self._selected["path"].rglob("*.mp4"), None) is not None
-        self._assets_menu.entryconfigure(
-            0, state=tk.NORMAL if has_any_mp4 else tk.DISABLED)
-        self._assets_menu.entryconfigure(
-            1, state=tk.NORMAL if self._asset_video(row) else tk.DISABLED)
+            # Recursivo (ao contrário de has_video): pastas como a do youtube_monitor
+            # guardam os mp4 uma subpasta abaixo (uma por canal), não soltos aqui.
+            has_any_mp4 = next(self._selected["path"].rglob("*.mp4"), None) is not None
+            self._assets_menu.entryconfigure(
+                0, state=tk.NORMAL if has_any_mp4 else tk.DISABLED)
+            self._assets_menu.entryconfigure(
+                1, state=tk.NORMAL if self._asset_video(row) else tk.DISABLED)
+            self._assets_menu.entryconfigure(3, label="Excluir...")
         try:
             self._assets_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -3146,24 +3155,31 @@ class App(tk.Tk):
         )
 
     def _excluir_selected(self):
-        """Move a pasta do asset (e a _sub, se houver) para a Lixeira do macOS."""
-        if not self._selected:
+        """Move a pasta de cada asset selecionado (e a _sub, se houver) para a
+        Lixeira do macOS. Aceita seleção múltipla."""
+        names = list(self._tree.selection())
+        if not names:
             return
         with self._proc_lock:
             if self._proc and self._proc.poll() is None:
                 messagebox.showwarning("Processo em execução",
                                        "Aguarde ou pare o processo atual antes de excluir.")
                 return
-        name = self._selected["name"]
-        targets = [p for p in (ASSETS / name, ASSETS / f"{name}_sub") if p.exists()]
+        targets = [p for n in names
+                   for p in (ASSETS / n, ASSETS / f"{n}_sub") if p.exists()]
         if not targets:
             return
-        msg = (f"Tem certeza que deseja excluir '{name}'?\n\n"
-               "Serão movidas para a Lixeira:\n"
-               + "\n".join(f"  • assets/{p.name}/" for p in targets))
-        if not messagebox.askyesno("Excluir asset", msg,
-                                   icon=messagebox.WARNING, default=messagebox.NO):
+        shown = targets[:15]
+        listing = "\n".join(f"  • assets/{p.name}/" for p in shown)
+        if len(targets) > len(shown):
+            listing += f"\n  … e mais {len(targets) - len(shown)} pasta(s)"
+        what = f"'{names[0]}'" if len(names) == 1 else f"{len(names)} assets"
+        msg = (f"Tem certeza que deseja excluir {what}?\n\n"
+               "Serão movidas para a Lixeira:\n" + listing)
+        if not messagebox.askyesno("Excluir asset" if len(names) == 1 else "Excluir assets",
+                                   msg, icon=messagebox.WARNING, default=messagebox.NO):
             return
+        failed = set()
         for p in targets:
             # Finder em vez de shutil.rmtree: vai para a Lixeira, recuperável.
             path = str(p.resolve()).replace("\\", "\\\\").replace('"', '\\"')
@@ -3172,12 +3188,17 @@ class App(tk.Tk):
                  f'tell application "Finder" to delete POSIX file "{path}"'],
                 capture_output=True, text=True)
             if res.returncode != 0:
-                messagebox.showerror("Erro ao excluir",
-                                     f"Não foi possível excluir {p}:\n{res.stderr.strip()}")
-                break
-        else:
-            self._log_line(f"🗑 Excluído: {name}", "success")
+                failed.add(p.name)
+                self._log_line(f"❌ Não foi possível excluir {p}: {res.stderr.strip()}", "error")
+        for n in names:
+            if n not in failed and f"{n}_sub" not in failed:
+                self._log_line(f"🗑 Excluído: {n}", "success")
+        if failed:
+            messagebox.showerror("Erro ao excluir",
+                                 "Não foi possível excluir:\n"
+                                 + "\n".join(f"  • {f}" for f in sorted(failed)))
         self._selected = None
+        self._selected_many = []
         self._refresh_assets()
 
     # ── Source / download logic ────────────────────────────────────────────────

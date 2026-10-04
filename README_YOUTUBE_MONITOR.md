@@ -54,7 +54,10 @@ Edite `youtube_channels.json`:
     "cookies_file": "cookies.txt",
     "max_candidates_per_channel": 20,
     "yt_dlp_path": "yt-dlp",
-    "min_free_disk_gb": 2
+    "min_free_disk_gb": 2,
+    "force_progressive": false,
+    "download_timeout_seconds": 1200,
+    "sub_langs": ""
   },
   "channels": [
     {
@@ -72,6 +75,11 @@ Edite `youtube_channels.json`:
 - `lookback_hours` maior que o intervalo do cron (padrão 1h) dá folga contra
   execuções atrasadas, execuções que falharam e vídeos publicados bem na
   borda da hora.
+- `download_timeout_seconds` (padrão 1200 = 20min): tempo máximo por
+  download antes de matar o processo e marcar como falha — protege contra
+  um yt-dlp travado numa conexão que nunca erra nem progride (ver seção
+  "Proteção" abaixo).
+- `sub_langs` (padrão vazio = desativado): ver seção "Legendas" abaixo.
 - Qualquer campo de `defaults` pode ser sobrescrito por canal (ex.: um canal
   com cookies próprios: adicione `"cookies_file": "outro_cookies.txt"` no
   item do canal).
@@ -124,13 +132,47 @@ rotacionar — um `logrotate` simples resolve:
 }
 ```
 
-## 🔒 Proteção contra execuções sobrepostas
+## 📝 Legendas (reaproveitar em vez de transcrever)
+
+Quando o canal já tem legenda real (feita pelo criador, não auto-gerada)
+num idioma que interessa, configurar `sub_langs` baixa essa legenda junto
+com o vídeo em vez de depender só da transcrição via Whisper depois — mais
+rápido e, sendo legenda de verdade, geralmente mais precisa.
+
+```json
+{ "name": "meu_canal_com_legenda", "url": "...", "sub_langs": "zh-Hant,zh" }
+```
+
+`sub_langs` é uma lista de códigos de idioma em ordem de prioridade — baixa
+só a primeira que existir (nunca a legenda auto-gerada, que não tem
+qualidade suficiente). A legenda baixada é salva como
+`<vídeo>.zht.srt` ao lado do `.mp4`, a mesma convenção de nome que
+`transcribe_video.py` já usa para o resultado do Whisper — então
+`transcribe_asset.py`/`transcribe_video.py` reconhecem e **pulam a
+transcrição automaticamente** quando esse arquivo já existe. Para checar
+quais idiomas um vídeo realmente tem disponível:
+```bash
+yt-dlp --list-subs "https://www.youtube.com/watch?v=<id>"
+```
+(procure a seção "Available subtitles", não "Available automatic
+captions" — essa segunda é só a lista de tradução automática do YouTube,
+não legenda de verdade.)
+
+## 🔒 Proteção contra execuções sobrepostas e travamentos
 
 O script usa `flock` num arquivo de lock (`youtube_monitor.lock`) para
-garantir que só uma execução roda por vez — se um download demorar mais de
-1h, a próxima chamada do cron simplesmente sai (código 0, não é erro) em vez
-de rodar em paralelo. Para testes manuais onde isso atrapalha, use
-`--no-lock` (nunca no cron).
+garantir que só uma execução roda por vez — se uma ainda estiver em
+andamento, a próxima chamada do cron simplesmente sai (código 0, não é
+erro) em vez de rodar em paralelo. Para testes manuais onde isso atrapalha,
+use `--no-lock` (nunca no cron).
+
+Cada download individual também tem um **timeout** (`download_timeout_seconds`,
+padrão 20min) — sem isso, um yt-dlp que trava numa conexão que para de
+responder (sem erro, sem progresso) prendia o processo pra sempre, e com
+ele o lock, travando todas as execuções seguintes do cron indefinidamente
+(já aconteceu: uma execução ficou 6h30 presa num único vídeo). Se isso
+acontecer mesmo com o timeout, o vídeo é marcado `"failed"` e tentado de
+novo na próxima execução, como qualquer outra falha.
 
 ## 🩺 Diagnóstico
 

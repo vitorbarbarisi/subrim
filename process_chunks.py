@@ -1516,7 +1516,9 @@ def apply_subtitles_to_chunk(input_video: Path, subtitles: Dict[float, Tuple[str
         process = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            # stderr no mesmo pipe, lido continuamente: um stderr=PIPE só lido no
+            # fim trava o ffmpeg quando os avisos passam de 64 KB.
+            stderr=subprocess.STDOUT,
             text=True,
             bufsize=1,
             universal_newlines=True
@@ -1539,11 +1541,8 @@ def apply_subtitles_to_chunk(input_video: Path, subtitles: Dict[float, Tuple[str
                     if int(progress_percent) > last_progress:
                         last_progress = int(progress_percent)
                         print(f"\r   📊 Progresso: {last_progress:3d}%", end='', flush=True)
-
-        # Read stderr
-        stderr_data = process.stderr.read()
-        if stderr_data:
-            stderr_output.append(stderr_data)
+                elif not re.match(r'^[a-z_0-9]+=\S*\s*$', line):
+                    stderr_output = (stderr_output + [line])[-30:]
 
         # Wait for completion
         return_code = process.wait()

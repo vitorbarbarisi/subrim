@@ -50,6 +50,10 @@ def organize_and_transcribe(asset_name: str, model: str = "medium", language: st
             continue
         target_dir.mkdir(parents=True)
         shutil.move(str(video), str(target_dir / video.name))
+        sibling_srt = video.with_name(f"{video.stem}.zht.srt")
+        if sibling_srt.exists():
+            shutil.move(str(sibling_srt), str(target_dir / sibling_srt.name))
+            print(f"📝 Legenda encontrada ao lado do vídeo, movida junto: {sibling_srt.name}")
         print(f"📁 assets/{video.stem}/ criado, vídeo movido.")
         if not transcribe_video.transcribe_video(video.stem, model, language):
             ok = False

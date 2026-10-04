@@ -5,13 +5,21 @@
     "max_candidates_per_channel": 20,
     "yt_dlp_path": "yt-dlp",
     "min_free_disk_gb": 2,
-    "force_progressive": false
+    "force_progressive": false,
+    "download_timeout_seconds": 1200,
+    "sub_langs": ""
   },
   "channels": [
     {
       "name": "canal_exemplo",
       "url": "https://www.youtube.com/@canalexemplo/videos",
       "enabled": true
+    },
+    {
+      "name": "canal_com_legenda_exemplo",
+      "url": "https://www.youtube.com/@canalcomlegenda/videos",
+      "enabled": false,
+      "sub_langs": "zh-Hant,zh"
     }
   ]
 }

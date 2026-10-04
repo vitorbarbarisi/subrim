@@ -21,8 +21,12 @@ import subprocess
 import os
 import re
 import json
+from collections import deque
 from pathlib import Path
 from typing import Dict, List, Tuple
+
+# Linhas "chave=valor" do -progress pipe:1 (não são log do ffmpeg).
+_PROGRESS_KEY = re.compile(r'^[a-z_0-9]+=\S*\s*$')
 
 
 def find_mp4_file(directory: Path) -> Path:
@@ -89,19 +93,24 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
     ]
 
     def _run(cmd) -> int:
+        # stderr vai para o MESMO pipe do stdout, lido continuamente. Com um
+        # stderr=PIPE separado e só lido no fim, vídeos que geram muitos avisos
+        # (ex.: "Late SEI is not implemented" do YouTube) enchem o buffer de
+        # 64 KB e o ffmpeg trava, com o progresso parado para sempre.
         process = subprocess.Popen(
-            cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
             text=True, universal_newlines=True,
         )
+        log_tail = deque(maxlen=20)
         for line in process.stdout:
-            if line.startswith('frame=') or line.startswith('out_time='):
-                pass  # progresso silencioso (pipe:1 com -progress)
-            if 'time=' in line:
-                t = line.strip().split('time=')[-1].split()[0]
+            if line.startswith('out_time='):
+                t = line.strip().split('=', 1)[1]
                 print(f"   ⏱️  Progresso: {t}", end='\r')
+            elif not _PROGRESS_KEY.match(line):
+                log_tail.append(line.rstrip())
         rc = process.wait()
         if rc != 0:
-            print(f"\n   ⚠️  ffmpeg saiu com código {rc}: {process.stderr.read()[:300]}")
+            print(f"\n   ⚠️  ffmpeg saiu com código {rc}: {' | '.join(log_tail)[-600:]}")
         return rc
 
     try:

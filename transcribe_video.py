@@ -236,7 +236,15 @@ def transcribe_video(directory_name: str,
     
     video_file = video_files[0]
     print(f"📹 Vídeo encontrado: {video_file.name}")
-    
+
+    # Se já existe uma legenda .zht.srt (baixada do YouTube pelo youtube_monitor,
+    # ou de uma transcrição anterior), reaproveita em vez de rodar o Whisper de
+    # novo — é bem mais rápido e, quando é legenda real do criador, mais precisa.
+    output_srt = assets_dir / f"{video_file.stem}.zht.srt"
+    if output_srt.exists():
+        print(f"✅ Legenda já existe, pulando transcrição: {output_srt.name}")
+        return True
+
     # Create temp directory for audio
     temp_dir = Path(tempfile.mkdtemp())
     audio_file = temp_dir / "audio.wav"

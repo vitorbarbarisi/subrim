@@ -24,9 +24,11 @@ import fcntl
 import json
 import os
 import re
+import select
 import shutil
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
@@ -44,6 +46,23 @@ FORMAT_WITH_FFMPEG = (
     "bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio/best[ext=mp4]/best"
 )
 FORMAT_NO_FFMPEG = "best[ext=mp4]/best"
+# force_progressive com ffmpeg: tenta o progressivo primeiro (contorna o 403/SABR),
+# mas cai para vídeo+áudio separados quando o vídeo não tem progressivo — o
+# YouTube deixou de oferecer o formato 18 em muitos vídeos, e aí só o
+# progressivo dava "Requested format is not available".
+FORMAT_PROGRESSIVE_FIRST = (
+    f"{FORMAT_NO_FFMPEG}/bestvideo[ext=mp4]+bestaudio[ext=m4a]/bestvideo+bestaudio"
+)
+
+# Sem isso, um download travado numa conexão que para de responder (sem erro,
+# sem dado novo) prende o processo pra sempre — e com ele o lock, bloqueando
+# todas as execuções seguintes do cron. Aconteceu de verdade: uma execução
+# ficou 6h30 presa num único vídeo.
+DEFAULT_DOWNLOAD_TIMEOUT = 1200  # 20 min
+
+# Extensões que nunca são "o vídeo baixado" — legendas e afins.
+NON_VIDEO_SUFFIXES = {".part", ".ytdl", ".temp", ".srt", ".vtt", ".ttml", ".json3",
+                       ".srv1", ".srv2", ".srv3"}
 
 
 class ChannelListError(Exception):
@@ -149,6 +168,15 @@ def channel_settings(cfg: dict, channel: dict) -> dict:
             channel.get("max_candidates_per_channel")
             or defaults.get("max_candidates_per_channel", 20)
         ),
+        "download_timeout_seconds": (
+            channel.get("download_timeout_seconds")
+            or defaults.get("download_timeout_seconds", DEFAULT_DOWNLOAD_TIMEOUT)
+        ),
+        # Códigos de idioma de legenda, em ordem de preferência (ex.: "zh-Hant,zh").
+        # Vazio = não baixa legenda. Só pega legenda REAL (--write-subs, nunca
+        # --write-auto-subs) — legenda auto-gerada não tem a qualidade necessária
+        # para substituir a transcrição do Whisper.
+        "sub_langs": channel.get("sub_langs") or defaults.get("sub_langs", ""),
     }
 
 
@@ -191,7 +219,7 @@ class MonitorState:
         ch = self.channel(channel_name)
         entry = ch["videos"].setdefault(video_id, {
             "title": None, "url": None, "uploaded_at": None,
-            "status": "pending", "local_path": None,
+            "status": "pending", "local_path": None, "subtitle_path": None,
             "attempts": 0, "last_error": None, "updated_at": None,
         })
         entry.update(fields)
@@ -296,19 +324,50 @@ def get_video_details(yt_bin: str, video_id: str, cookies_file: Path) -> Optiona
     }
 
 
-def _run_streamed(cmd: List[str]) -> bool:
+def _run_streamed(cmd: List[str], timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> bool:
+    """Roda cmd espelhando stdout linha a linha, com um timeout de verdade.
+
+    ``for line in proc.stdout`` sozinho bloqueia para sempre se o processo
+    parar de produzir saída sem terminar (conexão travada) — usa select()
+    para nunca esperar mais que ``timeout`` no total, e mata o processo se
+    estourar.
+    """
     print(f"      $ {' '.join(str(c) for c in cmd[:6])} …", flush=True)
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1)
-    for line in proc.stdout:
+    deadline = time.monotonic() + timeout
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            print(f"   ❌ Timeout de {timeout:.0f}s excedido — encerrando processo travado")
+            proc.kill()
+            try:
+                proc.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            return False
+        ready, _, _ = select.select([proc.stdout], [], [], min(remaining, 5))
+        if not ready:
+            continue
+        line = proc.stdout.readline()
+        if line == "":
+            break  # EOF — processo terminou
         print(f"      {line.rstrip()}", flush=True)
-    rc = proc.wait()
+
+    try:
+        rc = proc.wait(timeout=30)
+    except subprocess.TimeoutExpired:
+        print("   ❌ Processo não terminou após EOF do stdout — encerrando")
+        proc.kill()
+        proc.wait()
+        return False
     if rc != 0:
         print(f"   ❌ yt-dlp encerrou com código {rc}")
     return rc == 0
 
 
 def download_video(yt_bin: str, video_id: str, cookies_file: Path, out_template: Path,
-                    has_ffmpeg: bool) -> bool:
+                    download_format: str, has_ffmpeg: bool, sub_langs: str = "",
+                    timeout: float = DEFAULT_DOWNLOAD_TIMEOUT) -> bool:
     cmd = [
         yt_bin,
         "--cookies", str(cookies_file),
@@ -321,20 +380,59 @@ def download_video(yt_bin: str, video_id: str, cookies_file: Path, out_template:
         "--newline",
         "--no-warnings",
     ]
-    if has_ffmpeg:
-        cmd += ["--format", FORMAT_WITH_FFMPEG, "--merge-output-format", "mp4"]
-    else:
-        cmd += ["--format", FORMAT_NO_FFMPEG]
+    cmd += ["--format", download_format]
+    if "+" in download_format:   # alguma alternativa mescla vídeo+áudio (ffmpeg)
+        cmd += ["--merge-output-format", "mp4"]
+    if sub_langs:
+        # --write-subs (nunca --write-auto-subs): só legenda real do criador,
+        # não a auto-gerada — essa não tem qualidade pra dispensar o Whisper.
+        cmd += ["--write-subs", "--sub-langs", sub_langs, "--sub-format", "srt/best"]
+        if has_ffmpeg:
+            cmd += ["--convert-subs", "srt"]
     cmd.append(f"https://www.youtube.com/watch?v={video_id}")
-    return _run_streamed(cmd)
+    return _run_streamed(cmd, timeout=timeout)
 
 
 def find_downloaded_file(local_dir: Path, prefix: str, video_id: str) -> Optional[Path]:
     matches = [
         p for p in local_dir.glob(f"{prefix}_{video_id}.*")
-        if p.suffix not in (".part", ".ytdl", ".temp")
+        if p.suffix not in NON_VIDEO_SUFFIXES
     ]
     return sorted(matches)[0] if matches else None
+
+
+def select_and_normalize_subtitle(local_dir: Path, prefix: str, video_id: str,
+                                   sub_langs: str) -> Optional[Path]:
+    """Entre as legendas baixadas (uma por idioma pedido), fica só com a de
+    maior prioridade em ``sub_langs`` e renomeia para ``<prefix>_<id>.zht.srt``
+    — mesma convenção de nome que transcribe_video.py já usa para o resultado
+    do Whisper, então o pipeline de transcrição aceita ela no lugar sem saber
+    que veio do YouTube. Remove as legendas de idiomas alternativos baixadas
+    a mais, se houver."""
+    base = f"{prefix}_{video_id}"
+    by_lang: Dict[str, Path] = {}
+    for p in sorted(local_dir.glob(f"{base}.*.srt")):
+        lang = p.name[len(base) + 1:-len(".srt")]
+        by_lang[lang] = p
+
+    chosen = None
+    for lang in (l.strip() for l in sub_langs.split(",")):
+        if lang in by_lang:
+            chosen = by_lang.pop(lang)
+            break
+
+    for leftover in by_lang.values():
+        try:
+            leftover.unlink()
+        except OSError:
+            pass
+
+    if chosen is None:
+        return None
+    target = local_dir / f"{base}.zht.srt"
+    if chosen != target:
+        chosen.replace(target)
+    return target
 
 
 def _check_disk_space(path: Path, min_free_gb: float) -> bool:
@@ -416,7 +514,8 @@ def select_videos_to_process(state: MonitorState, channel_name: str, candidate_i
 # --------------------------------------------------------------------------
 
 def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path,
-                  has_ffmpeg: bool, state: MonitorState, dry_run: bool) -> None:
+                  download_format: str, has_ffmpeg: bool, sub_langs: str, download_timeout: float,
+                  state: MonitorState, dry_run: bool) -> None:
     vid = video["id"]
     entry = state.video_entry(channel_name, vid)
     if entry is None:
@@ -453,7 +552,8 @@ def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path
 
     out_template = local_dir / f"{prefix}_{vid}.%(ext)s"
     print(f"   ⬇️  Baixando {channel_name}/{vid} — {video.get('title')}")
-    ok = download_video(yt_bin, vid, cookies_file, out_template, has_ffmpeg)
+    ok = download_video(yt_bin, vid, cookies_file, out_template, download_format, has_ffmpeg,
+                         sub_langs=sub_langs, timeout=download_timeout)
     found = find_downloaded_file(local_dir, prefix, vid) if ok else None
     if not ok or found is None:
         state.upsert_video(
@@ -464,15 +564,22 @@ def handle_video(channel_name: str, video: dict, yt_bin: str, cookies_file: Path
         state.save()
         return
 
+    subtitle_path = None
+    if sub_langs:
+        subtitle_path = select_and_normalize_subtitle(local_dir, prefix, vid, sub_langs)
+        if subtitle_path:
+            print(f"   📝 Legenda encontrada e reaproveitada: {subtitle_path.name}")
+
     state.upsert_video(
-        channel_name, vid, status="downloaded", local_path=str(found), last_error=None,
+        channel_name, vid, status="downloaded", local_path=str(found),
+        subtitle_path=str(subtitle_path) if subtitle_path else None, last_error=None,
     )
     state.save()
     print(f"   ✅ Baixado: {found.name}")
 
 
-def process_channel(channel: dict, cfg: dict, state: MonitorState, yt_bin: str, has_ffmpeg: bool,
-                     dry_run: bool, verbose: bool = False) -> bool:
+def process_channel(channel: dict, cfg: dict, state: MonitorState, yt_bin: str, download_format: str,
+                     has_ffmpeg: bool, dry_run: bool, verbose: bool = False) -> bool:
     name = sanitize_name(channel["name"])
     settings = channel_settings(cfg, channel)
     cookies_file = Path(settings["cookies_file"])
@@ -494,7 +601,8 @@ def process_channel(channel: dict, cfg: dict, state: MonitorState, yt_bin: str, 
     if not to_process:
         print("   ✅ Nada novo dentro da janela configurada")
     for video in to_process:
-        handle_video(name, video, yt_bin, cookies_file, has_ffmpeg, state, dry_run)
+        handle_video(name, video, yt_bin, cookies_file, download_format, has_ffmpeg,
+                     settings["sub_langs"], settings["download_timeout_seconds"], state, dry_run)
 
     if not dry_run:
         state.set_last_checked(name)
@@ -519,6 +627,13 @@ def main() -> int:
     parser.add_argument("--cookies", help="Sobrescreve o cookies_file padrão de todos os canais")
     parser.add_argument("--lookback-hours", type=float,
                         help="Sobrescreve lookback_hours padrão de todos os canais")
+    parser.add_argument("--max-candidates", type=int,
+                        help="Sobrescreve max_candidates_per_channel padrão de todos os canais "
+                             "(útil para baixar o histórico inteiro de um canal com --lookback-hours alto)")
+    parser.add_argument("--sub-langs",
+                        help="Sobrescreve sub_langs padrão de todos os canais (ex.: 'zh-Hant,zh'). "
+                             "Baixa a legenda real (não auto-gerada) nesses idiomas, em ordem de "
+                             "preferência, e reaproveita no lugar da transcrição via Whisper.")
     parser.add_argument("--channel", action="append",
                         help="Restringe a execução a um canal (campo 'name' do config; repetível)")
     parser.add_argument("--dry-run", action="store_true",
@@ -527,9 +642,10 @@ def main() -> int:
     parser.add_argument("--no-lock", action="store_true",
                         help="Pula o lock de execução única — uso manual apenas, nunca no cron")
     parser.add_argument("--force-progressive", action="store_true",
-                        help="Ignora o ffmpeg e força o formato progressivo (qualidade menor, "
-                             "mas contorna o 403/SABR que o formato bestvideo+bestaudio pode dar "
-                             "em algumas redes/versões do yt-dlp)")
+                        help="Prefere o formato progressivo (qualidade menor, mas contorna o "
+                             "403/SABR que o bestvideo+bestaudio pode dar em algumas redes/versões "
+                             "do yt-dlp); se o vídeo não tiver progressivo, cai para vídeo+áudio "
+                             "separados")
     parser.add_argument("-v", "--verbose", action="store_true", help="Log mais detalhado")
     args = parser.parse_args()
 
@@ -546,6 +662,10 @@ def main() -> int:
             cfg["defaults"]["cookies_file"] = args.cookies
         if args.lookback_hours is not None:
             cfg["defaults"]["lookback_hours"] = args.lookback_hours
+        if args.max_candidates is not None:
+            cfg["defaults"]["max_candidates_per_channel"] = args.max_candidates
+        if args.sub_langs is not None:
+            cfg["defaults"]["sub_langs"] = args.sub_langs
 
         yt_bin = resolve_yt_dlp(args.yt_dlp_path or cfg["defaults"].get("yt_dlp_path"))
         if yt_bin is None:
@@ -553,12 +673,17 @@ def main() -> int:
             return 1
 
         force_progressive = args.force_progressive or bool(cfg["defaults"].get("force_progressive"))
-        has_ffmpeg = check_ffmpeg() and not force_progressive
-        if force_progressive:
-            print("ℹ️  Formato progressivo forçado (--force-progressive/config) — ffmpeg ignorado.")
-        elif not has_ffmpeg:
+        has_ffmpeg = check_ffmpeg()
+        if not has_ffmpeg:
+            download_format = FORMAT_NO_FFMPEG
             print("⚠️  ffmpeg não encontrado — downloads ficarão limitados a streams progressivos.")
             print("   Instale com: sudo apt install ffmpeg")
+        elif force_progressive:
+            download_format = FORMAT_PROGRESSIVE_FIRST
+            print("ℹ️  Progressivo preferido (--force-progressive/config); sem ele, "
+                  "cai para vídeo+áudio separados.")
+        else:
+            download_format = FORMAT_WITH_FFMPEG
 
         channels = [c for c in cfg["channels"] if c.get("enabled", True)]
         if args.channel:
@@ -606,7 +731,8 @@ def main() -> int:
                 print(f"   ⚠️  Espaço em disco abaixo do mínimo configurado — pulando canal '{channel.get('name')}'")
                 any_channel_failed = True
                 continue
-            ok = process_channel(channel, cfg, state, yt_bin, has_ffmpeg, args.dry_run, verbose=args.verbose)
+            ok = process_channel(channel, cfg, state, yt_bin, download_format, has_ffmpeg,
+                                 args.dry_run, verbose=args.verbose)
             any_channel_failed = any_channel_failed or not ok
 
         print(f"\n🏁 Fim: {now_iso()}")
