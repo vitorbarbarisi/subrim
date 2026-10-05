@@ -2794,11 +2794,13 @@ class App(tk.Tk):
     def _col_bind_mouse_nav(self, widget):
         """Clique avança (como o espaço), botão direito volta.
 
-        No macOS (aqua) o botão direito é o Button-2 — e Ctrl+clique também
-        conta como clique direito; nos demais sistemas é o Button-3."""
+        O botão direito é o Button-3, inclusive no macOS a partir do Tk 8.7/9;
+        no Tk 8.6 do macOS (aqua) ele era o Button-2, e Ctrl+clique também
+        conta como clique direito. Liga-se tudo: no Tk 9 o Button-2 é o botão
+        do meio, e voltar com ele não atrapalha."""
         widget.bind("<Button-1>", lambda _: self._col_step(1) or "break")
         aqua = self.tk.call("tk", "windowingsystem") == "aqua"
-        direitos = ("<Button-2>", "<Control-Button-1>") if aqua else ("<Button-3>",)
+        direitos = ("<Button-3>",) + (("<Button-2>", "<Control-Button-1>") if aqua else ())
         for seq in direitos:
             widget.bind(seq, lambda _: self._col_step(-1) or "break")
 
