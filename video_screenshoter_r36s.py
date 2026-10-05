@@ -373,6 +373,26 @@ def _line_fits(line_items: List[Tuple[str, str, str]], size: int, available: int
                for w, item in zip(widths, line_items))
 
 
+def _split_by_width(display_items: List[Tuple[str, str, str]], size: int,
+                    available: int) -> List[List[Tuple[str, str, str]]]:
+    """Quebra gulosa por LARGURA: cada linha leva as palavras que cabem nela.
+
+    Usada só com zoom na legenda (``style["bottom_scale"]``). A quebra padrão
+    equilibra por nº de caracteres, o que numa fonte maior deixa uma linha de
+    muitas palavras larga demais — e aí o "aperto" encolhe só aquela linha.
+    """
+    linhas: List[List[Tuple[str, str, str]]] = []
+    atual: List[Tuple[str, str, str]] = []
+    for item in display_items:
+        if atual and not _line_fits(atual + [item], size, available):
+            linhas.append(atual)
+            atual = []
+        atual.append(item)
+    if atual:
+        linhas.append(atual)
+    return linhas
+
+
 def card_height(size: int, n_lines: int, show_gloss: bool = True) -> int:
     """Altura do cartão de legenda, na fonte e no nº de linhas dados.
 
@@ -532,6 +552,7 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             # padrão de sempre; uma frase inteira recebe o maior tamanho em que
             # ainda cabe (ver _auto_chinese_font_size).
             auto_lines = MAX_CHINESE_LINES
+            zoom_lines = None   # quebra por largura, só com zoom na legenda
             if base_chinese_font_size is None:
                 if draw_bottom and display_items:
                     base_chinese_font_size, auto_lines = _auto_chinese_font_size(
@@ -547,19 +568,20 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                 # não cabe nas linhas escolhidas, então libera linhas extras e
                 # deixa max_chars_per_line (recalculado abaixo) quebrar mais.
                 pedido = max(8, int(base_chinese_font_size * bottom_scale))
-                if bottom_scale > 1.0 and draw_bottom:
-                    auto_lines = max(auto_lines, int(MAX_CHINESE_LINES * 2 * bottom_scale))
-                    # Cresce só até o cartão caber no frame: frase comprida
-                    # chega ao teto antes, frase curta cresce à vontade.
-                    teto = height - max(15, int(30 * pedido / 36))
-                    while pedido > base_chinese_font_size:
-                        n = len(split_chinese_into_lines(
-                            display_items,
-                            max_chars_per_line=max(12, int(width / (pedido * 1.5))),
-                            max_lines=auto_lines))
-                        if card_height(pedido, n, show_word_gloss) <= teto:
-                            break
-                        pedido -= 1
+                if draw_bottom:
+                    def _quebra(sz):
+                        return _split_by_width(
+                            display_items, sz, width - max(20, int(20 * (sz / 36))) * 2)
+                    if bottom_scale > 1.0:
+                        # Cresce só até o cartão caber no frame: frase comprida
+                        # chega ao teto antes, frase curta cresce à vontade.
+                        while pedido > base_chinese_font_size:
+                            teto = height - max(15, int(30 * pedido / 36))
+                            if card_height(pedido, len(_quebra(pedido)),
+                                           show_word_gloss) <= teto:
+                                break
+                            pedido -= 1
+                    zoom_lines = _quebra(pedido)
                 base_chinese_font_size = pedido
             base_pinyin_font_size = int(base_chinese_font_size * 0.65)
             base_portuguese_font_size = int(base_chinese_font_size * 0.45)
@@ -585,7 +607,8 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             # laço de largura e o de desenho rodarem zero vezes, sem precisar
             # duplicar o corpo da função por variante.
             max_chars_per_line = max(12, int(width / (base_chinese_font_size * 1.5)))
-            chinese_lines = (split_chinese_into_lines(display_items,
+            chinese_lines = zoom_lines if zoom_lines is not None else (
+                             split_chinese_into_lines(display_items,
                                                       max_chars_per_line=max_chars_per_line,
                                                       max_lines=auto_lines)
                              if draw_bottom else [])
