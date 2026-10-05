@@ -556,6 +556,8 @@ class App(tk.Tk):
         self._col_fs = None
         self._col_fs_label = None
         self._col_fs_photo = None
+        self._col_fs_loading = None   # aviso "Carregando…" sobre a imagem
+        self._col_fs_done = 0         # token do último render já exibido
         self._col_saving = False
         # Últimas escolhas do pop-up de salvar (reabre nelas na mesma sessão).
         self._col_save_mode = "r36s"
@@ -1910,7 +1912,7 @@ class App(tk.Tk):
         # tratados ali mesmo com "break": o Treeview usa espaço para alternar
         # a seleção e ←/→ para abrir/fechar itens.
         self._col_bind_view_keys(self, guard=True)
-        for seq, fn in (("<space>", self._col_key_space),
+        for seq, fn in (("<space>", lambda: self._col_step(1)),
                         ("<Left>", lambda: self._col_step(-1)),
                         ("<Right>", lambda: self._col_step(1))):
             self._col_tree.bind(seq, lambda _, fn=fn: fn() or "break")
@@ -2441,6 +2443,9 @@ class App(tk.Tk):
         token = self._col_render_token
         fs = self._col_fs is not None
         style = self._col_view_style()
+        if fs:
+            # Só aparece se demorar: render rápido não pisca o aviso.
+            self.after(150, lambda: self._col_fs_show_loading(token))
 
         def _work():
             try:
@@ -2608,8 +2613,14 @@ class App(tk.Tk):
             return  # uma seleção mais nova já começou a renderizar
         from PIL import Image, ImageTk
         if fs:
-            if self._col_fs is None or img is None:
+            if self._col_fs is None:
                 return
+            self._col_fs_done = token
+            if img is None:
+                self._col_fs_loading.config(text="Falha ao carregar a imagem")
+                self._col_fs_loading.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+                return
+            self._col_fs_loading.place_forget()
             sw = self._col_fs.winfo_screenwidth()
             sh = self._col_fs.winfo_screenheight()
             k = min(sw / img.width, sh / img.height)
@@ -2683,7 +2694,7 @@ class App(tk.Tk):
                     if "font" in atalhos:
                         ttk.Label(fonte, text=atalhos["font"],
                                   foreground="#888").pack(side=tk.RIGHT)
-        ttk.Label(parent, text="Espaço: áudio\n← → frases\n⌘F tela cheia",
+        ttk.Label(parent, text="⌘S: áudio\nEspaço: próxima\n← → frases\n⌘F tela cheia",
                   foreground="#888", justify=tk.CENTER).pack(pady=(8, 0))
         self._col_view_sync()
 
@@ -2712,7 +2723,7 @@ class App(tk.Tk):
     def _col_view_bump(self, key: str, delta: float):
         self._col_view_set(key, self._col_view[key] + delta)
 
-    def _col_key_space(self):
+    def _col_key_audio(self):
         if str(self._col_audio_btn.cget("state")) == tk.NORMAL:
             self._col_play_audio()
 
@@ -2745,7 +2756,8 @@ class App(tk.Tk):
             ("<Command-equal>", lambda: self._col_view_bump("leg_scale", 0.1), True),
             ("<Command-minus>", lambda: self._col_view_bump("leg_scale", -0.1), True),
             ("<Command-f>", self._col_fullscreen_open, True),
-            ("<space>", self._col_key_space, False),
+            ("<Command-s>", self._col_key_audio, True),
+            ("<space>", lambda: self._col_step(1), False),
             ("<Left>",  lambda: self._col_step(-1), False),
             ("<Right>", lambda: self._col_step(1), False),
         ]
@@ -2776,6 +2788,9 @@ class App(tk.Tk):
         # imagem para ficar por cima dele.
         tk.Label(fs, textvariable=self._col_pos, bg="black", fg="#555",
                  font=("", 12)).place(relx=1.0, rely=1.0, x=-14, y=-10, anchor=tk.SE)
+        # Fica por cima da imagem anterior enquanto a próxima renderiza.
+        self._col_fs_loading = tk.Label(fs, text="Carregando…", bg="black", fg="#aaa",
+                                        font=("", 16), padx=16, pady=8)
         self._col_fs, self._col_fs_label = fs, lbl
         self._col_bind_view_keys(fs, guard=False)
         fs.bind("<Escape>", lambda _: self._col_fullscreen_close())
@@ -2783,11 +2798,20 @@ class App(tk.Tk):
         fs.focus_force()
         self._col_rerender()
 
+    def _col_fs_show_loading(self, token: int):
+        if (self._col_fs is None or token != self._col_render_token
+                or token == self._col_fs_done):
+            return   # já terminou, ou uma navegação mais nova assumiu
+        self._col_fs_loading.config(text="Carregando…")
+        self._col_fs_loading.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
+        self._col_fs_loading.lift()
+
     def _col_fullscreen_close(self):
         if self._col_fs is None:
             return
         fs = self._col_fs
         self._col_fs = self._col_fs_label = self._col_fs_photo = None
+        self._col_fs_loading = None
         fs.destroy()
         self.focus_force()
         self._col_tree.focus_set()
