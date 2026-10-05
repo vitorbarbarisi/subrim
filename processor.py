@@ -1480,6 +1480,20 @@ def _select_unique(files: list[Path], label: str) -> Path:
     return files[0]
 
 
+def _srt_tag(path: Path, directory: Path) -> str:
+    """Parte do nome que vem DEPOIS do nome do asset (ex.: ``.zht.srt``).
+
+    Os filtros de idioma e de "já processado" (``_real``, ``_secs``, ``_es``…)
+    olhavam o nome inteiro, então o título do vídeo os disparava: "Really"
+    contém ``_real`` e descartava o ``.zht.srt``; "Easy" contém ``_es``. Os
+    arquivos são nomeados ``<asset><sufixo>``, e só o sufixo diz o que são.
+    Sem o prefixo do asset, devolve o nome inteiro (comportamento antigo).
+    """
+    name = path.name
+    prefix = directory.name
+    return name[len(prefix):] if prefix and name.startswith(prefix) else name
+
+
 def validate_directory(directory: Path) -> tuple[bool, str]:
     """Validate directory before processing.
     
@@ -1570,12 +1584,13 @@ def validate_directory(directory: Path) -> tuple[bool, str]:
     
     # Check for zht files, but exclude already processed ones
     # Accept both .zht.srt and -zht or _zht patterns
-    zht_files = [f for f in srt_files if (re.search(r"[-_.]zht", f.name, re.IGNORECASE) or f.name.lower().endswith(".zht.srt")) and not re.search(r"_(traditional|portuguese|secs|real)", f.name, re.IGNORECASE)]
+    tag = {f: _srt_tag(f, directory) for f in srt_files}
+    zht_files = [f for f in srt_files if (re.search(r"[-_.]zht", tag[f], re.IGNORECASE) or tag[f].lower().endswith(".zht.srt")) and not re.search(r"_(traditional|portuguese|secs|real)", tag[f], re.IGNORECASE)]
     
     # If no zht files found, check for pt-BR or en files to start translation flow
     if not zht_files:
-        pt_files = [f for f in srt_files if (re.search(r"_pt", f.name, re.IGNORECASE) or f.name.lower().endswith(".pt-br.srt")) and not re.search(r"_(secs|real)", f.name, re.IGNORECASE)]
-        en_files = [f for f in srt_files if (re.search(r"_eng", f.name, re.IGNORECASE) or f.name.lower().endswith(".en.srt")) and not re.search(r"_(secs|real)", f.name, re.IGNORECASE)]
+        pt_files = [f for f in srt_files if (re.search(r"_pt", tag[f], re.IGNORECASE) or tag[f].lower().endswith(".pt-br.srt")) and not re.search(r"_(secs|real)", tag[f], re.IGNORECASE)]
+        en_files = [f for f in srt_files if (re.search(r"_eng", tag[f], re.IGNORECASE) or tag[f].lower().endswith(".en.srt")) and not re.search(r"_(secs|real)", tag[f], re.IGNORECASE)]
         if not pt_files and not en_files:
             return False, "Nenhum arquivo SRT com 'zht', 'pt-BR' ou 'en' encontrado no diretório"
         else:
@@ -1599,18 +1614,20 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     if not all_srt:
         raise ValueError("Nenhum arquivo .srt encontrado no diretório informado")
 
+    tag = {p: _srt_tag(p, directory) for p in all_srt}
+
     def is_candidate(path: Path) -> bool:
-        name_lower = path.name.lower()
+        name_lower = tag[path].lower()
         return ("_secs" not in name_lower) and ("_real" not in name_lower)
 
     candidates = [p for p in all_srt if is_candidate(p)]
 
     # Look for zht files, but exclude already processed ones (containing _traditional, _portuguese, etc.)
     # Accept both .zht.srt and -zht or _zht patterns
-    zht_candidates = [p for p in candidates if (re.search(r"[-_.]zht", p.name, re.IGNORECASE) or p.name.lower().endswith(".zht.srt")) and not re.search(r"_(traditional|portuguese|secs|real)", p.name, re.IGNORECASE)]
-    pt_candidates = [p for p in candidates if (re.search(r"_pt", p.name, re.IGNORECASE) or p.name.lower().endswith(".pt-br.srt"))]
-    es_candidates = [p for p in candidates if re.search(r"_es", p.name, re.IGNORECASE)]
-    eng_candidates = [p for p in candidates if re.search(r"_eng", p.name, re.IGNORECASE) or p.name.lower().endswith(".en.srt")]
+    zht_candidates = [p for p in candidates if (re.search(r"[-_.]zht", tag[p], re.IGNORECASE) or tag[p].lower().endswith(".zht.srt")) and not re.search(r"_(traditional|portuguese|secs|real)", tag[p], re.IGNORECASE)]
+    pt_candidates = [p for p in candidates if (re.search(r"_pt", tag[p], re.IGNORECASE) or tag[p].lower().endswith(".pt-br.srt"))]
+    es_candidates = [p for p in candidates if re.search(r"_es", tag[p], re.IGNORECASE)]
+    eng_candidates = [p for p in candidates if re.search(r"_eng", tag[p], re.IGNORECASE) or tag[p].lower().endswith(".en.srt")]
 
     zht_file: Path | None
     if not zht_candidates:
