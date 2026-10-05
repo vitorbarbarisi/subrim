@@ -36,7 +36,8 @@ DEEPSEEK_LOG = REPO / "deepseek_debug.log"
 # fechar o app; só a visualização os usa, nunca o salvar coleção.
 VIEWER_PREFS = REPO / ".subrim_viewer.json"
 VIEWER_DEFAULTS = {"trad_opaque": False, "trad_scale": 1.0, "trad_hide": False,
-                   "leg_opaque": False, "leg_scale": 1.0, "leg_hide": False}
+                   "leg_opaque": False, "leg_scale": 1.0, "leg_hide": False,
+                   "auto_audio": False}
 VIEWER_SCALE_MIN, VIEWER_SCALE_MAX = 0.6, 2.0
 
 
@@ -2428,6 +2429,17 @@ class App(tk.Tk):
             self._col_photo = None
             self._col_place_expand()
         self._col_rerender()
+        # Só a troca de frase toca o áudio sozinha; redesenhar por um ajuste
+        # do painel (ou ao sair da tela cheia) não.
+        self._col_autoplay_token = self._col_render_token
+
+    def _col_maybe_autoplay(self, token: int):
+        """Toca o áudio quando a imagem de uma NOVA frase acaba de aparecer."""
+        if (token == getattr(self, "_col_autoplay_token", None)
+                and self._col_view["auto_audio"]
+                and str(self._col_audio_btn.cget("state")) == tk.NORMAL):
+            self._col_autoplay_token = None   # uma vez por frase
+            self._col_play_audio()
 
     def _col_rerender(self):
         """Redesenha só a imagem da frase atual, com os ajustes do painel.
@@ -2628,6 +2640,7 @@ class App(tk.Tk):
                              Image.LANCZOS)
             self._col_fs_photo = ImageTk.PhotoImage(img)
             self._col_fs_label.config(image=self._col_fs_photo)
+            self._col_maybe_autoplay(token)
             return
         if img is None:
             self._col_preview.config(image="", text="(falha ao renderizar frame)")
@@ -2636,6 +2649,7 @@ class App(tk.Tk):
             return
         self._col_photo = ImageTk.PhotoImage(img)
         self._col_preview.config(image=self._col_photo, text="")
+        self._col_maybe_autoplay(token)
         self._col_place_expand()
 
     # ── Painel de visualização (fundo, fonte, ocultar) ──────────────────────────
@@ -2694,6 +2708,12 @@ class App(tk.Tk):
                     if "font" in atalhos:
                         ttk.Label(fonte, text=atalhos["font"],
                                   foreground="#888").pack(side=tk.RIGHT)
+        self._col_view_vars["auto_audio"] = tk.BooleanVar(value=self._col_view["auto_audio"])
+        ttk.Checkbutton(parent, text="Tocar áudio na transição", takefocus=False,
+                        variable=self._col_view_vars["auto_audio"],
+                        command=lambda: self._col_view_set(
+                            "auto_audio", self._col_view_vars["auto_audio"].get())
+                        ).pack(anchor=tk.W, pady=(10, 0))
         ttk.Label(parent, text="S: áudio\nEspaço: próxima\n← → frases\n⌘F tela cheia",
                   foreground="#888", justify=tk.CENTER).pack(pady=(8, 0))
         self._col_view_sync()
@@ -2715,7 +2735,8 @@ class App(tk.Tk):
             VIEWER_PREFS.write_text(json.dumps(self._col_view, indent=2), encoding="utf-8")
         except OSError as e:
             self._log_line(f"Erro ao gravar {VIEWER_PREFS.name}: {e}", "error")
-        self._col_rerender()
+        if key != "auto_audio":   # não muda o desenho
+            self._col_rerender()
 
     def _col_view_toggle(self, key: str):
         self._col_view_set(key, not self._col_view[key])
