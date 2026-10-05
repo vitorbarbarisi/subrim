@@ -2771,6 +2771,11 @@ class App(tk.Tk):
         fs.attributes("-fullscreen", True)
         lbl = tk.Label(fs, bg="black", bd=0, highlightthickness=0)
         lbl.pack(fill=tk.BOTH, expand=True)
+        # Contador discreto (8/458): o mesmo _col_pos da barra de navegação,
+        # então acompanha as setas sem código extra. Criado depois do label da
+        # imagem para ficar por cima dele.
+        tk.Label(fs, textvariable=self._col_pos, bg="black", fg="#555",
+                 font=("", 12)).place(relx=1.0, rely=1.0, x=-14, y=-10, anchor=tk.SE)
         self._col_fs, self._col_fs_label = fs, lbl
         self._col_bind_view_keys(fs, guard=False)
         fs.bind("<Escape>", lambda _: self._col_fullscreen_close())
