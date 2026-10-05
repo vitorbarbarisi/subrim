@@ -1907,6 +1907,7 @@ class App(tk.Tk):
                                          takefocus=False,
                                          command=self._col_fullscreen_open)
         self._col_preview.bind("<Configure>", lambda _: self._col_place_expand())
+        self._col_bind_mouse_nav(self._col_preview)
 
         # Atalhos da aba. No toplevel (todo widget da janela principal herda a
         # bindtag "."), filtrados pela aba ativa. Na lista, espaço e setas são
@@ -2714,7 +2715,8 @@ class App(tk.Tk):
                         command=lambda: self._col_view_set(
                             "auto_audio", self._col_view_vars["auto_audio"].get())
                         ).pack(anchor=tk.W, pady=(10, 0))
-        ttk.Label(parent, text="S: áudio\nEspaço: próxima\n← → frases\n⌘F tela cheia",
+        ttk.Label(parent, text="S: áudio\nEspaço: próxima\n← → frases\n"
+                       "Clique na imagem: próxima\nBotão direito: anterior\n⌘F tela cheia",
                   foreground="#888", justify=tk.CENTER).pack(pady=(8, 0))
         self._col_view_sync()
 
@@ -2789,6 +2791,17 @@ class App(tk.Tk):
         for seq, fn, typing_safe in acoes:
             widget.bind(seq, _wrap(fn, typing_safe))
 
+    def _col_bind_mouse_nav(self, widget):
+        """Clique avança (como o espaço), botão direito volta.
+
+        No macOS (aqua) o botão direito é o Button-2 — e Ctrl+clique também
+        conta como clique direito; nos demais sistemas é o Button-3."""
+        widget.bind("<Button-1>", lambda _: self._col_step(1) or "break")
+        aqua = self.tk.call("tk", "windowingsystem") == "aqua"
+        direitos = ("<Button-2>", "<Control-Button-1>") if aqua else ("<Button-3>",)
+        for seq in direitos:
+            widget.bind(seq, lambda _: self._col_step(-1) or "break")
+
     def _col_place_expand(self):
         """Põe o botão de tela cheia no canto inferior direito da imagem."""
         if self._col_photo is None:
@@ -2818,6 +2831,8 @@ class App(tk.Tk):
                                         font=("", 16), padx=16, pady=8)
         self._col_fs, self._col_fs_label = fs, lbl
         self._col_bind_view_keys(fs, guard=False)
+        # No Toplevel: vale para a tela toda (imagem, faixas pretas, contador).
+        self._col_bind_mouse_nav(fs)
         fs.bind("<Escape>", lambda _: self._col_fullscreen_close())
         fs.protocol("WM_DELETE_WINDOW", self._col_fullscreen_close)
         fs.focus_force()
