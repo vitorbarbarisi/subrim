@@ -2694,7 +2694,7 @@ class App(tk.Tk):
                     if "font" in atalhos:
                         ttk.Label(fonte, text=atalhos["font"],
                                   foreground="#888").pack(side=tk.RIGHT)
-        ttk.Label(parent, text="⌘S: áudio\nEspaço: próxima\n← → frases\n⌘F tela cheia",
+        ttk.Label(parent, text="S: áudio\nEspaço: próxima\n← → frases\n⌘F tela cheia",
                   foreground="#888", justify=tk.CENTER).pack(pady=(8, 0))
         self._col_view_sync()
 
@@ -2756,7 +2756,11 @@ class App(tk.Tk):
             ("<Command-equal>", lambda: self._col_view_bump("leg_scale", 0.1), True),
             ("<Command-minus>", lambda: self._col_view_bump("leg_scale", -0.1), True),
             ("<Command-f>", self._col_fullscreen_open, True),
-            ("<Command-s>", self._col_key_audio, True),
+            # Tecla solta: como espaço e setas, ignorada ao digitar na busca.
+            ("<Key-s>", self._col_key_audio, False),
+            ("<Key-S>", self._col_key_audio, False),
+            # Sem isto o Tk casa ⌘S com <Key-s> (modificador sobrando é ignorado).
+            ("<Command-s>", lambda: None, True),
             ("<space>", lambda: self._col_step(1), False),
             ("<Left>",  lambda: self._col_step(-1), False),
             ("<Right>", lambda: self._col_step(1), False),
