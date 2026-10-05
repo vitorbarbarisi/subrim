@@ -1051,10 +1051,11 @@ def audio_clip_for_match(match: dict) -> Optional[Path]:
     return None
 
 
-def render_preview(match: dict, mode: str = "r36s"):
+def render_preview(match: dict, mode: str = "r36s", style: Optional[dict] = None):
     """Gera uma imagem PIL já legendada de uma frase (para preview na GUI).
 
     ``mode`` = ``"r36s"`` (640x480) ou ``"original"`` (resolução do vídeo).
+    ``style`` são os ajustes de leitura da GUI (ver ``add_subtitles_to_frame``).
     Retorna um ``PIL.Image.Image`` ou ``None`` em caso de erro.
     """
     from PIL import Image
@@ -1065,7 +1066,7 @@ def render_preview(match: dict, mode: str = "r36s"):
             return None
         add_subtitles_to_frame(
             tmp_png, match["chinese"], match["translations_json"], match["portuguese"],
-            resize=(mode == "r36s"),
+            resize=(mode == "r36s"), style=style,
         )
         with Image.open(tmp_png) as img:
             return img.copy()

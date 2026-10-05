@@ -32,6 +32,12 @@ TEXT_WAREHOUSE = WAREHOUSE / "text"  # bases gerados pelo text_pipeline.py
 FRAMES    = WAREHOUSE / "frames"   # cache de frames de episódios arquivados
 FRAMES_PERIODS = WAREHOUSE / "frames_periods"   # idem, arquivados por período
 DEEPSEEK_LOG = REPO / "deepseek_debug.log"
+# Ajustes de leitura do preview das Coleções (painel à direita). Sobrevivem a
+# fechar o app; só a visualização os usa, nunca o salvar coleção.
+VIEWER_PREFS = REPO / ".subrim_viewer.json"
+VIEWER_DEFAULTS = {"trad_opaque": False, "trad_scale": 1.0, "trad_hide": False,
+                   "leg_opaque": False, "leg_scale": 1.0, "leg_hide": False}
+VIEWER_SCALE_MIN, VIEWER_SCALE_MAX = 0.6, 2.0
 
 
 def _wh_frames_dir(prefix: str) -> Path | None:
@@ -545,6 +551,11 @@ class App(tk.Tk):
         self._col_audio_token = 0
         self._col_audio_proc = None  # subprocess.Popen do afplay em curso, ou None
         self._col_photo = None
+        self._col_view = self._col_view_load()
+        # Tela cheia: Toplevel e Label enquanto aberta, senão None.
+        self._col_fs = None
+        self._col_fs_label = None
+        self._col_fs_photo = None
         self._col_saving = False
         # Últimas escolhas do pop-up de salvar (reabre nelas na mesma sessão).
         self._col_save_mode = "r36s"
@@ -1028,6 +1039,7 @@ class App(tk.Tk):
         wt.bind("<<TreeviewClose>>",
                 lambda _: self._wh_open.discard(self._wh_tree.focus()))
         wt.bind("<<TreeviewSelect>>", self._wh_on_select)
+        wt.bind("<Double-1>", self._wh_open_in_collections)
         wt.bind("<Shift-Down>", lambda _: self._wh_extend_selection(1)  or "break")
         wt.bind("<Shift-Up>",   lambda _: self._wh_extend_selection(-1) or "break")
         self._wh_tree = wt
@@ -1293,6 +1305,21 @@ class App(tk.Tk):
             self.after(0, lambda: self._wh_show_details(detail, freq))
 
         threading.Thread(target=_work, daemon=True).start()
+
+    def _wh_open_in_collections(self, event):
+        """Duplo clique num episódio: abre-o nas Coleções com todas as frases.
+
+        Filtro só com ele e busca "1". Num grupo, segue o padrão (abrir/fechar)."""
+        iid = self._wh_tree.identify_row(event.y)
+        if not iid or iid.startswith("grp:"):
+            return None
+        prefix = Path(iid).stem.replace("_base", "")
+        self._col_asset_filter = {prefix}
+        self._col_update_filter_btn()
+        self._col_word.set("1")
+        self._nb.select(self._tab_collections)
+        self._col_do_search()
+        return "break"
 
     def _wh_show_group(self, gid: str):
         """Detalhes de um grupo: contagem por status; a frequência fica vazia."""
@@ -1846,6 +1873,7 @@ class App(tk.Tk):
                                         command=self._col_play_audio,
                                         state=tk.DISABLED)
         self._col_audio_btn.pack(pady=(10, 0))
+        self._build_col_view_panel(nota_box)
 
         for w in (self._nota_frame, *self._nota_frame.winfo_children()):
             w.bind("<Button-1>", lambda _: self._nota_frame.focus_set())
@@ -1869,6 +1897,23 @@ class App(tk.Tk):
                                      state=tk.DISABLED, bg=self.cget("bg"),
                                      relief=tk.FLAT, bd=0)
         self._col_caption.pack(fill=tk.X, anchor=tk.W)
+
+        # Tela cheia: botão no canto inferior direito da IMAGEM (que fica
+        # centralizada no label), reposicionado a cada render e resize.
+        self._col_expand_btn = tk.Button(self._col_preview, text="⛶", font=("", 14),
+                                         takefocus=False,
+                                         command=self._col_fullscreen_open)
+        self._col_preview.bind("<Configure>", lambda _: self._col_place_expand())
+
+        # Atalhos da aba. No toplevel (todo widget da janela principal herda a
+        # bindtag "."), filtrados pela aba ativa. Na lista, espaço e setas são
+        # tratados ali mesmo com "break": o Treeview usa espaço para alternar
+        # a seleção e ←/→ para abrir/fechar itens.
+        self._col_bind_view_keys(self, guard=True)
+        for seq, fn in (("<space>", self._col_key_space),
+                        ("<Left>", lambda: self._col_step(-1)),
+                        ("<Right>", lambda: self._col_step(1))):
+            self._col_tree.bind(seq, lambda _, fn=fn: fn() or "break")
 
         # Bottom: save
         bottom = ttk.Frame(outer)
@@ -2219,6 +2264,7 @@ class App(tk.Tk):
         self._col_set_audio_btn(False)
         self._col_preview.config(image="", text="(preview r36s aparece aqui)")
         self._col_photo = None
+        self._col_place_expand()
         self._col_caption.config(state=tk.NORMAL)
         self._col_caption.delete("1.0", tk.END)
         self._col_caption.config(state=tk.DISABLED)
@@ -2375,18 +2421,34 @@ class App(tk.Tk):
         self._col_caption.delete("1.0", tk.END)
         self._col_caption.insert(tk.END, f"{m['chinese']}\n{m['portuguese']}")
         self._col_caption.config(state=tk.DISABLED)
-        self._col_preview.config(image="", text="Renderizando…")
+        if self._col_fs is None:
+            self._col_preview.config(image="", text="Renderizando…")
+            self._col_photo = None
+            self._col_place_expand()
+        self._col_rerender()
 
+    def _col_rerender(self):
+        """Redesenha só a imagem da frase atual, com os ajustes do painel.
+
+        Na tela cheia renderiza na resolução nativa do frame (mais nítida que
+        ampliar o 640x480) e o resultado vai para a janela de tela cheia.
+        """
+        cb = self._col_import()
+        m = self._nota_current_match()
+        if not cb or m is None:
+            return
         self._col_render_token += 1
         token = self._col_render_token
+        fs = self._col_fs is not None
+        style = self._col_view_style()
 
         def _work():
             try:
-                img = cb.render_preview(m, "r36s")
+                img = cb.render_preview(m, "original" if fs else "r36s", style=style)
             except Exception as e:  # noqa: BLE001
                 img = None
                 self._log_q.put((f"Erro ao renderizar preview: {e}", "error"))
-            self.after(0, lambda: self._col_set_preview(token, img))
+            self.after(0, lambda: self._col_set_preview(token, img, fs))
 
         threading.Thread(target=_work, daemon=True).start()
 
@@ -2541,16 +2603,190 @@ class App(tk.Tk):
             messagebox.showinfo("Resultado do cronômetro",
                                 "Nenhuma leitura registrada.")
 
-    def _col_set_preview(self, token: int, img):
+    def _col_set_preview(self, token: int, img, fs: bool = False):
         if token != self._col_render_token:
             return  # uma seleção mais nova já começou a renderizar
+        from PIL import Image, ImageTk
+        if fs:
+            if self._col_fs is None or img is None:
+                return
+            sw = self._col_fs.winfo_screenwidth()
+            sh = self._col_fs.winfo_screenheight()
+            k = min(sw / img.width, sh / img.height)
+            img = img.resize((max(1, int(img.width * k)), max(1, int(img.height * k))),
+                             Image.LANCZOS)
+            self._col_fs_photo = ImageTk.PhotoImage(img)
+            self._col_fs_label.config(image=self._col_fs_photo)
+            return
         if img is None:
             self._col_preview.config(image="", text="(falha ao renderizar frame)")
             self._col_photo = None
+            self._col_place_expand()
             return
-        from PIL import ImageTk
         self._col_photo = ImageTk.PhotoImage(img)
         self._col_preview.config(image=self._col_photo, text="")
+        self._col_place_expand()
+
+    # ── Painel de visualização (fundo, fonte, ocultar) ──────────────────────────
+    @staticmethod
+    def _col_view_load() -> dict:
+        view = dict(VIEWER_DEFAULTS)
+        try:
+            salvo = json.loads(VIEWER_PREFS.read_text(encoding="utf-8"))
+            view.update({k: type(VIEWER_DEFAULTS[k])(v) for k, v in salvo.items()
+                         if k in VIEWER_DEFAULTS})
+        except (OSError, ValueError, TypeError):
+            pass   # sem arquivo (1ª vez) ou corrompido: padrões
+        return view
+
+    def _col_view_style(self) -> dict:
+        """Ajustes do painel no formato de ``add_subtitles_to_frame(style=)``."""
+        v = self._col_view
+        return {"top_opaque": v["trad_opaque"], "top_scale": v["trad_scale"],
+                "hide_top": v["trad_hide"], "bottom_opaque": v["leg_opaque"],
+                "bottom_scale": v["leg_scale"], "hide_bottom": v["leg_hide"]}
+
+    def _build_col_view_panel(self, parent):
+        self._col_view_vars = {}
+        self._col_scale_vars = {}
+        # takefocus=False: com o foco num checkbox o espaço o alternaria,
+        # além de tocar o áudio.
+        for prefixo, titulo, atalhos in (
+                ("trad", "Tradução", {"hide": "⌘T"}),
+                ("leg", "Legenda", {"opaque": "⌘O", "hide": "⌘L", "font": "⌘− ⌘+"})):
+            box = ttk.LabelFrame(parent, text=titulo, padding=(6, 2, 6, 4))
+            box.pack(fill=tk.X, pady=(10, 0))
+            for campo, rot in (("opaque", "Fundo opaco"), ("hide", "Ocultar")):
+                key = f"{prefixo}_{campo}"
+                var = tk.BooleanVar(value=self._col_view[key])
+                self._col_view_vars[key] = var
+                linha = ttk.Frame(box)
+                linha.pack(fill=tk.X)
+                ttk.Checkbutton(linha, text=rot, variable=var, takefocus=False,
+                                command=lambda k=key: self._col_view_set(
+                                    k, self._col_view_vars[k].get())
+                                ).pack(side=tk.LEFT)
+                if campo in atalhos:
+                    ttk.Label(linha, text=atalhos[campo], foreground="#888").pack(side=tk.RIGHT)
+                if campo == "opaque":
+                    key_s = f"{prefixo}_scale"
+                    fonte = ttk.Frame(box)
+                    fonte.pack(fill=tk.X, pady=2)
+                    ttk.Label(fonte, text="Fonte").pack(side=tk.LEFT)
+                    for txt, d in (("−", -0.1), ("+", 0.1)):
+                        ttk.Button(fonte, text=txt, width=2, takefocus=False,
+                                   command=lambda k=key_s, d=d: self._col_view_bump(k, d)
+                                   ).pack(side=tk.LEFT, padx=(2, 0))
+                    self._col_scale_vars[key_s] = tk.StringVar()
+                    ttk.Label(fonte, textvariable=self._col_scale_vars[key_s],
+                              width=5, anchor=tk.E).pack(side=tk.LEFT, padx=(4, 0))
+                    if "font" in atalhos:
+                        ttk.Label(fonte, text=atalhos["font"],
+                                  foreground="#888").pack(side=tk.RIGHT)
+        ttk.Label(parent, text="Espaço: áudio\n← → frases\n⌘F tela cheia",
+                  foreground="#888", justify=tk.CENTER).pack(pady=(8, 0))
+        self._col_view_sync()
+
+    def _col_view_sync(self):
+        for k, var in self._col_view_vars.items():
+            var.set(self._col_view[k])
+        for k, var in self._col_scale_vars.items():
+            var.set(f"{round(self._col_view[k] * 100)}%")
+
+    def _col_view_set(self, key: str, value):
+        if key.endswith("_scale"):
+            value = round(min(VIEWER_SCALE_MAX, max(VIEWER_SCALE_MIN, value)), 1)
+        if self._col_view.get(key) == value:
+            return
+        self._col_view[key] = value
+        self._col_view_sync()
+        try:
+            VIEWER_PREFS.write_text(json.dumps(self._col_view, indent=2), encoding="utf-8")
+        except OSError as e:
+            self._log_line(f"Erro ao gravar {VIEWER_PREFS.name}: {e}", "error")
+        self._col_rerender()
+
+    def _col_view_toggle(self, key: str):
+        self._col_view_set(key, not self._col_view[key])
+
+    def _col_view_bump(self, key: str, delta: float):
+        self._col_view_set(key, self._col_view[key] + delta)
+
+    def _col_key_space(self):
+        if str(self._col_audio_btn.cget("state")) == tk.NORMAL:
+            self._col_play_audio()
+
+    def _col_bind_view_keys(self, widget, guard: bool):
+        """Atalhos de visualização em ``widget`` (janela principal ou tela cheia).
+
+        Com ``guard`` só valem na aba Coleções, e espaço/setas são ignorados
+        quando o foco está num campo de texto (a busca)."""
+        def _wrap(fn, typing_safe):
+            def _h(_=None):
+                if guard:
+                    if self._nb.select() != str(self._tab_collections):
+                        return None
+                    try:
+                        foco = self.focus_get()
+                    except (KeyError, tk.TclError):
+                        foco = None   # foco num popdown do Tk: não é campo de texto
+                    if not typing_safe and foco is not None and \
+                            foco.winfo_class() in ("Entry", "TEntry", "Text"):
+                        return None
+                fn()
+                return "break"
+            return _h
+
+        acoes = [
+            ("<Command-o>", lambda: self._col_view_toggle("leg_opaque"), True),
+            ("<Command-t>", lambda: self._col_view_toggle("trad_hide"), True),
+            ("<Command-l>", lambda: self._col_view_toggle("leg_hide"), True),
+            ("<Command-plus>",  lambda: self._col_view_bump("leg_scale", 0.1), True),
+            ("<Command-equal>", lambda: self._col_view_bump("leg_scale", 0.1), True),
+            ("<Command-minus>", lambda: self._col_view_bump("leg_scale", -0.1), True),
+            ("<Command-f>", self._col_fullscreen_open, True),
+            ("<space>", self._col_key_space, False),
+            ("<Left>",  lambda: self._col_step(-1), False),
+            ("<Right>", lambda: self._col_step(1), False),
+        ]
+        for seq, fn, typing_safe in acoes:
+            widget.bind(seq, _wrap(fn, typing_safe))
+
+    def _col_place_expand(self):
+        """Põe o botão de tela cheia no canto inferior direito da imagem."""
+        if self._col_photo is None:
+            self._col_expand_btn.place_forget()
+            return
+        lw, lh = self._col_preview.winfo_width(), self._col_preview.winfo_height()
+        iw, ih = self._col_photo.width(), self._col_photo.height()
+        x = (lw + min(iw, lw)) // 2 - 6
+        y = (lh + min(ih, lh)) // 2 - 6
+        self._col_expand_btn.place(x=x, y=y, anchor=tk.SE)
+
+    # ── Tela cheia: só atalhos, Esc sai ─────────────────────────────────────────
+    def _col_fullscreen_open(self):
+        if self._col_fs is not None or self._nota_current_match() is None:
+            return
+        fs = tk.Toplevel(self, bg="black")
+        fs.attributes("-fullscreen", True)
+        lbl = tk.Label(fs, bg="black", bd=0, highlightthickness=0)
+        lbl.pack(fill=tk.BOTH, expand=True)
+        self._col_fs, self._col_fs_label = fs, lbl
+        self._col_bind_view_keys(fs, guard=False)
+        fs.bind("<Escape>", lambda _: self._col_fullscreen_close())
+        fs.protocol("WM_DELETE_WINDOW", self._col_fullscreen_close)
+        fs.focus_force()
+        self._col_rerender()
+
+    def _col_fullscreen_close(self):
+        if self._col_fs is None:
+            return
+        fs = self._col_fs
+        self._col_fs = self._col_fs_label = self._col_fs_photo = None
+        fs.destroy()
+        self.focus_force()
+        self._col_tree.focus_set()
+        self._col_rerender()
 
     def _col_save_items(self, skip_zero: bool):
         """Frases a salvar, na ORDEM da tabela, e os motivos de descarte.

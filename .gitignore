@@ -49,3 +49,6 @@ logs/
 
 # Log de depuração das chamadas à DeepSeek (grande, e regenerado a cada execução)
 deepseek_debug.log
+
+# Ajustes de leitura do preview das Coleções (por máquina)
+.subrim_viewer.json

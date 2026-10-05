@@ -433,7 +433,7 @@ VARIANTS = ("full", "pt", "zh")
 
 def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_json: str, portuguese_text: str,
                            resize: bool = True, base_chinese_font_size: Optional[int] = None,
-                           variant: str = "full") -> bool:
+                           variant: str = "full", style: Optional[dict] = None) -> bool:
     """
     Add subtitles to a frame image.
 
@@ -457,6 +457,12 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
 
             Um enum e não flags soltas: são estas três combinações que existem,
             e flags convidariam a combinações que ninguém desenha nem testa.
+        style: ajustes de LEITURA da visualização na GUI (aba Coleções), nunca
+            usados ao salvar. ``None`` desenha exatamente o render de sempre.
+            Chaves opcionais: ``hide_top``/``hide_bottom`` (oculta a tarja do
+            topo / o bloco inferior), ``top_opaque``/``bottom_opaque`` (fundo
+            100% em vez de 50%) e ``top_scale``/``bottom_scale`` (multiplicam a
+            fonte; a legenda maior quebra em mais linhas).
 
     Returns:
         True if successful, False otherwise
@@ -466,6 +472,15 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
     draw_bottom = variant != "pt"      # bloco inferior: pinyin + hanzi + glossário
     draw_top = variant != "zh"         # tarja da frase traduzida, no topo
     show_word_gloss = variant == "full"
+    style = style or {}
+    if style.get("hide_top"):
+        draw_top = False
+    if style.get("hide_bottom"):
+        draw_bottom = False
+    top_scale = float(style.get("top_scale", 1.0))
+    bottom_scale = float(style.get("bottom_scale", 1.0))
+    top_alpha = 255 if style.get("top_opaque") else 128
+    bottom_alpha = 255 if style.get("bottom_opaque") else 128
     try:
         # Open and (optionally) resize image
         with Image.open(image_path) as img:
@@ -523,6 +538,29 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
                         display_items, width, height, resize, show_word_gloss)
                 else:
                     base_chinese_font_size = 36 if resize else max(24, int(height * 0.045))
+            # A tarja do topo se mede pela fonte ANTES da escala da legenda:
+            # aumentar a legenda não pode mexer na tradução.
+            top_base = base_chinese_font_size
+            _ts = top_base / 36
+            if bottom_scale != 1.0:
+                # Escala aplicada DEPOIS da escolha automática: a fonte maior
+                # não cabe nas linhas escolhidas, então libera linhas extras e
+                # deixa max_chars_per_line (recalculado abaixo) quebrar mais.
+                pedido = max(8, int(base_chinese_font_size * bottom_scale))
+                if bottom_scale > 1.0 and draw_bottom:
+                    auto_lines = max(auto_lines, int(MAX_CHINESE_LINES * 2 * bottom_scale))
+                    # Cresce só até o cartão caber no frame: frase comprida
+                    # chega ao teto antes, frase curta cresce à vontade.
+                    teto = height - max(15, int(30 * pedido / 36))
+                    while pedido > base_chinese_font_size:
+                        n = len(split_chinese_into_lines(
+                            display_items,
+                            max_chars_per_line=max(12, int(width / (pedido * 1.5))),
+                            max_lines=auto_lines))
+                        if card_height(pedido, n, show_word_gloss) <= teto:
+                            break
+                        pedido -= 1
+                base_chinese_font_size = pedido
             base_pinyin_font_size = int(base_chinese_font_size * 0.65)
             base_portuguese_font_size = int(base_chinese_font_size * 0.45)
             # Scale absolute spacings relative to the R36S baseline (font 36)
@@ -666,22 +704,24 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             top_line_height = 0
             original_font = None
             if draw_top and portuguese_text and portuguese_text.strip():
-                original_font_size = max(18, int(base_chinese_font_size * 0.6))
+                original_font_size = max(8, int(max(18, int(top_base * 0.6))
+                                                 * top_scale))
                 try:
                     original_font = ImageFont.truetype(latin_font_path, original_font_size)
                 except Exception:
                     original_font = ImageFont.load_default()
                 top_lines = wrap_portuguese_to_width(
-                    portuguese_text.strip(), original_font, width - side_padding * 2)
+                    portuguese_text.strip(), original_font,
+                    width - max(20, int(20 * _ts)) * 2)
                 if top_lines:
-                    top_margin = max(12, int(18 * _s))
-                    top_line_gap = max(2, int(4 * _s))
+                    top_margin = max(12, int(18 * _ts))
+                    top_line_gap = max(2, int(4 * _ts))
                     top_line_height = original_font_size + top_line_gap
                     top_text_w = max(
                         original_font.getbbox(l)[2] - original_font.getbbox(l)[0]
                         for l in top_lines)
-                    top_bg_w = top_text_w + int(40 * _s)
-                    top_bg_h = top_line_height * len(top_lines) + int(16 * _s)
+                    top_bg_w = top_text_w + int(40 * _ts)
+                    top_bg_h = top_line_height * len(top_lines) + int(16 * _ts)
                     top_bg_x = (width - top_bg_w) // 2
                     top_bg_y = top_margin
                     top_box = (top_bg_x, top_bg_y, top_bg_x + top_bg_w, top_bg_y + top_bg_h)
@@ -693,9 +733,9 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             box_draw = ImageDraw.Draw(box_overlay)
             # Draw semi-transparent black box (50% opacity = 128/255)
             if draw_bottom:
-                box_draw.rectangle([bg_x, bg_y, bg_x + bg_width, bg_y + bg_height], fill=(0, 0, 0, 128))
+                box_draw.rectangle([bg_x, bg_y, bg_x + bg_width, bg_y + bg_height], fill=(0, 0, 0, bottom_alpha))
             if top_box:
-                box_draw.rectangle(list(top_box), fill=(0, 0, 0, 128))
+                box_draw.rectangle(list(top_box), fill=(0, 0, 0, top_alpha))
             # Composite the overlay onto the main image
             new_img_rgba = Image.alpha_composite(new_img_rgba, box_overlay)
             new_img = new_img_rgba.convert('RGB')
@@ -753,7 +793,7 @@ def add_subtitles_to_frame(image_path: Path, chinese_text: str, translations_jso
             # Desenhar a legenda original (frase completa) no topo, em amarelo escuro
             if top_lines and original_font is not None:
                 dark_yellow = (204, 153, 0)
-                ty = top_bg_y + int(8 * _s)
+                ty = top_bg_y + int(8 * _ts)
                 for line in top_lines:
                     line_bbox = original_font.getbbox(line)
                     line_w = line_bbox[2] - line_bbox[0]
