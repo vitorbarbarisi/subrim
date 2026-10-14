@@ -3,7 +3,7 @@
 Orquestrador automático do processo de queima de legendas em vídeos
 
 Este script automatiza todo o fluxo de processamento de vídeos com legendas:
-1. processor.py → adjust_base_times.py → sanitize_base.py
+1. processor.py → sanitize_base.py → adjust_base_times.py
 2. split_video.py → process_chunks.py → merge_chunks.py
 
 Usage:
@@ -21,7 +21,7 @@ Funcionamento:
   1. Encontra todas as pastas que começam com o prefixo especificado
   2. Para cada pasta, verifica se já foi processada (_merged.mp4 existe)
   3. Se não foi processada, executa todo o fluxo:
-     - processor.py → adjust_base_times.py → sanitize_base.py
+     - processor.py → sanitize_base.py → adjust_base_times.py
      - split_video.py → process_chunks.py → merge_chunks.py
   4. Faz upload opcional para Google Drive
   5. Limpa arquivos temporários (opcional)
@@ -55,8 +55,8 @@ class VideoBurner:
         self.assets_dir = Path("assets")
         self.scripts = [
             "processor.py",
-            "adjust_base_times.py", 
             "sanitize_base.py",
+            "adjust_base_times.py",
             "split_video.py",
             "process_chunks.py",
             "merge_chunks.py"
@@ -279,7 +279,7 @@ class VideoBurner:
         # O processor gera o base.txt a partir do SRT (e é idempotente: retoma um
         # base parcial). Só pulamos o processor quando NÃO há SRT e já existe um
         # base — caso de um base.txt fornecido manualmente, sem legenda de origem.
-        # adjust_base_times e sanitize_base sempre rodam (são normalizações do base).
+        # sanitize_base e adjust_base_times sempre rodam (são normalizações do base).
         self.log(f"Fase 1: Processamento de legendas para {dir_name}")
 
         srt_present = bool(list(directory.glob("*.srt")) + list(directory.glob("*.vtt")))
@@ -296,19 +296,22 @@ class VideoBurner:
         # O processor sai com 0 também quando PULA o diretório (para não abortar
         # lotes), então sucesso no exit code não garante que existe um base. Sem
         # essa checagem o erro só aparecia dois passos depois, como um
-        # "No base.txt file found" do adjust_base_times — mensagem que aponta
-        # para o lugar errado.
+        # "Arquivo base.txt não encontrado" do sanitize_base — mensagem que
+        # aponta para o lugar errado.
         if not list(directory.glob("*base.txt")):
             self.log(f"{dir_name} não tem base.txt após o processor — "
                      f"nada a processar (falta o SRT?). Pulando o diretório.", "ERROR")
             return False
 
-        if not self.run_script("adjust_base_times.py", dir_name):
-            self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
-            return False
-
+        # sanitize_base ANTES do adjust_base_times: o sanitize remove linhas, e
+        # depois do esticamento cada remoção deixava a legenda anterior parada
+        # 1ms antes de uma que não existe mais — um buraco sem legenda na tela.
         if not self.run_script("sanitize_base.py", dir_name):
             self.log(f"Falha no sanitize_base.py para {dir_name}", "ERROR")
+            return False
+
+        if not self.run_script("adjust_base_times.py", dir_name):
+            self.log(f"Falha no adjust_base_times.py para {dir_name}", "ERROR")
             return False
 
         # Phase 2: Video processing
@@ -442,7 +445,7 @@ Funcionamento:
   1. Encontra todas as pastas que começam com o prefixo especificado
   2. Para cada pasta, verifica se já foi processada (_merged.mp4 existe)
   3. Se não foi processada, executa todo o fluxo:
-     - processor.py → adjust_base_times.py → sanitize_base.py
+     - processor.py → sanitize_base.py → adjust_base_times.py
      - split_video.py → process_chunks.py → merge_chunks.py
   4. Faz upload opcional para Google Drive
   5. Limpa arquivos temporários (opcional)

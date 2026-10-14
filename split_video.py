@@ -350,14 +350,17 @@ def create_video_chunks(subtitles: Dict[float, Tuple[str, str, str, str, float]]
         # Encontrar o melhor ponto de corte para este chunk
         chunk_end = find_best_chunk_end(current_start, target_chunk_duration, video_duration, subtitles, sorted_times)
 
-        # Adicionar todas as legendas que começam dentro deste chunk
+        # Todas as legendas que aparecem neste chunk, não só as que começam nele.
+        # Esticadas pelo adjust_base_times, elas encostam umas nas outras e quase
+        # sempre atravessam a fronteira: só pelo início, a que começa aos 28s
+        # sumia aos 30s e o chunk seguinte ficava sem legenda até a próxima. A
+        # tolerância evita levar adiante uma legenda que passa só 1ms do limite.
         chunk_subs = {}
         for sub_time in sorted_times:
             _, _, _, _, duration = subtitles[sub_time]
             sub_end_time = sub_time + duration
 
-            # Incluir legenda se começa dentro do chunk atual
-            if current_start <= sub_time < chunk_end:
+            if sub_time < chunk_end and sub_end_time > current_start + 0.05:
                 chunk_subs[sub_time] = subtitles[sub_time]
 
         # Criar o chunk
@@ -524,9 +527,10 @@ def create_chunk_base_file(base_file_path: Path, chunk_subtitles: Dict[float, Tu
             for i, original_begin_time in enumerate(sorted_times, 1):
                 chinese_text, formatted_translations, translations_json, portuguese_text, duration = chunk_subtitles[original_begin_time]
 
-                # Ajustar tempos subtraindo o tempo inicial do chunk
-                adjusted_begin_time = original_begin_time - chunk_start_time
-                adjusted_end_time = adjusted_begin_time + duration
+                # Ajustar tempos subtraindo o tempo inicial do chunk. A legenda que
+                # vem do chunk anterior começa no t=0 deste e mantém o fim real.
+                adjusted_end_time = original_begin_time + duration - chunk_start_time
+                adjusted_begin_time = max(0.0, original_begin_time - chunk_start_time)
 
                 # Formatar linha no mesmo formato do arquivo original
                 line = f"{i}\t{adjusted_begin_time:.3f}s\t{adjusted_end_time:.3f}s\t{chinese_text}\t{translations_json}\t{portuguese_text}\n"
