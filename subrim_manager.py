@@ -2634,13 +2634,8 @@ class App(tk.Tk):
                 self._col_fs_loading.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
                 return
             self._col_fs_loading.place_forget()
-            sw = self._col_fs.winfo_screenwidth()
-            sh = self._col_fs.winfo_screenheight()
-            k = min(sw / img.width, sh / img.height)
-            img = img.resize((max(1, int(img.width * k)), max(1, int(img.height * k))),
-                             Image.LANCZOS)
-            self._col_fs_photo = ImageTk.PhotoImage(img)
-            self._col_fs_label.config(image=self._col_fs_photo)
+            self._col_fs_img, self._col_fs_size = img, None
+            self._col_fs_fit()
             self._col_maybe_autoplay(token)
             return
         if img is None:
@@ -2820,6 +2815,11 @@ class App(tk.Tk):
         if self._col_fs is not None or self._nota_current_match() is None:
             return
         fs = tk.Toplevel(self, bg="black")
+        # O macOS põe a tela cheia no monitor onde a janela está, e um Toplevel
+        # novo nasce na tela principal. Nasce em cima da janela principal, então
+        # a tela cheia abre no monitor onde o app está.
+        fs.geometry(f"+{self.winfo_rootx()}+{self.winfo_rooty()}")
+        fs.update_idletasks()
         fs.attributes("-fullscreen", True)
         lbl = tk.Label(fs, bg="black", bd=0, highlightthickness=0)
         lbl.pack(fill=tk.BOTH, expand=True)
@@ -2836,6 +2836,8 @@ class App(tk.Tk):
         # No Toplevel: vale para a tela toda (imagem, faixas pretas, contador).
         self._col_bind_mouse_nav(fs)
         fs.bind("<Escape>", lambda _: self._col_fullscreen_close())
+        # O tamanho final só chega depois da animação de tela cheia; reajusta.
+        fs.bind("<Configure>", lambda e: e.widget is fs and self._col_fs_fit())
         fs.protocol("WM_DELETE_WINDOW", self._col_fullscreen_close)
         fs.focus_force()
         self._col_rerender()
@@ -2848,11 +2850,33 @@ class App(tk.Tk):
         self._col_fs_loading.place(relx=0.5, rely=0.5, anchor=tk.CENTER)
         self._col_fs_loading.lift()
 
+    def _col_fs_fit(self):
+        """Ajusta a imagem renderizada ao tamanho atual da janela de tela cheia.
+
+        Usa o tamanho da janela, não ``winfo_screenwidth`` — no macOS esse é
+        sempre o da tela principal, mesmo com a janela em outro monitor.
+        """
+        fs, img = self._col_fs, getattr(self, "_col_fs_img", None)
+        if fs is None or img is None:
+            return
+        from PIL import Image, ImageTk
+        w, h = fs.winfo_width(), fs.winfo_height()
+        if w <= 1 or h <= 1:
+            w, h = fs.winfo_screenwidth(), fs.winfo_screenheight()
+        size = (max(1, int(img.width * min(w / img.width, h / img.height))),
+                max(1, int(img.height * min(w / img.width, h / img.height))))
+        if self._col_fs_photo is not None and getattr(self, "_col_fs_size", None) == size:
+            return   # <Configure> sem mudança de tamanho
+        self._col_fs_size = size
+        self._col_fs_photo = ImageTk.PhotoImage(img.resize(size, Image.LANCZOS))
+        self._col_fs_label.config(image=self._col_fs_photo)
+
     def _col_fullscreen_close(self):
         if self._col_fs is None:
             return
         fs = self._col_fs
         self._col_fs = self._col_fs_label = self._col_fs_photo = None
+        self._col_fs_img = self._col_fs_size = None
         self._col_fs_loading = None
         fs.destroy()
         self.focus_force()
