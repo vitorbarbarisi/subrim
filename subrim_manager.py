@@ -1076,6 +1076,8 @@ class App(tk.Tk):
             ttk.Radiobutton(fbar, text=rot, value=val,
                             variable=self._wh_freq_filter,
                             command=self._wh_freq_refresh_view).pack(side=tk.LEFT, padx=(6, 0))
+        ttk.Button(fbar, text="Copiar tudo...",
+                   command=self._wh_freq_copy_all).pack(side=tk.LEFT, padx=(12, 0))
         self._wh_freq_shown = tk.StringVar(value="")
         ttk.Label(fbar, textvariable=self._wh_freq_shown,
                   foreground="#888", font=("", 9)).pack(side=tk.RIGHT)
@@ -1602,15 +1604,23 @@ class App(tk.Tk):
         if not sel:
             return
         # Percorre a ORDEM EXIBIDA (get_children) e não a ordem de clique que o
-        # selection() devolveria. str() porque o Tk converte valores que parecem
-        # número de volta para int — palavras como "71" existem no corpus e
-        # faziam o join estourar TypeError.
+        # selection() devolveria.
+        self._wh_freq_copy_words(
+            [iid for iid in self._wh_freq_tree.get_children() if iid in sel])
+
+    def _wh_freq_copy_all(self):
+        """Copia todas as palavras visíveis (já filtradas), uma por linha."""
+        self._wh_freq_copy_words(self._wh_freq_tree.get_children())
+
+    def _wh_freq_copy_words(self, iids):
+        # str() porque o Tk converte valores que parecem número de volta para
+        # int — palavras como "71" existem no corpus e faziam o join estourar
+        # TypeError.
         words = []
-        for iid in self._wh_freq_tree.get_children():
-            if iid in sel:
-                values = self._wh_freq_tree.item(iid)["values"]
-                if values:
-                    words.append(str(values[0]))
+        for iid in iids:
+            values = self._wh_freq_tree.item(iid)["values"]
+            if values:
+                words.append(str(values[0]))
         if words:
             self.clipboard_clear()
             self.clipboard_append("\n".join(words))
