@@ -812,6 +812,12 @@ class App(tk.Tk):
         ttk.Checkbutton(detail, text="Queimar com tradução no topo",
                         variable=self._burn_top_translation_on).pack(anchor=tk.W,
                                                                      pady=(2, 2))
+        # Quebra a legenda em várias linhas só quando numa linha os caracteres
+        # se sobreporiam, como nas Coleções (também no batch).
+        self._burn_multiline_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(detail, text="Permitir múltiplas linhas",
+                        variable=self._burn_multiline_on).pack(anchor=tk.W,
+                                                               pady=(2, 2))
 
         self._run_btn = ttk.Button(detail, text="▶  Iniciar / Retomar",
                                    command=self._run_selected, state=tk.DISABLED)
@@ -4059,6 +4065,7 @@ class App(tk.Tk):
         # Estilo da queima: vale para todo launch, inclusive o batch.
         box_opaque = self._burn_box_opaque_on.get()
         top_translation = self._burn_top_translation_on.get()
+        multiline = self._burn_multiline_on.get()
         extract_audio = self._extract_audio_on.get()
         drive_upload = self._drive_upload_on.get()
         jid = job.id
@@ -4072,6 +4079,7 @@ class App(tk.Tk):
             # Sempre explícito: sem a variável o process_chunks assume opaco.
             env["BURN_BOX_OPAQUE"] = "1" if box_opaque else "0"
             env["BURN_TOP_TRANSLATION"] = "1" if top_translation else "0"
+            env["BURN_MULTILINE"] = "1" if multiline else "0"
             env["EXTRACT_AUDIO"] = "1" if extract_audio else "0"
             env["DRIVE_UPLOAD"] = "1" if drive_upload else "0"
             if debug_ds:
