@@ -297,7 +297,10 @@ def merge_alternating_audio(mandarin_chunks: List[Path], portuguese_chunks: List
         list_file = temp_dir / "merge_list.txt"
         with open(list_file, 'w', encoding='utf-8') as f:
             for wav_file in wav_files:
-                f.write(f"file '{wav_file.absolute()}'\n")
+                # Aspa simples no nome (ex.: "China's") fecharia a string do concat
+                # demuxer; o escape dele é '\''.
+                path = str(wav_file.absolute()).replace("'", "'\\''")
+                f.write(f"file '{path}'\n")
         
         # Comando FFmpeg para mesclar WAVs e converter para MP3
         cmd = [

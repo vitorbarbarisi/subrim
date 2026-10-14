@@ -471,7 +471,10 @@ def create_concat_list(chunk_files: List[Path], list_file: Path) -> bool:
         with open(list_file, 'w', encoding='utf-8') as f:
             for chunk_file in chunk_files:
                 # Escrever caminho absoluto para evitar problemas
-                f.write(f"file '{chunk_file.absolute()}'\n")
+                # Aspa simples no nome (ex.: "China's") fecharia a string do concat
+                # demuxer; o escape dele é '\''.
+                path = str(chunk_file.absolute()).replace("'", "'\\''")
+                f.write(f"file '{path}'\n")
 
         print(f"📄 Lista de concatenação criada: {list_file.name}")
         return True
