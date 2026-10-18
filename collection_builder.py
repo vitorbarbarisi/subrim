@@ -1013,6 +1013,91 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
             "audio_dropped": audio_dropped}
 
 
+def asset_footprint(asset: str) -> List[Path]:
+    """Tudo o que o warehouse local guarda de um episódio de vídeo.
+
+    Vale tanto para o episódio completo (com mp4) quanto para o arquivado (só
+    frames/áudio): devolve apenas o que existe. Nomes exatos, nunca glob por
+    prefixo — ``clone1`` não pode levar junto o ``clone10``.
+    """
+    candidates = [
+        WAREHOUSE / f"{asset}_base.txt",
+        WAREHOUSE / f"{asset}_base.bak",
+        periods_path_for(asset),
+        periods_path_for(asset).with_suffix(".bak"),
+        WAREHOUSE / f"{asset}.mp4",
+        FRAMES_PERIODS / asset,
+        FRAMES / asset,
+        AUDIO_PERIODS / asset,
+    ]
+    video = _find_video(WAREHOUSE / f"{asset}_base.txt")
+    if video is not None:
+        candidates.append(video)
+    out = []
+    for p in candidates:
+        if p.exists() and p not in out:
+            out.append(p)
+    return out
+
+
+def _footprint_files(paths: List[Path]) -> List[Path]:
+    """Arquivos (não pastas) cobertos pelo footprint."""
+    files = []
+    for p in paths:
+        if p.is_dir():
+            files.extend(f for f in sorted(p.rglob("*")) if f.is_file())
+        else:
+            files.append(p)
+    return files
+
+
+def footprint_size(paths: List[Path]) -> int:
+    """Total em bytes do footprint."""
+    return sum(f.stat().st_size for f in _footprint_files(paths))
+
+
+def purge_asset(asset: str, dest_warehouse: Path,
+                progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Move o episódio do warehouse local para ``dest_warehouse`` (no HD externo).
+
+    Mantém a mesma estrutura relativa ao warehouse, para restaurar bastando
+    copiar de volta. Copia tudo, confere cada arquivo pelo tamanho e só então
+    apaga o local; qualquer falha antes disso levanta exceção sem apagar nada.
+    O que já existir no destino é sobrescrito (o local é o mais recente — as
+    notas moram no ``_base.txt``).
+
+    Devolve ``{"files": n, "bytes": total}``.
+    """
+    paths = asset_footprint(asset)
+    if not paths:
+        raise FileNotFoundError(f"nada de '{asset}' no warehouse local")
+    files = _footprint_files(paths)
+    total = len(files)
+
+    copied = []
+    for i, src in enumerate(files, 1):
+        dst = dest_warehouse / src.relative_to(WAREHOUSE)
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(src, dst)
+        copied.append((src, dst))
+        if progress_cb and (i == total or i % 100 == 0):
+            progress_cb(i, total, f"copiado {src.relative_to(WAREHOUSE)}")
+
+    nbytes = 0
+    for src, dst in copied:
+        size = src.stat().st_size
+        if not dst.is_file() or dst.stat().st_size != size:
+            raise IOError(f"conferência falhou em {dst} — nada local foi apagado")
+        nbytes += size
+
+    for p in paths:
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+    return {"files": total, "bytes": nbytes}
+
+
 def audio_available_for_match(match: dict) -> bool:
     """Checagem barata (só ``Path.exists()``, sem ffmpeg): há áudio pra essa frase?
 
