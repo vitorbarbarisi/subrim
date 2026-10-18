@@ -1075,7 +1075,13 @@ class App(tk.Tk):
         wt.bind("<Double-1>", self._wh_open_in_collections)
         wt.bind("<Shift-Down>", lambda _: self._wh_extend_selection(1)  or "break")
         wt.bind("<Shift-Up>",   lambda _: self._wh_extend_selection(-1) or "break")
+        # Menu de contexto (mesmos gestos da lista de frequências, abaixo).
+        for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
+            wt.bind(seq, self._wh_context_menu)
         self._wh_tree = wt
+        self._wh_menu = tk.Menu(self, tearoff=0)
+        self._wh_menu.add_command(label="Expurgar...", command=self._wh_purge_selected)
+        self._wh_purging = False
 
         # ── detalhes ──
         right = ttk.Frame(pw, padding=(12, 0, 0, 0))
@@ -1432,7 +1438,7 @@ class App(tk.Tk):
         aba Coleções seguem funcionando pelos frames. Um episódio com perda
         relevante mantém o vídeo.
         """
-        if self._wh_archiving:
+        if self._wh_archiving or self._wh_purging:
             return
         cb = self._col_import()
         if not cb:
@@ -1555,6 +1561,191 @@ class App(tk.Tk):
             f"~{summary['freed_gb']:.2f} GB liberados.")
         self._wh_refresh()
         self._wh_update_archive_btn()
+
+    # ── Expurgo: move o episódio do warehouse para o HD externo ────────────────
+    def _wh_context_menu(self, event):
+        """Menu do botão direito na lista: 'Expurgar...' (só no modo Vídeo)."""
+        row = self._wh_tree.identify_row(event.y)
+        if not row:
+            return "break"   # cabeçalho ou área vazia: não abre menu
+        if row not in self._wh_tree.selection():
+            # Fora da seleção: o menu age só sobre a linha clicada (um grupo
+            # vale todos os episódios dele).
+            self._wh_tree.selection_set(row)
+            self._wh_tree.focus(row)
+        n = len(self._wh_selected_bases())
+        ok = (n > 0 and not self._is_text_mode()
+              and not self._wh_purging and not self._wh_archiving)
+        self._wh_menu.entryconfigure(
+            0, label="Expurgar..." if n <= 1 else f"Expurgar {n} itens...",
+            state=tk.NORMAL if ok else tk.DISABLED)
+        try:
+            self._wh_menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            self._wh_menu.grab_release()
+        return "break"
+
+    def _wh_pick_drive(self):
+        """HD externo de destino. None se não há (já avisa) ou se cancelou."""
+        drives = _external_drives()
+        if not drives:
+            messagebox.showerror(
+                "Expurgar",
+                "Nenhum HD externo gravável encontrado em /Volumes.\n\n"
+                "Conecte o HD (ex.: SUBRIM) e tente de novo.")
+            return None
+        # Com vários, prefere os que já têm o warehouse espelhado.
+        com_wh = [d for d in drives if (d / "warehouse").is_dir()]
+        drives = com_wh or drives
+        if len(drives) == 1:
+            return drives[0]
+
+        dlg = tk.Toplevel(self)
+        dlg.title("Expurgar")
+        dlg.transient(self)
+        dlg.resizable(False, False)
+        frm = ttk.Frame(dlg, padding=12)
+        frm.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(frm, text="Mais de um HD externo conectado. Expurgar para:").pack(anchor=tk.W)
+        var = tk.StringVar(value=str(drives[0]))
+        ttk.Combobox(frm, textvariable=var, values=[str(d) for d in drives],
+                     state="readonly", width=40).pack(fill=tk.X, pady=8)
+        chosen = {"v": None}
+
+        def _ok():
+            chosen["v"] = Path(var.get())
+            dlg.destroy()
+
+        btns = ttk.Frame(frm)
+        btns.pack(anchor=tk.E)
+        ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 6))
+        ttk.Button(btns, text="OK", command=_ok).pack(side=tk.LEFT)
+        dlg.grab_set()
+        self.wait_window(dlg)
+        return chosen["v"]
+
+    def _wh_purge_selected(self):
+        """Expurga os episódios das frases selecionadas para <HD>/warehouse/.
+
+        Serve tanto para o episódio completo (com mp4) quanto para o arquivado
+        (só frames/áudio): leva o que existir, na mesma estrutura de pastas,
+        confere e só então apaga do computador local.
+        """
+        if self._wh_purging or self._wh_archiving or self._is_text_mode():
+            return
+        assets = [bf.stem.removesuffix("_base") for bf in self._wh_selected_bases()]
+        if not assets:
+            return
+        cb = self._col_import()
+        if not cb:
+            return
+        drive = self._wh_pick_drive()
+        if drive is None:
+            return
+        dest = drive / "warehouse"
+
+        plan = []   # [(asset, paths, bytes)]
+        for a in assets:
+            paths = cb.asset_footprint(a)
+            if paths:
+                plan.append((a, paths, cb.footprint_size(paths)))
+        if not plan:
+            messagebox.showinfo("Expurgar", "Nada desse(s) episódio(s) no warehouse local.")
+            return
+
+        total = sum(n for _, _, n in plan)
+        try:
+            livre = shutil.disk_usage(drive).free
+        except OSError as e:
+            messagebox.showerror("Expurgar", f"Não foi possível ler o HD {drive}:\n{e}")
+            return
+        if total > livre:
+            messagebox.showerror(
+                "Expurgar",
+                f"Espaço insuficiente em {drive.name}: precisa de "
+                f"{total / 1024**3:.2f} GB, livre {livre / 1024**3:.2f} GB.")
+            return
+
+        linhas = []
+        for a, paths, n in plan[:5]:
+            estado = ("com vídeo" if any(p.suffix == ".mp4" for p in paths)
+                      else "arquivado")
+            linhas.append(f"“{_wh_readable_name(a)}” ({estado}, {n / 1024**2:.0f} MB)")
+            if len(plan) == 1:
+                linhas += [f"    • {p.relative_to(WAREHOUSE)}"
+                           + (f"/ ({sum(1 for f in p.rglob('*') if f.is_file())} arquivo(s))"
+                              if p.is_dir() else "")
+                           for p in paths]
+        if len(plan) > 5:
+            linhas.append(f"… e mais {len(plan) - 5} episódio(s)")
+        if not messagebox.askyesno(
+                "Expurgar vídeo" if len(plan) == 1 else "Expurgar vídeos",
+                f"Expurgar para {dest}?\n\n"
+                + "\n".join(linhas)
+                + f"\n\nTotal ~{total / 1024**2:.0f} MB · livre no HD: "
+                  f"{livre / 1024**3:.0f} GB\n\n"
+                  "Copia, confere e APAGA do computador local. Para recuperar, "
+                  "basta copiar de volta do HD para o warehouse.",
+                icon=messagebox.WARNING, default=messagebox.NO):
+            return
+
+        self._wh_purging = True
+        self._log_line(f"📦 Expurgo: {len(plan)} episódio(s) → {dest}", "cmd")
+
+        def _work():
+            # Notas pendentes gravam no _base.txt que vai sair daqui: espera a
+            # fila esvaziar e a janela de coalescência do escritor passar.
+            for _ in range(50):
+                if self._nota_q.empty():
+                    break
+                time.sleep(0.1)
+            time.sleep(0.5)
+
+            summary = {"ok": [], "failed": [], "bytes": 0, "dest": dest}
+            for k, (a, _, _) in enumerate(plan, 1):
+                self._log_q.put((f"[{k}/{len(plan)}] 📦 “{_wh_readable_name(a)}”…", "cmd"))
+
+                def _progress(i, n, msg):
+                    self._log_q.put((f"    ({i}/{n}) {msg}", "info"))
+
+                try:
+                    res = cb.purge_asset(a, dest, progress_cb=_progress)
+                except Exception as e:  # noqa: BLE001
+                    self._log_q.put((f"    ❌ Erro ao expurgar '{a}': {e}", "error"))
+                    summary["failed"].append(a)
+                    continue
+                summary["ok"].append(a)
+                summary["bytes"] += res["bytes"]
+                self._log_q.put((
+                    f"    ✓ {res['files']} arquivo(s), "
+                    f"{res['bytes'] / 1024**2:.0f} MB movidos para o HD.", "success"))
+            self.after(0, lambda: self._wh_purge_done(summary))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _wh_purge_done(self, summary: dict):
+        self._wh_purging = False
+        ok = set(summary["ok"])
+        if ok:
+            self._wh_refresh()
+            self._wh_update_archive_btn()
+            # Frases desses episódios na busca das Coleções não têm mais
+            # base/frames locais: saem da lista.
+            if any(m.get("asset") in ok for m in self._col_matches):
+                self._col_show_results([m for m in self._col_matches
+                                        if m.get("asset") not in ok])
+        gb = summary["bytes"] / 1024**3
+        self._log_line(
+            f"📦 Expurgo concluído: {len(ok)} ok, {len(summary['failed'])} falha(s). "
+            f"~{gb:.2f} GB liberados.", "success" if ok else "warning")
+        msg = (f"{len(ok)} episódio(s) expurgado(s) para {summary['dest']}.\n"
+               f"~{gb:.2f} GB liberados no computador.")
+        if summary["failed"]:
+            msg += ("\n\nFalharam (mantidos no computador; veja o Log):\n"
+                    + "\n".join(f"  • {_wh_readable_name(a)}" for a in summary["failed"][:10]))
+            messagebox.showwarning("Expurgar", msg)
+        else:
+            messagebox.showinfo("Expurgar", msg)
 
     def _wh_show_details(self, detail: str, freq: list):
         self._wh_detail.set(detail)
@@ -1863,13 +2054,6 @@ class App(tk.Tk):
         t.bind("<Shift-Down>", lambda _: self._col_extend_selection(1)  or "break")
         t.bind("<Shift-Up>",   lambda _: self._col_extend_selection(-1) or "break")
         self._col_tree = t
-
-        # Menu de contexto (mesmos gestos do menu da aba Assets).
-        for seq in ("<Button-3>", "<Button-2>", "<Control-Button-1>"):
-            t.bind(seq, self._col_context_menu)
-        self._col_menu = tk.Menu(self, tearoff=0)
-        self._col_menu.add_command(label="Expurgar...", command=self._col_purge_selected)
-        self._col_purging = False
 
         # Right: preview
         right = ttk.Frame(pw, padding=(8, 0))
@@ -2437,195 +2621,6 @@ class App(tk.Tk):
             self._col_tree.focus(iid)
             self._col_tree.see(iid)
             self._col_index = new_sel
-
-    # ── Expurgo: move o episódio do warehouse para o HD externo ────────────────
-    def _col_context_menu(self, event):
-        """Menu do botão direito na lista: 'Expurgar...' (só no modo Vídeo)."""
-        row = self._col_tree.identify_row(event.y)
-        if not row:
-            return "break"   # cabeçalho ou área vazia: não abre menu
-        sel = self._col_tree.selection()
-        if row not in sel:
-            # Fora da seleção: o menu age só sobre a linha clicada.
-            self._col_tree.selection_set(row)
-            self._col_tree.focus(row)
-        ok = not self._is_text_mode() and not self._col_purging
-        self._col_menu.entryconfigure(0, state=tk.NORMAL if ok else tk.DISABLED)
-        try:
-            self._col_menu.tk_popup(event.x_root, event.y_root)
-        finally:
-            self._col_menu.grab_release()
-        return "break"
-
-    def _col_selected_assets(self) -> list:
-        """Assets distintos das frases selecionadas, na ordem da lista."""
-        out = []
-        for iid in self._col_tree.selection():
-            i = int(iid)
-            if 0 <= i < len(self._col_matches):
-                a = self._col_matches[i].get("asset")
-                if a and a not in out:
-                    out.append(a)
-        return out
-
-    def _col_pick_drive(self):
-        """HD externo de destino. None se não há (já avisa) ou se cancelou."""
-        drives = _external_drives()
-        if not drives:
-            messagebox.showerror(
-                "Expurgar",
-                "Nenhum HD externo gravável encontrado em /Volumes.\n\n"
-                "Conecte o HD (ex.: SUBRIM) e tente de novo.")
-            return None
-        # Com vários, prefere os que já têm o warehouse espelhado.
-        com_wh = [d for d in drives if (d / "warehouse").is_dir()]
-        drives = com_wh or drives
-        if len(drives) == 1:
-            return drives[0]
-
-        dlg = tk.Toplevel(self)
-        dlg.title("Expurgar")
-        dlg.transient(self)
-        dlg.resizable(False, False)
-        frm = ttk.Frame(dlg, padding=12)
-        frm.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(frm, text="Mais de um HD externo conectado. Expurgar para:").pack(anchor=tk.W)
-        var = tk.StringVar(value=str(drives[0]))
-        ttk.Combobox(frm, textvariable=var, values=[str(d) for d in drives],
-                     state="readonly", width=40).pack(fill=tk.X, pady=8)
-        chosen = {"v": None}
-
-        def _ok():
-            chosen["v"] = Path(var.get())
-            dlg.destroy()
-
-        btns = ttk.Frame(frm)
-        btns.pack(anchor=tk.E)
-        ttk.Button(btns, text="Cancelar", command=dlg.destroy).pack(side=tk.LEFT, padx=(0, 6))
-        ttk.Button(btns, text="OK", command=_ok).pack(side=tk.LEFT)
-        dlg.grab_set()
-        self.wait_window(dlg)
-        return chosen["v"]
-
-    def _col_purge_selected(self):
-        """Expurga os episódios das frases selecionadas para <HD>/warehouse/.
-
-        Serve tanto para o episódio completo (com mp4) quanto para o arquivado
-        (só frames/áudio): leva o que existir, na mesma estrutura de pastas,
-        confere e só então apaga do computador local.
-        """
-        if self._col_purging or self._is_text_mode():
-            return
-        assets = self._col_selected_assets()
-        if not assets:
-            return
-        cb = self._col_import()
-        if not cb:
-            return
-        drive = self._col_pick_drive()
-        if drive is None:
-            return
-        dest = drive / "warehouse"
-
-        plan = []   # [(asset, paths, bytes)]
-        for a in assets:
-            paths = cb.asset_footprint(a)
-            if paths:
-                plan.append((a, paths, cb.footprint_size(paths)))
-        if not plan:
-            messagebox.showinfo("Expurgar", "Nada desse(s) episódio(s) no warehouse local.")
-            return
-
-        total = sum(n for _, _, n in plan)
-        try:
-            livre = shutil.disk_usage(drive).free
-        except OSError as e:
-            messagebox.showerror("Expurgar", f"Não foi possível ler o HD {drive}:\n{e}")
-            return
-        if total > livre:
-            messagebox.showerror(
-                "Expurgar",
-                f"Espaço insuficiente em {drive.name}: precisa de "
-                f"{total / 1024**3:.2f} GB, livre {livre / 1024**3:.2f} GB.")
-            return
-
-        linhas = []
-        for a, paths, n in plan[:5]:
-            estado = ("com vídeo" if any(p.suffix == ".mp4" for p in paths)
-                      else "arquivado")
-            linhas.append(f"“{_wh_readable_name(a)}” ({estado}, {n / 1024**2:.0f} MB)")
-            if len(plan) == 1:
-                linhas += [f"    • {p.relative_to(WAREHOUSE)}"
-                           + (f"/ ({sum(1 for f in p.rglob('*') if f.is_file())} arquivo(s))"
-                              if p.is_dir() else "")
-                           for p in paths]
-        if len(plan) > 5:
-            linhas.append(f"… e mais {len(plan) - 5} episódio(s)")
-        if not messagebox.askyesno(
-                "Expurgar vídeo" if len(plan) == 1 else "Expurgar vídeos",
-                f"Expurgar para {dest}?\n\n"
-                + "\n".join(linhas)
-                + f"\n\nTotal ~{total / 1024**2:.0f} MB · livre no HD: "
-                  f"{livre / 1024**3:.0f} GB\n\n"
-                  "Copia, confere e APAGA do computador local. Para recuperar, "
-                  "basta copiar de volta do HD para o warehouse.",
-                icon=messagebox.WARNING, default=messagebox.NO):
-            return
-
-        self._col_purging = True
-        self._log_line(f"📦 Expurgo: {len(plan)} episódio(s) → {dest}", "cmd")
-
-        def _work():
-            # Notas pendentes gravam no _base.txt que vai sair daqui: espera a
-            # fila esvaziar e a janela de coalescência do escritor passar.
-            for _ in range(50):
-                if self._nota_q.empty():
-                    break
-                time.sleep(0.1)
-            time.sleep(0.5)
-
-            summary = {"ok": [], "failed": [], "bytes": 0, "dest": dest}
-            for k, (a, _, _) in enumerate(plan, 1):
-                self._log_q.put((f"[{k}/{len(plan)}] 📦 “{_wh_readable_name(a)}”…", "cmd"))
-
-                def _progress(i, n, msg):
-                    self._log_q.put((f"    ({i}/{n}) {msg}", "info"))
-
-                try:
-                    res = cb.purge_asset(a, dest, progress_cb=_progress)
-                except Exception as e:  # noqa: BLE001
-                    self._log_q.put((f"    ❌ Erro ao expurgar '{a}': {e}", "error"))
-                    summary["failed"].append(a)
-                    continue
-                summary["ok"].append(a)
-                summary["bytes"] += res["bytes"]
-                self._log_q.put((
-                    f"    ✓ {res['files']} arquivo(s), "
-                    f"{res['bytes'] / 1024**2:.0f} MB movidos para o HD.", "success"))
-            self.after(0, lambda: self._col_purge_done(summary))
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _col_purge_done(self, summary: dict):
-        self._col_purging = False
-        ok = set(summary["ok"])
-        if ok:
-            # As frases desses episódios não têm mais base/frames locais.
-            self._col_show_results([m for m in self._col_matches
-                                    if m.get("asset") not in ok])
-            self._wh_refresh()
-        gb = summary["bytes"] / 1024**3
-        self._log_line(
-            f"📦 Expurgo concluído: {len(ok)} ok, {len(summary['failed'])} falha(s). "
-            f"~{gb:.2f} GB liberados.", "success" if ok else "warning")
-        msg = (f"{len(ok)} episódio(s) expurgado(s) para {summary['dest']}.\n"
-               f"~{gb:.2f} GB liberados no computador.")
-        if summary["failed"]:
-            msg += ("\n\nFalharam (mantidos no computador; veja o Log):\n"
-                    + "\n".join(f"  • {_wh_readable_name(a)}" for a in summary["failed"][:10]))
-            messagebox.showwarning("Expurgar", msg)
-        else:
-            messagebox.showinfo("Expurgar", msg)
 
     def _col_extend_selection(self, direction: int):
         focused = self._col_tree.focus()
