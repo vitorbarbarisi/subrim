@@ -684,6 +684,8 @@ class App(tk.Tk):
                 self._nb.hide(tab)
 
         self._wh_archive_btn.config(state=tk.DISABLED)
+        # Restaurar só existe para vídeo (o HD espelha warehouse/, não text/).
+        self._wh_restore_btn.config(state=tk.DISABLED if texto else tk.NORMAL)
         self._wh_open.clear()   # os grupos de um modo não existem no outro
         self._wh_refresh()
         self._col_clear_results()
@@ -1037,10 +1039,15 @@ class App(tk.Tk):
             ctrl, text="📐  Gerar períodos",
             command=self._wh_periods_selected, state=tk.DISABLED)
         self._wh_periods_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._wh_restore_btn = ttk.Button(
+            ctrl, text="Restaurar...", command=self._wh_restore_dialog)
+        self._wh_restore_btn.pack(side=tk.LEFT, padx=(8, 0))
+        self._wh_restoring = False
         self._wh_count_var = tk.StringVar()
         ttk.Label(ctrl, textvariable=self._wh_count_var, foreground="#888").pack(side=tk.RIGHT)
         self._wh_selected_base = None
         self._wh_archiving = False
+        self._wh_purging = False
 
         pw = ttk.PanedWindow(outer, orient=tk.HORIZONTAL)
         pw.pack(fill=tk.BOTH, expand=True)
@@ -1081,7 +1088,6 @@ class App(tk.Tk):
         self._wh_tree = wt
         self._wh_menu = tk.Menu(self, tearoff=0)
         self._wh_menu.add_command(label="Expurgar...", command=self._wh_purge_selected)
-        self._wh_purging = False
 
         # ── detalhes ──
         right = ttk.Frame(pw, padding=(12, 0, 0, 0))
@@ -1271,15 +1277,16 @@ class App(tk.Tk):
     def _wh_update_archive_btn(self):
         """Habilita/rotula o botão conforme a seleção (1 ou vários com mp4)."""
         n = len(self._wh_archivable_selection())
+        ocupado = self._wh_archiving or self._wh_purging or self._wh_restoring
         if n > 1:
             self._wh_archive_btn.config(text=f"🗄  Arquivar {n} selecionados")
         else:
             self._wh_archive_btn.config(text="🗄  Arquivar (trocar vídeo por frames)")
         self._wh_archive_btn.config(
-            state=(tk.NORMAL if (n and not self._wh_archiving) else tk.DISABLED))
+            state=(tk.NORMAL if (n and not ocupado) else tk.DISABLED))
         # Gerar períodos não precisa de mp4 — vale para qualquer base selecionado.
         self._wh_periods_btn.config(
-            state=(tk.NORMAL if (self._wh_selected_bases() and not self._wh_archiving)
+            state=(tk.NORMAL if (self._wh_selected_bases() and not ocupado)
                    else tk.DISABLED))
 
     def _wh_on_select(self, _=None):
@@ -1438,7 +1445,7 @@ class App(tk.Tk):
         aba Coleções seguem funcionando pelos frames. Um episódio com perda
         relevante mantém o vídeo.
         """
-        if self._wh_archiving or self._wh_purging:
+        if self._wh_archiving or self._wh_purging or self._wh_restoring:
             return
         cb = self._col_import()
         if not cb:
@@ -1575,7 +1582,8 @@ class App(tk.Tk):
             self._wh_tree.focus(row)
         n = len(self._wh_selected_bases())
         ok = (n > 0 and not self._is_text_mode()
-              and not self._wh_purging and not self._wh_archiving)
+              and not self._wh_purging and not self._wh_archiving
+              and not self._wh_restoring)
         self._wh_menu.entryconfigure(
             0, label="Expurgar..." if n <= 1 else f"Expurgar {n} itens...",
             state=tk.NORMAL if ok else tk.DISABLED)
@@ -1631,7 +1639,8 @@ class App(tk.Tk):
         (só frames/áudio): leva o que existir, na mesma estrutura de pastas,
         confere e só então apaga do computador local.
         """
-        if self._wh_purging or self._wh_archiving or self._is_text_mode():
+        if (self._wh_purging or self._wh_archiving or self._wh_restoring
+                or self._is_text_mode()):
             return
         assets = [bf.stem.removesuffix("_base") for bf in self._wh_selected_bases()]
         if not assets:
@@ -1746,6 +1755,80 @@ class App(tk.Tk):
             messagebox.showwarning("Expurgar", msg)
         else:
             messagebox.showinfo("Expurgar", msg)
+
+    # ── Restauro: traz episódios do HD externo de volta ao warehouse ─────────
+    def _wh_restore_dialog(self):
+        """Abre o modal com os episódios do HD externo (botão "Restaurar...")."""
+        if self._is_text_mode():
+            return
+        if self._wh_archiving or self._wh_purging or self._wh_restoring:
+            messagebox.showinfo("Restaurar",
+                                "Aguarde o arquivamento/expurgo/restauro em andamento.")
+            return
+        if not self._col_import():
+            return
+        drive = self._wh_pick_drive()
+        if drive is None:
+            return
+        hd = drive / "warehouse"
+        if not hd.is_dir():
+            messagebox.showerror("Restaurar", f"Esse HD não tem warehouse/:\n{drive}")
+            return
+        RestoreDialog(self, hd)
+
+    def _wh_restore_run(self, hd: Path, plan: list, delete_src: bool):
+        """Restaura em thread. ``plan`` = [(asset, bytes)]."""
+        import collection_builder as cb
+        self._wh_restoring = True
+        self._wh_update_archive_btn()
+        acao = "apagando do HD" if delete_src else "mantendo no HD"
+        self._log_line(f"📥 Restauro: {len(plan)} episódio(s) de {hd} ({acao})", "cmd")
+
+        def _work():
+            summary = {"ok": [], "failed": [], "bytes": 0, "hd": hd,
+                       "delete_src": delete_src}
+            for k, (a, _) in enumerate(plan, 1):
+                self._log_q.put((f"[{k}/{len(plan)}] 📥 “{_wh_readable_name(a)}”…", "cmd"))
+
+                def _progress(i, n, msg):
+                    self._log_q.put((f"    ({i}/{n}) {msg}", "info"))
+
+                try:
+                    res = cb.restore_asset(a, hd, delete_src=delete_src,
+                                           progress_cb=_progress)
+                except Exception as e:  # noqa: BLE001
+                    self._log_q.put((f"    ❌ Erro ao restaurar '{a}': {e}", "error"))
+                    summary["failed"].append(a)
+                    continue
+                summary["ok"].append(a)
+                summary["bytes"] += res["bytes"]
+                self._log_q.put((
+                    f"    ✓ {res['files']} arquivo(s), "
+                    f"{res['bytes'] / 1024**2:.0f} MB restaurados.", "success"))
+            self.after(0, lambda: self._wh_restore_done(summary))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _wh_restore_done(self, summary: dict):
+        self._wh_restoring = False
+        ok = summary["ok"]
+        if ok:
+            self._wh_refresh()
+        self._wh_update_archive_btn()
+        gb = summary["bytes"] / 1024**3
+        self._log_line(
+            f"📥 Restauro concluído: {len(ok)} ok, {len(summary['failed'])} falha(s). "
+            f"~{gb:.2f} GB trazidos.", "success" if ok else "warning")
+        msg = (f"{len(ok)} episódio(s) restaurado(s) de {summary['hd']}.\n"
+               f"~{gb:.2f} GB trazidos para o computador.\n"
+               + ("Cópias apagadas do HD." if summary["delete_src"]
+                  else "Cópias mantidas no HD."))
+        if summary["failed"]:
+            msg += ("\n\nFalharam (intactos no HD; veja o Log):\n"
+                    + "\n".join(f"  • {_wh_readable_name(a)}" for a in summary["failed"][:10]))
+            messagebox.showwarning("Restaurar", msg)
+        else:
+            messagebox.showinfo("Restaurar", msg)
 
     def _wh_show_details(self, detail: str, freq: list):
         self._wh_detail.set(detail)
@@ -4716,6 +4799,170 @@ class SaveCollectionDialog(tk.Toplevel):
         variants = self._variants.get()
         self.destroy()
         self.app._col_save_run(mode, skip_zero, make_bundle, variants)
+
+
+# ─── Dialog: Restaurar do HD externo (Warehouse) ───────────────────────────────
+class RestoreDialog(tk.Toplevel):
+    """Lista os episódios do warehouse do HD externo, agrupados e sanfonados
+    como a lista do Warehouse, para escolher quais trazer de volta.
+
+    Episódios que já têm ``_base.txt`` no computador aparecem em cinza e são
+    ignorados — restaurá-los sobrescreveria notas locais mais novas."""
+
+    def __init__(self, app: App, hd: Path):
+        super().__init__(app)
+        self.app = app
+        self.hd = hd
+        self.title("Restaurar do HD")
+        self.geometry("640x600")
+        self.minsize(460, 380)
+        self.transient(app)
+        self.grab_set()
+        self._status: dict = {}   # asset -> status no HD (ou "Já no computador")
+
+        f = ttk.Frame(self, padding=12)
+        f.pack(fill=tk.BOTH, expand=True)
+        ttk.Label(f, text=f"Restaurar do HD — {hd}",
+                  font=("", 11, "bold")).pack(anchor=tk.W, pady=(0, 6))
+
+        lf = ttk.Frame(f)
+        lf.pack(fill=tk.BOTH, expand=True)
+        t = ttk.Treeview(lf, columns=("status",), show="tree headings",
+                         selectmode="extended")
+        t.heading("#0",     text="Nome",          anchor=tk.W)
+        t.heading("status", text="Status no HD",  anchor=tk.CENTER)
+        t.column("#0",     width=360, anchor=tk.W,      stretch=True)
+        t.column("status", width=180, anchor=tk.CENTER, stretch=False)
+        vsb = ttk.Scrollbar(lf, orient=tk.VERTICAL, command=t.yview)
+        t.configure(yscrollcommand=vsb.set)
+        t.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        vsb.pack(side=tk.RIGHT, fill=tk.Y)
+        t.tag_configure("ok",       foreground="#27AE60")
+        t.tag_configure("archived", foreground="#2980B9")
+        t.tag_configure("missing",  foreground="#E74C3C")
+        t.tag_configure("local",    foreground="#999")
+        t.tag_configure("group",    font=("", 12, "bold"))
+        t.bind("<<TreeviewSelect>>", lambda _: self._update_btn())
+        t.insert("", tk.END, iid="__loading__", text="Carregando…", values=("",))
+        self._tree = t
+
+        btns = ttk.Frame(f)
+        btns.pack(fill=tk.X, pady=(10, 0))
+        self._count = tk.StringVar(value="")
+        ttk.Label(btns, textvariable=self._count, foreground="#888").pack(side=tk.LEFT)
+        self._restore_btn = ttk.Button(btns, text="Restaurar...", state=tk.DISABLED,
+                                       command=self._restore)
+        self._restore_btn.pack(side=tk.RIGHT)
+        ttk.Button(btns, text="Fechar", command=self.destroy).pack(side=tk.RIGHT, padx=4)
+
+        threading.Thread(target=self._load, daemon=True).start()
+
+    def _load(self):
+        """Varre o HD fora da thread da UI — o disco externo pode ser lento."""
+        import collection_builder as cb
+        try:
+            status = {}
+            for bf in self.hd.glob("*_base.txt"):
+                a = bf.name[:-len("_base.txt")]
+                if (WAREHOUSE / bf.name).exists():
+                    status[a] = "Já no computador"
+                else:
+                    status[a] = cb.remote_status(self.hd, a)
+            err = None
+        except OSError as e:
+            status, err = {}, e
+        try:
+            self.after(0, lambda: self._fill(status, err))
+        except (RuntimeError, tk.TclError):
+            pass   # modal fechado durante a carga
+
+    def _fill(self, status: dict, err):
+        if not self.winfo_exists():
+            return
+        t = self._tree
+        t.delete(*t.get_children())
+        if err is not None:
+            t.insert("", tk.END, text=f"Erro ao ler o HD: {err}", values=("",))
+            return
+        if not status:
+            t.insert("", tk.END, text="(nenhum episódio no HD)", values=("",))
+            return
+        self._status = status
+        tags = {"Completo": "ok", "Arquivado": "archived", "Só texto": "missing",
+                "Já no computador": "local"}
+        for key, nome, stems in _wh_group_list(list(status)):
+            n_local = sum(1 for a in stems if status[a] == "Já no computador")
+            n_hd = len(stems) - n_local
+            resumo = " · ".join(x for x in (
+                f"{n_hd} só no HD" if n_hd else "",
+                f"{n_local} já local" if n_local else "") if x)
+            gid = f"grp:{key or ''}"
+            t.insert("", tk.END, iid=gid, text=f"{nome}  ({len(stems)})",
+                     values=(resumo,), tags=("group",), open=False)
+            for a in stems:
+                t.insert(gid, tk.END, iid=a, text=_wh_readable_name(a),
+                         values=(status[a],), tags=(tags[status[a]],))
+        n_local = sum(1 for v in status.values() if v == "Já no computador")
+        self._count.set(f"{len(status)} no HD · {len(status) - n_local} restaurável(is)")
+
+    def _selected(self) -> list:
+        """Assets restauráveis da seleção; um grupo vale todos os filhos."""
+        t = self._tree
+        sel = set(t.selection())
+        out = []
+        for gid in t.get_children():
+            for a in t.get_children(gid):
+                if (gid in sel or a in sel) and self._status.get(a) not in (
+                        None, "Já no computador"):
+                    out.append(a)
+        return out
+
+    def _update_btn(self):
+        n = len(self._selected())
+        self._restore_btn.config(text="Restaurar..." if n <= 1 else f"Restaurar {n}...",
+                                 state=tk.NORMAL if n else tk.DISABLED)
+
+    def _restore(self):
+        import collection_builder as cb
+        assets = self._selected()
+        if not assets:
+            return
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            plan = [(a, cb.footprint_size(cb.asset_footprint(a, self.hd))) for a in assets]
+            livre = shutil.disk_usage(WAREHOUSE).free
+        except OSError as e:
+            self.config(cursor="")
+            messagebox.showerror("Restaurar", f"Erro ao ler o HD:\n{e}", parent=self)
+            return
+        self.config(cursor="")
+        total = sum(n for _, n in plan)
+        if total > livre:
+            messagebox.showerror(
+                "Restaurar",
+                f"Espaço insuficiente no computador: precisa de "
+                f"{total / 1024**3:.2f} GB, livre {livre / 1024**3:.2f} GB.", parent=self)
+            return
+
+        linhas = [f"“{_wh_readable_name(a)}” ({self._status[a].lower()}, "
+                  f"{n / 1024**2:.0f} MB)" for a, n in plan[:5]]
+        if len(plan) > 5:
+            linhas.append(f"… e mais {len(plan) - 5} episódio(s)")
+        resp = messagebox.askyesnocancel(
+            "Restaurar",
+            f"Restaurar {len(plan)} episódio(s) para o warehouse local?\n\n"
+            + "\n".join(linhas)
+            + f"\n\nTotal ~{total / 1024**2:.0f} MB\n\n"
+              "Apagar a cópia do HD depois de restaurar?\n\n"
+              "Sim = restaura e apaga do HD\n"
+              "Não = restaura e mantém no HD\n"
+              "Cancelar = não faz nada",
+            default=messagebox.CANCEL, parent=self)
+        if resp is None:
+            return
+        self.destroy()
+        self.app._wh_restore_run(self.hd, plan, delete_src=resp)
 
 
 # ─── Dialog: Asset Filter (Coleções) ────────────────────────────────────────────

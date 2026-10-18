@@ -1013,24 +1013,28 @@ def archive_asset(asset: str, jpeg_quality: int = 90,
             "audio_dropped": audio_dropped}
 
 
-def asset_footprint(asset: str) -> List[Path]:
-    """Tudo o que o warehouse local guarda de um episódio de vídeo.
+def asset_footprint(asset: str, root: Optional[Path] = None) -> List[Path]:
+    """Tudo o que um warehouse guarda de um episódio de vídeo.
 
-    Vale tanto para o episódio completo (com mp4) quanto para o arquivado (só
-    frames/áudio): devolve apenas o que existe. Nomes exatos, nunca glob por
-    prefixo — ``clone1`` não pode levar junto o ``clone10``.
+    ``root`` é o warehouse local (padrão) ou o espelho no HD externo — a
+    estrutura é a mesma. Vale tanto para o episódio completo (com mp4) quanto
+    para o arquivado (só frames/áudio): devolve apenas o que existe. Nomes
+    exatos, nunca glob por prefixo — ``clone1`` não pode levar junto o
+    ``clone10``.
     """
+    root = WAREHOUSE if root is None else root
+    periods = root / f"{asset}{periods_base.PERIODS_SUFFIX}"
     candidates = [
-        WAREHOUSE / f"{asset}_base.txt",
-        WAREHOUSE / f"{asset}_base.bak",
-        periods_path_for(asset),
-        periods_path_for(asset).with_suffix(".bak"),
-        WAREHOUSE / f"{asset}.mp4",
-        FRAMES_PERIODS / asset,
-        FRAMES / asset,
-        AUDIO_PERIODS / asset,
+        root / f"{asset}_base.txt",
+        root / f"{asset}_base.bak",
+        periods,
+        periods.with_suffix(".bak"),
+        root / f"{asset}.mp4",
+        root / FRAMES_PERIODS.name / asset,
+        root / FRAMES.name / asset,
+        root / AUDIO_PERIODS.name / asset,
     ]
-    video = _find_video(WAREHOUSE / f"{asset}_base.txt")
+    video = _find_video(root / f"{asset}_base.txt")
     if video is not None:
         candidates.append(video)
     out = []
@@ -1038,6 +1042,15 @@ def asset_footprint(asset: str) -> List[Path]:
         if p.exists() and p not in out:
             out.append(p)
     return out
+
+
+def remote_status(root: Path, asset: str) -> str:
+    """Estado do episódio num warehouse (ex.: o do HD), só por existência."""
+    if (root / f"{asset}.mp4").exists():
+        return "Completo"
+    if (root / FRAMES_PERIODS.name / asset).is_dir() or (root / FRAMES.name / asset).is_dir():
+        return "Arquivado"
+    return "Só texto"
 
 
 def _footprint_files(paths: List[Path]) -> List[Path]:
@@ -1056,46 +1069,63 @@ def footprint_size(paths: List[Path]) -> int:
     return sum(f.stat().st_size for f in _footprint_files(paths))
 
 
-def purge_asset(asset: str, dest_warehouse: Path,
-                progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
-    """Move o episódio do warehouse local para ``dest_warehouse`` (no HD externo).
+def _transfer(asset: str, src_root: Path, dst_root: Path, delete_src: bool,
+              progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Copia o episódio de um warehouse para outro, na mesma estrutura.
 
-    Mantém a mesma estrutura relativa ao warehouse, para restaurar bastando
-    copiar de volta. Copia tudo, confere cada arquivo pelo tamanho e só então
-    apaga o local; qualquer falha antes disso levanta exceção sem apagar nada.
-    O que já existir no destino é sobrescrito (o local é o mais recente — as
-    notas moram no ``_base.txt``).
+    Copia tudo, confere cada arquivo pelo tamanho e só então (se
+    ``delete_src``) apaga a origem; qualquer falha antes disso levanta exceção
+    sem apagar nada. O que já existir no destino é sobrescrito.
 
     Devolve ``{"files": n, "bytes": total}``.
     """
-    paths = asset_footprint(asset)
+    paths = asset_footprint(asset, src_root)
     if not paths:
-        raise FileNotFoundError(f"nada de '{asset}' no warehouse local")
+        raise FileNotFoundError(f"nada de '{asset}' em {src_root}")
     files = _footprint_files(paths)
     total = len(files)
 
     copied = []
     for i, src in enumerate(files, 1):
-        dst = dest_warehouse / src.relative_to(WAREHOUSE)
+        dst = dst_root / src.relative_to(src_root)
         dst.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(src, dst)
         copied.append((src, dst))
         if progress_cb and (i == total or i % 100 == 0):
-            progress_cb(i, total, f"copiado {src.relative_to(WAREHOUSE)}")
+            progress_cb(i, total, f"copiado {src.relative_to(src_root)}")
 
     nbytes = 0
     for src, dst in copied:
         size = src.stat().st_size
         if not dst.is_file() or dst.stat().st_size != size:
-            raise IOError(f"conferência falhou em {dst} — nada local foi apagado")
+            raise IOError(f"conferência falhou em {dst} — nada foi apagado da origem")
         nbytes += size
 
-    for p in paths:
-        if p.is_dir():
-            shutil.rmtree(p)
-        else:
-            p.unlink()
+    if delete_src:
+        for p in paths:
+            if p.is_dir():
+                shutil.rmtree(p)
+            else:
+                p.unlink()
     return {"files": total, "bytes": nbytes}
+
+
+def purge_asset(asset: str, dest_warehouse: Path,
+                progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Move o episódio do warehouse local para ``dest_warehouse`` (no HD externo).
+
+    Mantém a mesma estrutura relativa ao warehouse, para restaurar bastando
+    copiar de volta (ver ``restore_asset``). O local é o mais recente — as
+    notas moram no ``_base.txt`` —, então sobrescreve o que houver no HD.
+    """
+    return _transfer(asset, WAREHOUSE, dest_warehouse, True, progress_cb)
+
+
+def restore_asset(asset: str, src_warehouse: Path, delete_src: bool = False,
+                  progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Traz o episódio do HD externo (``src_warehouse``) de volta ao warehouse
+    local. Com ``delete_src`` apaga a cópia do HD depois de conferida."""
+    return _transfer(asset, src_warehouse, WAREHOUSE, delete_src, progress_cb)
 
 
 def audio_available_for_match(match: dict) -> bool:
