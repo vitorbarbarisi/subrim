@@ -30,6 +30,8 @@ from video_screenshoter_r36s import add_subtitles_to_frame, parse_pinyin_transla
 
 REPO = Path(__file__).parent
 WAREHOUSE = REPO / "warehouse"
+# Material bruto (pastas de asset do pipeline); só o expurgo/restauro mexe aqui.
+ASSETS_ROOT = REPO / "assets"
 COLLECTIONS = WAREHOUSE / "collections"
 # Escopo "texto": bases gerados pelo text_pipeline.py a partir de assets/text/.
 # Subpasta própria (e não um sufixo no nome) porque os dois corpora nunca devem
@@ -1069,21 +1071,24 @@ def footprint_size(paths: List[Path]) -> int:
     return sum(f.stat().st_size for f in _footprint_files(paths))
 
 
-def _transfer(asset: str, src_root: Path, dst_root: Path, delete_src: bool,
-              progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
-    """Copia o episódio de um warehouse para outro, na mesma estrutura.
+def transfer_paths(paths: List[Path], src_root: Path, dst_root: Path, delete_src: bool,
+                   progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Copia ``paths`` (arquivos ou pastas sob ``src_root``) para o mesmo
+    caminho relativo em ``dst_root`` — warehouse ↔ HD, assets ↔ HD.
 
-    Copia tudo, confere cada arquivo pelo tamanho e só então (se
-    ``delete_src``) apaga a origem; qualquer falha antes disso levanta exceção
-    sem apagar nada. O que já existir no destino é sobrescrito.
+    Copia tudo (pastas vazias inclusive), confere cada arquivo pelo tamanho e
+    só então (se ``delete_src``) apaga a origem; qualquer falha antes disso
+    levanta exceção sem apagar nada. O que já existir no destino é sobrescrito.
 
     Devolve ``{"files": n, "bytes": total}``.
     """
-    paths = asset_footprint(asset, src_root)
-    if not paths:
-        raise FileNotFoundError(f"nada de '{asset}' em {src_root}")
     files = _footprint_files(paths)
     total = len(files)
+
+    for p in paths:
+        if p.is_dir():
+            for d in [p, *(x for x in p.rglob("*") if x.is_dir())]:
+                (dst_root / d.relative_to(src_root)).mkdir(parents=True, exist_ok=True)
 
     copied = []
     for i, src in enumerate(files, 1):
@@ -1110,6 +1115,15 @@ def _transfer(asset: str, src_root: Path, dst_root: Path, delete_src: bool,
     return {"files": total, "bytes": nbytes}
 
 
+def _transfer(asset: str, src_root: Path, dst_root: Path, delete_src: bool,
+              progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Copia o episódio de um warehouse para outro, na mesma estrutura."""
+    paths = asset_footprint(asset, src_root)
+    if not paths:
+        raise FileNotFoundError(f"nada de '{asset}' em {src_root}")
+    return transfer_paths(paths, src_root, dst_root, delete_src, progress_cb)
+
+
 def purge_asset(asset: str, dest_warehouse: Path,
                 progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
     """Move o episódio do warehouse local para ``dest_warehouse`` (no HD externo).
@@ -1126,6 +1140,31 @@ def restore_asset(asset: str, src_warehouse: Path, delete_src: bool = False,
     """Traz o episódio do HD externo (``src_warehouse``) de volta ao warehouse
     local. Com ``delete_src`` apaga a cópia do HD depois de conferida."""
     return _transfer(asset, src_warehouse, WAREHOUSE, delete_src, progress_cb)
+
+
+def raw_asset_paths(name: str, root: Optional[Path] = None) -> List[Path]:
+    """Material bruto de um asset: ``<root>/<nome>/`` e ``<root>/<nome>_sub/``
+    (chunks, merged, marcador do Drive), os que existirem."""
+    root = ASSETS_ROOT if root is None else root
+    return [p for p in (root / name, root / f"{name}_sub") if p.exists()]
+
+
+def purge_raw_asset(name: str, dest_assets: Path,
+                    progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Move o asset (pasta + _sub) de ``assets/`` para ``dest_assets`` no HD."""
+    paths = raw_asset_paths(name)
+    if not paths:
+        raise FileNotFoundError(f"nada de '{name}' em {ASSETS_ROOT}")
+    return transfer_paths(paths, ASSETS_ROOT, dest_assets, True, progress_cb)
+
+
+def restore_raw_asset(name: str, src_assets: Path, delete_src: bool = False,
+                      progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Traz o asset do HD (``src_assets``) de volta para ``assets/``."""
+    paths = raw_asset_paths(name, src_assets)
+    if not paths:
+        raise FileNotFoundError(f"nada de '{name}' em {src_assets}")
+    return transfer_paths(paths, src_assets, ASSETS_ROOT, delete_src, progress_cb)
 
 
 def audio_available_for_match(match: dict) -> bool:

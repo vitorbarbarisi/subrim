@@ -771,6 +771,8 @@ class App(tk.Tk):
             command=lambda: self._selected and self._open_asset_video(self._selected["name"]))
         self._assets_menu.add_separator()
         self._assets_menu.add_command(label="Excluir...", command=self._excluir_selected)
+        self._assets_menu.add_command(label="Expurgar...", command=self._assets_purge_selected)
+        self._assets_hd_busy = False   # expurgo/restauro de assets em andamento
 
         # Right: detail panel — rolável inteiro (texto, opções, botões e fases),
         # para caber em janelas baixas e em seleções múltiplas longas.
@@ -1701,7 +1703,7 @@ class App(tk.Tk):
         self._wh_purging = True
         self._log_line(f"📦 Expurgo: {len(plan)} episódio(s) → {dest}", "cmd")
 
-        def _work():
+        def _wait_notes():
             # Notas pendentes gravam no _base.txt que vai sair daqui: espera a
             # fila esvaziar e a janela de coalescência do escritor passar.
             for _ in range(50):
@@ -1710,29 +1712,12 @@ class App(tk.Tk):
                 time.sleep(0.1)
             time.sleep(0.5)
 
-            summary = {"ok": [], "failed": [], "bytes": 0, "dest": dest}
-            for k, (a, _, _) in enumerate(plan, 1):
-                self._log_q.put((f"[{k}/{len(plan)}] 📦 “{_wh_readable_name(a)}”…", "cmd"))
+        self._hd_batch(
+            [a for a, _, _ in plan], lambda a, pcb: cb.purge_asset(a, dest, progress_cb=pcb),
+            emoji="📦", erro="expurgar", feito="movidos para o HD", before=_wait_notes,
+            on_done=lambda summary: self._wh_purge_done(summary, dest))
 
-                def _progress(i, n, msg):
-                    self._log_q.put((f"    ({i}/{n}) {msg}", "info"))
-
-                try:
-                    res = cb.purge_asset(a, dest, progress_cb=_progress)
-                except Exception as e:  # noqa: BLE001
-                    self._log_q.put((f"    ❌ Erro ao expurgar '{a}': {e}", "error"))
-                    summary["failed"].append(a)
-                    continue
-                summary["ok"].append(a)
-                summary["bytes"] += res["bytes"]
-                self._log_q.put((
-                    f"    ✓ {res['files']} arquivo(s), "
-                    f"{res['bytes'] / 1024**2:.0f} MB movidos para o HD.", "success"))
-            self.after(0, lambda: self._wh_purge_done(summary))
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _wh_purge_done(self, summary: dict):
+    def _wh_purge_done(self, summary: dict, dest: Path):
         self._wh_purging = False
         ok = set(summary["ok"])
         if ok:
@@ -1743,18 +1728,79 @@ class App(tk.Tk):
             if any(m.get("asset") in ok for m in self._col_matches):
                 self._col_show_results([m for m in self._col_matches
                                         if m.get("asset") not in ok])
+        self._hd_report("Expurgar", summary, "📦 Expurgo", "liberados",
+                        f"episódio(s) expurgado(s) para {dest}.",
+                        "liberados no computador.", "mantidos no computador")
+
+    # ── Lote HD externo (expurgo/restauro de warehouse e assets) ─────────────
+    def _hd_batch(self, names: list, fn, emoji: str, erro: str, feito: str,
+                  on_done, before=None):
+        """Roda ``fn(nome, progress_cb)`` para cada nome numa thread, logando via
+        fila; no fim chama ``on_done(summary)`` na thread da UI.
+
+        ``summary`` = ``{"ok": [...], "failed": [...], "bytes": int}``."""
+        def _work():
+            if before:
+                before()
+            summary = {"ok": [], "failed": [], "bytes": 0}
+            for k, a in enumerate(names, 1):
+                self._log_q.put((f"[{k}/{len(names)}] {emoji} “{_wh_readable_name(a)}”…", "cmd"))
+
+                def _progress(i, n, msg):
+                    self._log_q.put((f"    ({i}/{n}) {msg}", "info"))
+
+                try:
+                    res = fn(a, _progress)
+                except Exception as e:  # noqa: BLE001
+                    self._log_q.put((f"    ❌ Erro ao {erro} '{a}': {e}", "error"))
+                    summary["failed"].append(a)
+                    continue
+                summary["ok"].append(a)
+                summary["bytes"] += res["bytes"]
+                self._log_q.put((
+                    f"    ✓ {res['files']} arquivo(s), "
+                    f"{res['bytes'] / 1024**2:.0f} MB {feito}.", "success"))
+            self.after(0, lambda: on_done(summary))
+
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _hd_report(self, title: str, summary: dict, log_prefix: str, log_gb: str,
+                   msg_ok: str, msg_gb: str, failed_note: str, extra: str = ""):
+        """Linha final no Log + resumo em messagebox de um ``_hd_batch``."""
+        ok = summary["ok"]
         gb = summary["bytes"] / 1024**3
         self._log_line(
-            f"📦 Expurgo concluído: {len(ok)} ok, {len(summary['failed'])} falha(s). "
-            f"~{gb:.2f} GB liberados.", "success" if ok else "warning")
-        msg = (f"{len(ok)} episódio(s) expurgado(s) para {summary['dest']}.\n"
-               f"~{gb:.2f} GB liberados no computador.")
+            f"{log_prefix} concluído: {len(ok)} ok, {len(summary['failed'])} falha(s). "
+            f"~{gb:.2f} GB {log_gb}.", "success" if ok else "warning")
+        msg = f"{len(ok)} {msg_ok}\n~{gb:.2f} GB {msg_gb}" + (f"\n{extra}" if extra else "")
         if summary["failed"]:
-            msg += ("\n\nFalharam (mantidos no computador; veja o Log):\n"
+            msg += (f"\n\nFalharam ({failed_note}; veja o Log):\n"
                     + "\n".join(f"  • {_wh_readable_name(a)}" for a in summary["failed"][:10]))
-            messagebox.showwarning("Expurgar", msg)
+            messagebox.showwarning(title, msg)
         else:
-            messagebox.showinfo("Expurgar", msg)
+            messagebox.showinfo(title, msg)
+
+    @staticmethod
+    def _hd_ask_restore(parent, plan: list, status: dict, onde: str):
+        """Confirma o restauro e pergunta o destino da cópia do HD.
+
+        ``plan`` = [(nome, bytes)]. Devolve True (apagar do HD), False (manter)
+        ou None (cancelar)."""
+        total = sum(n for _, n in plan)
+        linhas = [f"“{_wh_readable_name(a)}” ({status[a].lower()}, "
+                  f"{n / 1024**2:.0f} MB)" for a, n in plan[:5]]
+        if len(plan) > 5:
+            linhas.append(f"… e mais {len(plan) - 5} item(ns)")
+        return messagebox.askyesnocancel(
+            "Restaurar",
+            f"Restaurar {len(plan)} item(ns) para {onde}?\n\n"
+            + "\n".join(linhas)
+            + f"\n\nTotal ~{total / 1024**2:.0f} MB\n\n"
+              "Apagar a cópia do HD depois de restaurar?\n\n"
+              "Sim = restaura e apaga do HD\n"
+              "Não = restaura e mantém no HD\n"
+              "Cancelar = não faz nada",
+            default=messagebox.CANCEL, parent=parent)
 
     # ── Restauro: traz episódios do HD externo de volta ao warehouse ─────────
     def _wh_restore_dialog(self):
@@ -1765,7 +1811,8 @@ class App(tk.Tk):
             messagebox.showinfo("Restaurar",
                                 "Aguarde o arquivamento/expurgo/restauro em andamento.")
             return
-        if not self._col_import():
+        cb = self._col_import()
+        if not cb:
             return
         drive = self._wh_pick_drive()
         if drive is None:
@@ -1774,7 +1821,19 @@ class App(tk.Tk):
         if not hd.is_dir():
             messagebox.showerror("Restaurar", f"Esse HD não tem warehouse/:\n{drive}")
             return
-        RestoreDialog(self, hd)
+
+        def _scan():
+            status = {}
+            for bf in hd.glob("*_base.txt"):
+                a = bf.name[:-len("_base.txt")]
+                status[a] = ("Já no computador" if (WAREHOUSE / bf.name).exists()
+                             else cb.remote_status(hd, a))
+            return status
+
+        RestoreDialog(self, hd, title="Restaurar do HD", scan=_scan,
+                      size=lambda a: cb.footprint_size(cb.asset_footprint(a, hd)),
+                      local_root=WAREHOUSE, onde="o warehouse local",
+                      run=lambda plan, delete: self._wh_restore_run(hd, plan, delete))
 
     def _wh_restore_run(self, hd: Path, plan: list, delete_src: bool):
         """Restaura em thread. ``plan`` = [(asset, bytes)]."""
@@ -1783,52 +1842,21 @@ class App(tk.Tk):
         self._wh_update_archive_btn()
         acao = "apagando do HD" if delete_src else "mantendo no HD"
         self._log_line(f"📥 Restauro: {len(plan)} episódio(s) de {hd} ({acao})", "cmd")
+        self._hd_batch(
+            [a for a, _ in plan],
+            lambda a, pcb: cb.restore_asset(a, hd, delete_src=delete_src, progress_cb=pcb),
+            emoji="📥", erro="restaurar", feito="restaurados",
+            on_done=lambda summary: self._wh_restore_done(summary, hd, delete_src))
 
-        def _work():
-            summary = {"ok": [], "failed": [], "bytes": 0, "hd": hd,
-                       "delete_src": delete_src}
-            for k, (a, _) in enumerate(plan, 1):
-                self._log_q.put((f"[{k}/{len(plan)}] 📥 “{_wh_readable_name(a)}”…", "cmd"))
-
-                def _progress(i, n, msg):
-                    self._log_q.put((f"    ({i}/{n}) {msg}", "info"))
-
-                try:
-                    res = cb.restore_asset(a, hd, delete_src=delete_src,
-                                           progress_cb=_progress)
-                except Exception as e:  # noqa: BLE001
-                    self._log_q.put((f"    ❌ Erro ao restaurar '{a}': {e}", "error"))
-                    summary["failed"].append(a)
-                    continue
-                summary["ok"].append(a)
-                summary["bytes"] += res["bytes"]
-                self._log_q.put((
-                    f"    ✓ {res['files']} arquivo(s), "
-                    f"{res['bytes'] / 1024**2:.0f} MB restaurados.", "success"))
-            self.after(0, lambda: self._wh_restore_done(summary))
-
-        threading.Thread(target=_work, daemon=True).start()
-
-    def _wh_restore_done(self, summary: dict):
+    def _wh_restore_done(self, summary: dict, hd: Path, delete_src: bool):
         self._wh_restoring = False
-        ok = summary["ok"]
-        if ok:
+        if summary["ok"]:
             self._wh_refresh()
         self._wh_update_archive_btn()
-        gb = summary["bytes"] / 1024**3
-        self._log_line(
-            f"📥 Restauro concluído: {len(ok)} ok, {len(summary['failed'])} falha(s). "
-            f"~{gb:.2f} GB trazidos.", "success" if ok else "warning")
-        msg = (f"{len(ok)} episódio(s) restaurado(s) de {summary['hd']}.\n"
-               f"~{gb:.2f} GB trazidos para o computador.\n"
-               + ("Cópias apagadas do HD." if summary["delete_src"]
-                  else "Cópias mantidas no HD."))
-        if summary["failed"]:
-            msg += ("\n\nFalharam (intactos no HD; veja o Log):\n"
-                    + "\n".join(f"  • {_wh_readable_name(a)}" for a in summary["failed"][:10]))
-            messagebox.showwarning("Restaurar", msg)
-        else:
-            messagebox.showinfo("Restaurar", msg)
+        self._hd_report("Restaurar", summary, "📥 Restauro", "trazidos",
+                        f"episódio(s) restaurado(s) de {hd}.",
+                        "trazidos para o computador.", "intactos no HD",
+                        "Cópias apagadas do HD." if delete_src else "Cópias mantidas no HD.")
 
     def _wh_show_details(self, detail: str, freq: list):
         self._wh_detail.set(detail)
@@ -1962,6 +1990,8 @@ class App(tk.Tk):
         btn_row.pack(fill=tk.X, pady=(0, 6))
         ttk.Button(btn_row, text="+ Novo Scraping", command=self._new_scraping_dialog).pack(side=tk.LEFT)
         ttk.Button(btn_row, text="↺", width=3, command=self._refresh_sources).pack(side=tk.LEFT, padx=4)
+        ttk.Button(btn_row, text="Restaurar...",
+                   command=self._assets_restore_dialog).pack(side=tk.LEFT)
 
         src_cols = ("name", "eps", "mtime")
         st = ttk.Treeview(src_f, columns=src_cols, show="headings", height=12)
@@ -3962,6 +3992,7 @@ class App(tk.Tk):
             self._assets_menu.entryconfigure(0, state=tk.DISABLED)
             self._assets_menu.entryconfigure(1, state=tk.DISABLED)
             self._assets_menu.entryconfigure(3, label=f"Excluir {len(sel)} itens...")
+            self._assets_menu.entryconfigure(4, label=f"Expurgar {len(sel)} itens...")
         else:
             # Fora da seleção: o menu age só sobre o item clicado, senão os
             # botões de lote continuariam apontando para os outros itens.
@@ -3979,6 +4010,9 @@ class App(tk.Tk):
             self._assets_menu.entryconfigure(
                 1, state=tk.NORMAL if self._asset_video(row) else tk.DISABLED)
             self._assets_menu.entryconfigure(3, label="Excluir...")
+            self._assets_menu.entryconfigure(4, label="Expurgar...")
+        self._assets_menu.entryconfigure(
+            4, state=tk.DISABLED if self._assets_hd_busy else tk.NORMAL)
         try:
             self._assets_menu.tk_popup(event.x_root, event.y_root)
         finally:
@@ -4010,21 +4044,146 @@ class App(tk.Tk):
             on_done=self._refresh_assets,
         )
 
+    def _assets_busy_jobs(self, names: list) -> list:
+        """Rótulos dos processos em execução que mexem num destes assets
+        (nome no rótulo, ou batch cujo prefixo os cobre)."""
+        def _usa(label: str, n: str) -> bool:
+            m = re.match(r"Batch: (.+)\*$", label)
+            if m:
+                return n.startswith(m.group(1))
+            return re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", label) is not None
+        return [j.label for j in self._running_jobs()
+                if any(_usa(j.label, n) for n in names)]
+
+    # ── Expurgo/restauro de material bruto (assets/ ↔ <HD>/assets/) ──────────
+    def _assets_purge_selected(self):
+        """Move a pasta de cada asset selecionado (e a _sub) para <HD>/assets/,
+        na mesma estrutura: copia, confere e só então apaga do computador."""
+        if self._assets_hd_busy:
+            return
+        names = list(self._tree.selection())
+        if not names:
+            return
+        ocupados = self._assets_busy_jobs(names)
+        if ocupados:
+            messagebox.showwarning(
+                "Processo em execução",
+                "Aguarde ou pare antes de expurgar:\n"
+                + "\n".join(f"  • {l}" for l in ocupados))
+            return
+        import collection_builder as cb
+        drive = self._wh_pick_drive()
+        if drive is None:
+            return
+        dest = drive / "assets"
+
+        plan = []   # [(nome, bytes)]
+        for n in names:
+            paths = cb.raw_asset_paths(n)
+            if paths:
+                plan.append((n, cb.footprint_size(paths)))
+        if not plan:
+            return
+        total = sum(b for _, b in plan)
+        try:
+            livre = shutil.disk_usage(drive).free
+        except OSError as e:
+            messagebox.showerror("Expurgar", f"Não foi possível ler o HD {drive}:\n{e}")
+            return
+        if total > livre:
+            messagebox.showerror(
+                "Expurgar",
+                f"Espaço insuficiente em {drive.name}: precisa de "
+                f"{total / 1024**3:.2f} GB, livre {livre / 1024**3:.2f} GB.")
+            return
+
+        linhas = [f"“{n}” ({b / 1024**2:.0f} MB"
+                  + (", com _sub)" if (ASSETS / f"{n}_sub").exists() else ")")
+                  for n, b in plan[:5]]
+        if len(plan) > 5:
+            linhas.append(f"… e mais {len(plan) - 5} asset(s)")
+        if not messagebox.askyesno(
+                "Expurgar asset" if len(plan) == 1 else "Expurgar assets",
+                f"Expurgar para {dest}?\n\n"
+                + "\n".join(linhas)
+                + f"\n\nTotal ~{total / 1024**2:.0f} MB · livre no HD: "
+                  f"{livre / 1024**3:.0f} GB\n\n"
+                  "Copia, confere e APAGA do computador local (pasta do asset e "
+                  "_sub). Para recuperar: Downloads & Scraping → Restaurar...",
+                icon=messagebox.WARNING, default=messagebox.NO):
+            return
+
+        self._assets_hd_busy = True
+        self._log_line(f"📦 Expurgo de assets: {len(plan)} → {dest}", "cmd")
+        self._hd_batch(
+            [n for n, _ in plan], lambda n, pcb: cb.purge_raw_asset(n, dest, progress_cb=pcb),
+            emoji="📦", erro="expurgar", feito="movidos para o HD",
+            on_done=lambda summary: self._assets_purge_done(summary, dest))
+
+    def _assets_purge_done(self, summary: dict, dest: Path):
+        self._assets_hd_busy = False
+        if summary["ok"]:
+            self._selected = None
+            self._selected_many = []
+            self._refresh_assets()
+        self._hd_report("Expurgar", summary, "📦 Expurgo de assets", "liberados",
+                        f"asset(s) expurgado(s) para {dest}.",
+                        "liberados no computador.", "mantidos no computador")
+
+    def _assets_restore_dialog(self):
+        """Modal com os assets do HD externo (botão em Downloads & Scraping)."""
+        if self._assets_hd_busy:
+            messagebox.showinfo("Restaurar", "Aguarde o expurgo/restauro de assets em andamento.")
+            return
+        import collection_builder as cb
+        drive = self._wh_pick_drive()
+        if drive is None:
+            return
+        hd = drive / "assets"
+        if not hd.is_dir():
+            messagebox.showerror("Restaurar", f"Esse HD não tem assets/:\n{drive}")
+            return
+
+        def _scan():
+            # Uma listagem só, sem stat por asset: o HD USB pode ser lento.
+            with os.scandir(hd) as it:
+                nomes = [e.name for e in it
+                         if e.is_dir() and not e.name.endswith("_sub")]
+            return {n: "Já no computador" if (ASSETS / n).exists() else "Só no HD"
+                    for n in nomes}
+
+        RestoreDialog(self, hd, title="Restaurar assets do HD", scan=_scan,
+                      size=lambda n: cb.footprint_size(cb.raw_asset_paths(n, hd)),
+                      local_root=ASSETS, onde="assets/",
+                      run=lambda plan, delete: self._assets_restore_run(hd, plan, delete))
+
+    def _assets_restore_run(self, hd: Path, plan: list, delete_src: bool):
+        import collection_builder as cb
+        self._assets_hd_busy = True
+        acao = "apagando do HD" if delete_src else "mantendo no HD"
+        self._log_line(f"📥 Restauro de assets: {len(plan)} de {hd} ({acao})", "cmd")
+        self._hd_batch(
+            [n for n, _ in plan],
+            lambda n, pcb: cb.restore_raw_asset(n, hd, delete_src=delete_src, progress_cb=pcb),
+            emoji="📥", erro="restaurar", feito="restaurados",
+            on_done=lambda summary: self._assets_restore_done(summary, hd, delete_src))
+
+    def _assets_restore_done(self, summary: dict, hd: Path, delete_src: bool):
+        self._assets_hd_busy = False
+        if summary["ok"]:
+            self._refresh_assets()
+        self._hd_report("Restaurar", summary, "📥 Restauro de assets", "trazidos",
+                        f"asset(s) restaurado(s) de {hd}.",
+                        "trazidos para o computador.", "intactos no HD",
+                        "Cópias apagadas do HD." if delete_src else "Cópias mantidas no HD.")
+
     def _excluir_selected(self):
         """Move a pasta de cada asset selecionado (e a _sub, se houver) para a
         Lixeira do macOS. Aceita seleção múltipla."""
         names = list(self._tree.selection())
         if not names:
             return
-        # Só bloqueia se algum processo em execução mexe num destes assets
-        # (nome no rótulo, ou batch cujo prefixo os cobre).
-        def _usa(label: str, n: str) -> bool:
-            m = re.match(r"Batch: (.+)\*$", label)
-            if m:
-                return n.startswith(m.group(1))
-            return re.search(rf"(?<![\w-]){re.escape(n)}(?![\w-])", label) is not None
-        ocupados = [j.label for j in self._running_jobs()
-                    if any(_usa(j.label, n) for n in names)]
+        ocupados = self._assets_busy_jobs(names)
         if ocupados:
             messagebox.showwarning(
                 "Processo em execução",
@@ -4803,17 +4962,25 @@ class SaveCollectionDialog(tk.Toplevel):
 
 # ─── Dialog: Restaurar do HD externo (Warehouse) ───────────────────────────────
 class RestoreDialog(tk.Toplevel):
-    """Lista os episódios do warehouse do HD externo, agrupados e sanfonados
-    como a lista do Warehouse, para escolher quais trazer de volta.
+    """Lista o que está no HD externo, agrupado e sanfonado como a lista do
+    Warehouse, para escolher o que trazer de volta. Serve ao warehouse
+    (episódios) e aos assets (material bruto) — quem chama passa como varrer,
+    medir e restaurar.
 
-    Episódios que já têm ``_base.txt`` no computador aparecem em cinza e são
-    ignorados — restaurá-los sobrescreveria notas locais mais novas."""
+    ``scan()`` roda numa thread e devolve ``{nome: status}``; itens com status
+    "Já no computador" aparecem em cinza e são ignorados (restaurá-los
+    sobrescreveria o local, que pode ser mais novo). ``size(nome)`` dá os
+    bytes no HD e ``run(plan, delete_src)`` executa com
+    ``plan = [(nome, bytes)]``."""
 
-    def __init__(self, app: App, hd: Path):
+    def __init__(self, app: App, hd: Path, title: str, scan, size, run,
+                 local_root: Path, onde: str):
         super().__init__(app)
         self.app = app
         self.hd = hd
-        self.title("Restaurar do HD")
+        self._scan, self._size, self._run = scan, size, run
+        self._local_root, self._onde = local_root, onde
+        self.title(title)
         self.geometry("640x600")
         self.minsize(460, 380)
         self.transient(app)
@@ -4822,7 +4989,7 @@ class RestoreDialog(tk.Toplevel):
 
         f = ttk.Frame(self, padding=12)
         f.pack(fill=tk.BOTH, expand=True)
-        ttk.Label(f, text=f"Restaurar do HD — {hd}",
+        ttk.Label(f, text=f"{title} — {hd}",
                   font=("", 11, "bold")).pack(anchor=tk.W, pady=(0, 6))
 
         lf = ttk.Frame(f)
@@ -4859,16 +5026,8 @@ class RestoreDialog(tk.Toplevel):
 
     def _load(self):
         """Varre o HD fora da thread da UI — o disco externo pode ser lento."""
-        import collection_builder as cb
         try:
-            status = {}
-            for bf in self.hd.glob("*_base.txt"):
-                a = bf.name[:-len("_base.txt")]
-                if (WAREHOUSE / bf.name).exists():
-                    status[a] = "Já no computador"
-                else:
-                    status[a] = cb.remote_status(self.hd, a)
-            err = None
+            status, err = self._scan(), None
         except OSError as e:
             status, err = {}, e
         try:
@@ -4889,7 +5048,7 @@ class RestoreDialog(tk.Toplevel):
             return
         self._status = status
         tags = {"Completo": "ok", "Arquivado": "archived", "Só texto": "missing",
-                "Já no computador": "local"}
+                "Só no HD": "ok", "Já no computador": "local"}
         for key, nome, stems in _wh_group_list(list(status)):
             n_local = sum(1 for a in stems if status[a] == "Já no computador")
             n_hd = len(stems) - n_local
@@ -4923,15 +5082,14 @@ class RestoreDialog(tk.Toplevel):
                                  state=tk.NORMAL if n else tk.DISABLED)
 
     def _restore(self):
-        import collection_builder as cb
         assets = self._selected()
         if not assets:
             return
         self.config(cursor="watch")
         self.update_idletasks()
         try:
-            plan = [(a, cb.footprint_size(cb.asset_footprint(a, self.hd))) for a in assets]
-            livre = shutil.disk_usage(WAREHOUSE).free
+            plan = [(a, self._size(a)) for a in assets]
+            livre = shutil.disk_usage(self._local_root).free
         except OSError as e:
             self.config(cursor="")
             messagebox.showerror("Restaurar", f"Erro ao ler o HD:\n{e}", parent=self)
@@ -4944,25 +5102,11 @@ class RestoreDialog(tk.Toplevel):
                 f"Espaço insuficiente no computador: precisa de "
                 f"{total / 1024**3:.2f} GB, livre {livre / 1024**3:.2f} GB.", parent=self)
             return
-
-        linhas = [f"“{_wh_readable_name(a)}” ({self._status[a].lower()}, "
-                  f"{n / 1024**2:.0f} MB)" for a, n in plan[:5]]
-        if len(plan) > 5:
-            linhas.append(f"… e mais {len(plan) - 5} episódio(s)")
-        resp = messagebox.askyesnocancel(
-            "Restaurar",
-            f"Restaurar {len(plan)} episódio(s) para o warehouse local?\n\n"
-            + "\n".join(linhas)
-            + f"\n\nTotal ~{total / 1024**2:.0f} MB\n\n"
-              "Apagar a cópia do HD depois de restaurar?\n\n"
-              "Sim = restaura e apaga do HD\n"
-              "Não = restaura e mantém no HD\n"
-              "Cancelar = não faz nada",
-            default=messagebox.CANCEL, parent=self)
+        resp = App._hd_ask_restore(self, plan, self._status, self._onde)
         if resp is None:
             return
         self.destroy()
-        self.app._wh_restore_run(self.hd, plan, delete_src=resp)
+        self._run(plan, resp)
 
 
 # ─── Dialog: Asset Filter (Coleções) ────────────────────────────────────────────
