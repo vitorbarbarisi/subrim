@@ -1019,9 +1019,41 @@ def _split_without_overlap(items, available: int, chinese_char_width: int,
     return lines
 
 
+def _stacked_layout(items, scale: float, base_sizes: Tuple[int, int, int],
+                    vertical_spacing: int, video_width: int, available: int,
+                    latin_font_path: str) -> dict:
+    """Legenda quebrada em várias linhas, com as fontes na escala ``scale``.
+
+    Cada linha ocupa só a altura do seu glossário (1 linha de português, ou
+    mais se alguma tradução quebra), em vez das 3 reservadas pela tarja comum.
+    Com a fonte menor as colunas estreitam, então a quebra é refeita.
+    """
+    zh_size, py_size, pt_size = (max(10, int(s * scale)) for s in base_sizes)
+    spacing = max(4, int(vertical_spacing * scale))
+    chinese_char_width = int(zh_size * 0.95)
+    pinyin_char_width = int(py_size * 0.65)
+    min_word_spacing = max(40, int(max(80, int(video_width * 0.05)) * scale))
+    pt_line_height = int(pt_size * 1.2)
+
+    lines = []
+    for line_items in _split_without_overlap(items, available, chinese_char_width,
+                                             pinyin_char_width, min_word_spacing):
+        widths = _shrink_widths(
+            _word_widths(line_items, chinese_char_width, pinyin_char_width,
+                         min_word_spacing), available)
+        pt_rows = max([1] + [len(wrap_portuguese_to_chinese_width(pt, latin_font_path, w, pt_size))
+                             for w, (_, _, pt) in zip(widths, line_items) if pt and pt.strip()])
+        height = py_size + spacing + zh_size + spacing + pt_rows * pt_line_height
+        lines.append((line_items, widths, sum(widths), height))
+    total_height = sum(h for *_, h in lines) + (len(lines) + 1) * spacing
+    return {"sizes": (zh_size, py_size, pt_size), "spacing": spacing,
+            "pt_line_height": pt_line_height, "lines": lines,
+            "height": total_height}
+
+
 def _top_translation_filters(portuguese_text: str, latin_font_path: str,
                              base_chinese_font_size: int, video_width: int,
-                             time_condition: str) -> Tuple[str, List[str]]:
+                             time_condition: str) -> Tuple[str, List[str], int]:
     """Tarja com a frase traduzida no topo, como nas Coleções.
 
     Replica a geometria de ``video_screenshoter_r36s.add_subtitles_to_frame``
@@ -1029,11 +1061,12 @@ def _top_translation_filters(portuguese_text: str, latin_font_path: str,
     para o vídeo queimado ficar igual à imagem da coleção.
 
     Returns:
-        (drawbox da tarja, [drawtext por linha]) — ou ("", []) sem texto.
+        (drawbox da tarja, [drawtext por linha], y da borda de baixo da tarja)
+        — ou ("", [], 0) sem texto.
     """
     text = (portuguese_text or "").strip()
     if not text:
-        return "", []
+        return "", [], 0
 
     _s = base_chinese_font_size / 36
     font_size = max(18, int(base_chinese_font_size * 0.6))
@@ -1063,7 +1096,7 @@ def _top_translation_filters(portuguese_text: str, latin_font_path: str,
         lines = wrap_portuguese_to_chinese_width(text, latin_font_path, max_width, font_size)
         text_w = max(int(len(l) * font_size * 0.6) for l in lines)
     if not lines:
-        return "", []
+        return "", [], 0
 
     box_w = min(video_width, text_w + int(40 * _s))
     box_h = line_height * len(lines) + int(16 * _s)
@@ -1081,7 +1114,7 @@ def _top_translation_filters(portuguese_text: str, latin_font_path: str,
                 f":fontfile='{latin_font_path}':fontsize={font_size}"
                 f":fontcolor=0xCC9900:enable='{time_condition}'")
         ty += line_height
-    return box, texts
+    return box, texts, top_margin + box_h
 
 
 def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, str, float]], video_width: int = 1920, video_height: int = 1080) -> str:
@@ -1292,74 +1325,91 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
             else:
                 print(f"   ✅ Espaço inferior seguro: {bottom_clearance}px restantes")
 
-        # Linhas desta legenda: uma só, salvo quando "Permitir múltiplas
-        # linhas" a quebrou no primeiro passe (numa só os caracteres se
-        # sobreporiam). A última linha fica nas Y de sempre; cada anterior sobe
-        # um bloco inteiro (pinyin + hanzi + glossário).
-        lines = split_lines.get(begin_time, [display_items])
-        line_step = (portuguese_y - pinyin_y + base_portuguese_font_size
-                     + portuguese_extra_height + vertical_spacing)
-        # Linha única encolhe até a largura da tarja comum (como sempre); as
-        # quebradas já cabem na largura máxima por construção.
-        line_width_cap = max_subtitle_width if len(lines) == 1 else max_subtitle_width_pixels
-
-        line_layouts = []
-        for line_items in lines:
-            # Create word-by-word aligned subtitle with pinyin centered over each Chinese word
-            # Calculate total line width first to center the entire subtitle block
-            word_widths = _word_widths(line_items, chinese_char_width, pinyin_char_width,
-                                       min_word_spacing)
-            total_line_width = sum(word_widths)
-
-            # If the line is too wide, scale down word widths proportionally to fit
-            if total_line_width > line_width_cap:
-                scale_factor = line_width_cap / total_line_width
-                word_widths = _shrink_widths(word_widths, line_width_cap)
-                total_line_width = sum(word_widths)
-
-                # If still too wide after conservative scaling, try reducing font sizes instead
-                if total_line_width > line_width_cap:
-                    font_reduction_factor = line_width_cap / total_line_width
-                    print(f"   📏 Linha ainda muito larga, reduzindo fontes por fator {font_reduction_factor:.2f}")
-                else:
-                    print(f"   📏 Linha muito larga, reduzida por fator {scale_factor:.2f} (conservativo)")
-            line_layouts.append((line_items, word_widths, total_line_width))
-
         # Create time conditions for FFmpeg enable parameter
         end_time = begin_time + duration
         time_condition = f"between(t,{begin_time:.3f},{end_time:.3f})"
 
-        # Legenda quebrada: tarja própria, da altura das suas linhas (fora da
-        # tarja comum, que é dimensionada para uma linha).
-        if len(lines) > 1:
-            box_height = (portuguese_y + base_portuguese_font_size + portuguese_extra_height
-                          - pinyin_y + (len(lines) - 1) * line_step + 10)
-            box_width = max(t for _, _, t in line_layouts) + 40
-            background_filters.append(create_subtitle_background_filter(
-                box_height, box_width, video_width, video_height, bottom_margin,
-                time_condition))
-
         # Frase traduzida no topo (opcional). A tarja vai junto das faixas de
         # fundo: o filtro final descarta de filter_parts o que não é drawtext.
+        top_box_bottom = 0
         if top_translation:
-            top_box, top_texts = _top_translation_filters(
+            top_box, top_texts, top_box_bottom = _top_translation_filters(
                 portuguese_text, latin_font_path, base_chinese_font_size,
                 video_width, time_condition)
             if top_box:
                 background_filters.append(top_box)
                 filter_parts.extend(top_texts)
 
+        # Cada linha: (itens, larguras, largura total, y do pinyin, y do hanzi,
+        # y do glossário). Fontes e entrelinha do glossário valem para todas.
+        zh_size, py_size, pt_size = (base_chinese_font_size, base_pinyin_font_size,
+                                     base_portuguese_font_size)
+        portuguese_line_height = int(base_portuguese_font_size * 1.2)  # Adaptive line height (120% of font size)
+        line_layouts = []
+
+        if begin_time in split_lines:
+            # "Permitir múltiplas linhas" quebrou esta legenda no primeiro passe
+            # (numa só os caracteres se sobreporiam). As linhas empilham de
+            # baixo para cima, cada uma da altura do seu glossário; se a pilha
+            # ainda passaria do topo (ou da tradução no topo), a fonte desta
+            # legenda encolhe até caber.
+            ceiling = top_box_bottom + max(10, int(video_height * 0.02))
+            room = video_height - bottom_margin - ceiling
+            layout_args = ((base_chinese_font_size, base_pinyin_font_size,
+                            base_portuguese_font_size), vertical_spacing,
+                           video_width, max_subtitle_width_pixels, latin_font_path)
+            scale = 1.0
+            layout = _stacked_layout(display_items, scale, *layout_args)
+            while layout["height"] > room and scale > 0.4:
+                scale = round(scale - 0.05, 2)
+                layout = _stacked_layout(display_items, scale, *layout_args)
+            if scale < 1.0:
+                print(f"   📏 Legenda de {len(layout['lines'])} linhas em {begin_time:.1f}s: fonte a {scale:.0%} para caber na tela")
+
+            zh_size, py_size, pt_size = layout["sizes"]
+            spacing = layout["spacing"]
+            portuguese_line_height = layout["pt_line_height"]
+            box_height = layout["height"]
+            box_width = max(t for _, _, t, _ in layout["lines"]) + 40
+            background_filters.append(create_subtitle_background_filter(
+                box_height, box_width, video_width, video_height, bottom_margin,
+                time_condition))
+
+            y = video_height - bottom_margin - box_height + spacing
+            for line_items, word_widths, total_line_width, line_height in layout["lines"]:
+                line_layouts.append((line_items, word_widths, total_line_width, y,
+                                     y + py_size + spacing,
+                                     y + py_size + spacing + zh_size + spacing))
+                y += line_height + spacing
+        else:
+            # Linha única: encolhe até a largura da tarja comum (como sempre).
+            # Create word-by-word aligned subtitle with pinyin centered over each Chinese word
+            # Calculate total line width first to center the entire subtitle block
+            word_widths = _word_widths(display_items, chinese_char_width, pinyin_char_width,
+                                       min_word_spacing)
+            total_line_width = sum(word_widths)
+
+            # If the line is too wide, scale down word widths proportionally to fit
+            if total_line_width > max_subtitle_width:
+                scale_factor = max_subtitle_width / total_line_width
+                word_widths = _shrink_widths(word_widths, max_subtitle_width)
+                total_line_width = sum(word_widths)
+
+                # If still too wide after conservative scaling, try reducing font sizes instead
+                if total_line_width > max_subtitle_width:
+                    font_reduction_factor = max_subtitle_width / total_line_width
+                    print(f"   📏 Linha ainda muito larga, reduzindo fontes por fator {font_reduction_factor:.2f}")
+                else:
+                    print(f"   📏 Linha muito larga, reduzida por fator {scale_factor:.2f} (conservativo)")
+            line_layouts.append((display_items, word_widths, total_line_width,
+                                 pinyin_y, chinese_y, portuguese_y))
+
         # Remove borders since we have background
         chinese_border_width = 0
         pinyin_border_width = 0
         portuguese_border_width = 0
 
-        for line_idx_from_top, (line_items, word_widths, total_line_width) in enumerate(line_layouts):
-            dy = (len(line_layouts) - 1 - line_idx_from_top) * line_step
-            line_pinyin_y = pinyin_y - dy
-            line_chinese_y = chinese_y - dy
-            line_portuguese_y = portuguese_y - dy
-
+        for line_items, word_widths, total_line_width, line_pinyin_y, line_chinese_y, line_portuguese_y in line_layouts:
             # Calculate starting x position to center the entire line
             start_x = (video_width - total_line_width) // 2
 
@@ -1389,20 +1439,19 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
                 word_center_x = current_x + word_width // 2
 
                 # Chinese text (centered within word width) - using adaptive font size
-                chinese_filter = f'drawtext=text={chinese_escaped}:x={word_center_x}-text_w/2:y={line_chinese_y}:fontfile=\'{chinese_font_path}\':fontsize={base_chinese_font_size}:fontcolor=white:borderw={chinese_border_width}:bordercolor=black:enable=\'{time_condition}\''
+                chinese_filter = f'drawtext=text={chinese_escaped}:x={word_center_x}-text_w/2:y={line_chinese_y}:fontfile=\'{chinese_font_path}\':fontsize={zh_size}:fontcolor=white:borderw={chinese_border_width}:bordercolor=black:enable=\'{time_condition}\''
                 if chinese_filter:  # Validate filter is not empty
                     filter_parts.append(chinese_filter)
 
                 # Pinyin text (centered over the Chinese word) - using adaptive font size
                 if pinyin_escaped and pinyin_escaped.strip():
-                    pinyin_filter = f'drawtext=text={pinyin_escaped}:x={word_center_x}-text_w/2:y={line_pinyin_y}:fontfile=\'{chinese_font_path}\':fontsize={base_pinyin_font_size}:fontcolor=#9370DB:borderw={pinyin_border_width}:bordercolor=black:enable=\'{time_condition}\''
+                    pinyin_filter = f'drawtext=text={pinyin_escaped}:x={word_center_x}-text_w/2:y={line_pinyin_y}:fontfile=\'{chinese_font_path}\':fontsize={py_size}:fontcolor=#9370DB:borderw={pinyin_border_width}:bordercolor=black:enable=\'{time_condition}\''
                     if pinyin_filter:  # Validate filter is not empty
                         filter_parts.append(pinyin_filter)
 
                 # Portuguese text (centered below each Chinese word, with line breaks if needed) - using adaptive font size
                 if word_portuguese and word_portuguese.strip():
-                    portuguese_lines = wrap_portuguese_to_chinese_width(word_portuguese, latin_font_path, word_width, base_portuguese_font_size)
-                    portuguese_line_height = int(base_portuguese_font_size * 1.2)  # Adaptive line height (120% of font size)
+                    portuguese_lines = wrap_portuguese_to_chinese_width(word_portuguese, latin_font_path, word_width, pt_size)
 
                     for line_idx, portuguese_line in enumerate(portuguese_lines):
                         if portuguese_line and portuguese_line.strip():  # Only add non-empty lines
@@ -1414,7 +1463,7 @@ def create_ffmpeg_drawtext_filters(subtitles: Dict[float, Tuple[str, str, str, s
                                     pass
                             if portuguese_escaped and portuguese_escaped.strip():  # Validate escaped text
                                 portuguese_line_y = line_portuguese_y + (line_idx * portuguese_line_height)
-                                portuguese_filter = f'drawtext=text={portuguese_escaped}:x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile=\'{latin_font_path}\':fontsize={base_portuguese_font_size}:fontcolor=yellow:borderw={portuguese_border_width}:bordercolor=black:enable=\'{time_condition}\''
+                                portuguese_filter = f'drawtext=text={portuguese_escaped}:x={word_center_x}-text_w/2:y={portuguese_line_y}:fontfile=\'{latin_font_path}\':fontsize={pt_size}:fontcolor=yellow:borderw={portuguese_border_width}:bordercolor=black:enable=\'{time_condition}\''
                                 if portuguese_filter:  # Validate filter is not empty
                                     filter_parts.append(portuguese_filter)
 
