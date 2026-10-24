@@ -117,9 +117,20 @@
   const HZ_RATIO = 0.06;
   const HZ_MIN = 24;
   const HZ_MAX = 120;
-  // Tradução da frase no topo. O queimado só a desenha com
-  // BURN_TOP_TRANSLATION=1; aqui aparece sempre que o servidor manda `pt`.
-  const SHOW_TOP_TRANSLATION = true;
+  // Coluna mínima = 5% da largura do vídeo (como no queimado).
+  const COL_MIN_RATIO = 0.05;
+  // Se a legenda não cabe, a fonte encolhe em passos de 5% até 40%
+  // (process_chunks.py: mesma regra do queimado em várias linhas).
+  const FIT_STEP = 0.05;
+  const FIT_MIN = 0.4;
+
+  const DEFAULT_OPTIONS = {
+    enabled: true,
+    topTranslation: true,
+    multiline: true,
+    opaqueBox: true,
+    fontScale: 1,
+  };
 
   function el(tag, cls, text) {
     const e = document.createElement(tag);
@@ -137,7 +148,17 @@
       this.root.append(this.top, this.box);
       this.resizeObs = new ResizeObserver(() => this._resize());
       this.shown = null;
+      this.baseHz = 40;
+      this.setOptions(DEFAULT_OPTIONS);
       this.hide();
+    }
+
+    setOptions(opts) {
+      this.opts = { ...DEFAULT_OPTIONS, ...opts };
+      this.root.classList.toggle("subrim-single", !this.opts.multiline);
+      this.root.classList.toggle("subrim-translucent", !this.opts.opaqueBox);
+      this.shown = null; // força redesenhar com as opções novas
+      this._resize();
     }
 
     attach(player) {
@@ -162,8 +183,48 @@
     _resize() {
       if (!this.player) return;
       const h = this.player.clientHeight || 360;
-      const hz = Math.max(HZ_MIN, Math.min(HZ_MAX, Math.round(h * HZ_RATIO)));
-      this.root.style.setProperty("--subrim-hz", hz + "px");
+      const w = this.player.clientWidth || 640;
+      this.baseHz = Math.max(HZ_MIN, Math.min(HZ_MAX, Math.round(h * HZ_RATIO))) * this.opts.fontScale;
+      this.root.style.setProperty("--subrim-colmin", Math.round(w * COL_MIN_RATIO) + "px");
+      this._fit();
+    }
+
+    /** A legenda passa da largura (uma linha) ou sobe demais (várias linhas)? */
+    _overflows() {
+      const box = this.box;
+      if (!this.opts.multiline) return box.scrollWidth > box.clientWidth + 1;
+      const p = this.player.getBoundingClientRect();
+      let limit = p.top + p.height * 0.02;
+      if (this.top.style.display !== "none") limit = this.top.getBoundingClientRect().bottom + p.height * 0.02;
+      return box.getBoundingClientRect().top < limit;
+    }
+
+    _fit() {
+      const set = (k) => this.root.style.setProperty("--subrim-hz", (this.baseHz * k).toFixed(1) + "px");
+      const cols = [...this.box.querySelectorAll(".subrim-word")];
+      cols.forEach((c) => c.classList.remove("subrim-bare"));
+      set(1);
+      if (!this.player || this.box.style.display === "none") return;
+      for (let k = 1 - FIT_STEP; k >= FIT_MIN - 1e-9 && this._overflows(); k -= FIT_STEP) set(k);
+      this._collapseBareRows(cols);
+    }
+
+    /**
+     * Linha só com dominadas não reserva as faixas vazias de pinyin/tradução
+     * (no queimado cada linha tem a altura da própria ajuda). Antes do colapso
+     * todas as colunas têm a mesma altura, então offsetTop identifica a linha.
+     */
+    _collapseBareRows(cols) {
+      const rows = new Map();
+      for (const c of cols) {
+        if (!rows.has(c.offsetTop)) rows.set(c.offsetTop, []);
+        rows.get(c.offsetTop).push(c);
+      }
+      for (const row of rows.values()) {
+        if (row.every((c) => !c.firstChild.textContent && !c.lastChild.textContent)) {
+          row.forEach((c) => c.classList.add("subrim-bare"));
+        }
+      }
     }
 
     hide() {
@@ -178,6 +239,7 @@
       this.top.style.display = "none";
       this.box.replaceChildren(el("span", "subrim-status", text));
       this.box.style.display = "";
+      this._fit();
     }
 
     /** items = [[hanzi, pinyin, pt], ...]; pt = tradução da frase (opcional). */
@@ -191,16 +253,25 @@
       });
       this.box.replaceChildren(...cols);
       this.box.style.display = cols.length ? "" : "none";
-      if (SHOW_TOP_TRANSLATION && pt) {
+      if (this.opts.topTranslation && pt && pt !== "N/A") {
         this.top.textContent = pt;
         this.top.style.display = "";
       } else {
         this.top.style.display = "none";
       }
+      this._fit();
     }
   }
 
-  const api = { parsePinyinTranslations, displayPairs, displayItems, json3ToCues, findActiveCue, Overlay };
+  const api = {
+    parsePinyinTranslations,
+    displayPairs,
+    displayItems,
+    json3ToCues,
+    findActiveCue,
+    Overlay,
+    DEFAULT_OPTIONS,
+  };
   if (typeof module !== "undefined" && module.exports) module.exports = api;
   else root.SubrimRender = api;
 })(typeof globalThis !== "undefined" ? globalThis : this);

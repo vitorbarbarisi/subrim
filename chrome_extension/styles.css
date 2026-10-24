@@ -7,6 +7,8 @@
 
 .subrim-overlay {
   --subrim-hz: 40px;
+  --subrim-colmin: 32px;
+  --subrim-bg: #000; /* caixa opaca, como o default do queimado */
   position: absolute;
   inset: 0;
   pointer-events: none;
@@ -19,11 +21,14 @@
 .subrim-top {
   position: absolute;
   top: 4%;
-  left: 50%;
-  transform: translateX(-50%);
+  /* left/right 0 + margin auto: centraliza sem limitar a largura a 50% do player */
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: fit-content;
   max-width: 85%;
   padding: 0.2em 0.6em;
-  background: rgba(0, 0, 0, 0.75);
+  background: var(--subrim-bg);
   color: #cc9900;
   font-size: calc(var(--subrim-hz) * 0.6);
   line-height: 1.25;
@@ -33,18 +38,26 @@
 .subrim-box {
   position: absolute;
   bottom: 8%;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
+  right: 0;
+  margin: 0 auto;
+  width: fit-content;
   max-width: 85%;
+  box-sizing: border-box;
   display: flex;
-  flex-wrap: nowrap;
+  /* várias linhas: quebra entre palavras e cresce para cima (ancorada no bottom) */
+  flex-wrap: wrap;
   justify-content: center;
   align-items: flex-end;
-  gap: calc(var(--subrim-hz) * 0.25);
+  gap: calc(var(--subrim-hz) * 0.1) calc(var(--subrim-hz) * 0.25);
   padding: calc(var(--subrim-hz) * 0.15) calc(var(--subrim-hz) * 0.35);
-  background: rgba(0, 0, 0, 0.8);
-  white-space: nowrap;
+  background: var(--subrim-bg);
   transition: bottom 0.15s ease;
+}
+
+/* Uma linha só: nada quebra; se não couber, render.js encolhe a fonte. */
+.subrim-single .subrim-box {
+  flex-wrap: nowrap;
 }
 
 /* Controles visíveis (pausado / mouse em cima): sobe acima da barra. */
@@ -59,8 +72,13 @@
   display: flex;
   flex-direction: column;
   align-items: center;
-  flex: 0 1 auto;
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: var(--subrim-colmin);
+  white-space: nowrap;
+}
+
+.subrim-translucent {
+  --subrim-bg: rgba(0, 0, 0, 0.5);
 }
 
 .subrim-py {
@@ -79,15 +97,24 @@
   color: #ffff00;
   font-size: calc(var(--subrim-hz) * 0.45);
   line-height: 1.2;
-  max-width: 100%;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  /* A tradução não alarga a coluna (largura = hanzi/pinyin): quebra dentro
+     dela, sem partir palavras — como o wrap do queimado. */
+  width: 0;
+  min-width: 100%;
+  white-space: normal;
+  text-align: center;
 }
 
 /* Dominadas / caracteres avulsos: linhas vazias mantêm o hanzi alinhado. */
 .subrim-py:empty::before,
 .subrim-tr:empty::before {
   content: "\00a0";
+}
+
+/* Linha só com dominadas (render.js marca as colunas): sem faixas vazias. */
+.subrim-word.subrim-bare .subrim-py:empty::before,
+.subrim-word.subrim-bare .subrim-tr:empty::before {
+  content: none;
 }
 
 .subrim-status {

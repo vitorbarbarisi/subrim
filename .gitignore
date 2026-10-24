@@ -55,3 +55,6 @@ deepseek_debug.log
 
 # Ajustes de leitura do preview das Coleções (por máquina)
 .subrim_viewer.json
+
+# Ícones da extensão Chrome (gerados do subrim_icon.png com sips, mas versionados)
+!chrome_extension/icons/*.png

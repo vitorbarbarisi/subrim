@@ -1,0 +1,79 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <title>Subrim</title>
+  <style>
+    :root {
+      color-scheme: light dark;
+      --bg: #fff;
+      --fg: #1f1e1d;
+      --muted: #6b6a66;
+      --border: rgba(0, 0, 0, 0.12);
+      --ok: #3b6d11;
+      --bad: #a32d2d;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #262624;
+        --fg: #f0eee6;
+        --muted: #a8a69e;
+        --border: rgba(255, 255, 255, 0.14);
+        --ok: #97c459;
+        --bad: #f09595;
+      }
+    }
+    body {
+      margin: 0;
+      width: 280px;
+      padding: 14px 16px;
+      background: var(--bg);
+      color: var(--fg);
+      font: 14px/1.4 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    header {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    header img { width: 20px; height: 20px; border-radius: 4px; }
+    header strong { font-weight: 500; }
+    #server { margin-left: auto; font-size: 12px; color: var(--muted); }
+    #server.ok { color: var(--ok); }
+    #server.bad { color: var(--bad); }
+    label {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 0;
+      cursor: pointer;
+    }
+    .range { padding: 6px 0; }
+    .range div { display: flex; justify-content: space-between; }
+    .range span { color: var(--muted); }
+    input[type="range"] { width: 100%; margin: 6px 0 0; }
+    hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
+    #hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+  </style>
+</head>
+<body>
+  <header>
+    <img src="icons/32.png" alt="">
+    <strong>Subrim</strong>
+    <span id="server">verificando…</span>
+  </header>
+  <label>Legendas subrim <input type="checkbox" id="enabled"></label>
+  <hr>
+  <label>Tradução da frase no topo <input type="checkbox" id="topTranslation"></label>
+  <label>Várias linhas <input type="checkbox" id="multiline"></label>
+  <label>Caixa opaca <input type="checkbox" id="opaqueBox"></label>
+  <div class="range">
+    <div>Tamanho da fonte <span id="fontScaleOut">100%</span></div>
+    <input type="range" id="fontScale" min="60" max="160" step="10">
+  </div>
+  <p id="hint" hidden>Suba o servidor: <code>python subrim_server.py</code></p>
+  <script src="render.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>

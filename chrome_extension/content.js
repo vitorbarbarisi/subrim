@@ -3,7 +3,7 @@
 // do overlay com o vídeo.
 (() => {
   "use strict";
-  const { parsePinyinTranslations, displayPairs, displayItems, json3ToCues, findActiveCue, Overlay } =
+  const { parsePinyinTranslations, displayPairs, displayItems, json3ToCues, findActiveCue, Overlay, DEFAULT_OPTIONS } =
     globalThis.SubrimRender;
 
   const FALLBACK_DELAY_MS = 2500; // espera o player baixar a legenda sozinho
@@ -15,6 +15,18 @@
   let mastered = new Set();
 
   let state = null; // { videoId, rank, cues, status, display, timers[] }
+  let options = { ...DEFAULT_OPTIONS };
+
+  // Opções do popup (chrome.storage.sync), aplicadas na hora em todas as abas.
+  chrome.storage.sync.get(DEFAULT_OPTIONS, (o) => {
+    options = { ...DEFAULT_OPTIONS, ...o };
+    overlay.setOptions(options);
+  });
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== "sync") return;
+    for (const [k, { newValue }] of Object.entries(changes)) if (k in DEFAULT_OPTIONS) options[k] = newValue;
+    overlay.setOptions(options);
+  });
 
   function log(...args) {
     console.debug("[subrim]", ...args);
@@ -166,6 +178,7 @@
     const player = document.getElementById("movie_player");
     const video = player?.querySelector("video");
     if (!player || !video) return;
+    if (!options.enabled) return overlay.detach(); // devolve a legenda nativa
     overlay.attach(player);
     if (player.classList.contains("ad-showing")) return overlay.hide();
 
