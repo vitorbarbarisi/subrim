@@ -94,6 +94,30 @@
     return cues.filter((c) => c.end > c.start);
   }
 
+  /**
+   * Legenda automática (ASR) chega em fragmentos de 2–3 palavras, sem
+   * pontuação. Junta fragmentos vizinhos (pausa < maxGap s) até maxChars
+   * caracteres ou até uma pontuação final, para virar frase de legenda.
+   */
+  function mergeAsrCues(cues, maxGap = 0.8, maxChars = 18) {
+    const out = [];
+    for (const c of cues) {
+      const last = out[out.length - 1];
+      if (
+        last &&
+        c.start - last.end < maxGap &&
+        Array.from(last.zh + c.zh).length <= maxChars &&
+        !/[。！？!?]$/.test(last.zh)
+      ) {
+        last.zh += c.zh;
+        last.end = c.end;
+      } else {
+        out.push({ ...c });
+      }
+    }
+    return out;
+  }
+
   /** Busca binária: índice da cue ativa em t (segundos) ou -1. */
   function findActiveCue(cues, t) {
     let lo = 0;
@@ -130,6 +154,7 @@
     multiline: true,
     opaqueBox: true,
     fontScale: 1,
+    autoTranscribe: false, // vídeo sem legenda zh → Whisper sem perguntar
   };
 
   function el(tag, cls, text) {
@@ -234,6 +259,7 @@
     }
 
     status(text) {
+      if (!text) return this.hide();
       if (this.shown === "status:" + text) return;
       this.shown = "status:" + text;
       this.top.style.display = "none";
@@ -268,6 +294,7 @@
     displayPairs,
     displayItems,
     json3ToCues,
+    mergeAsrCues,
     findActiveCue,
     Overlay,
     DEFAULT_OPTIONS,

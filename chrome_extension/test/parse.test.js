@@ -98,3 +98,25 @@ test("busca binária da cue ativa", () => {
   assert.equal(findActiveCue(cues, 8), -1);
   assert.equal(findActiveCue([], 1), -1);
 });
+
+test("mergeAsrCues junta fragmentos próximos até o limite de caracteres", () => {
+  const { mergeAsrCues } = require("../render.js");
+  const cues = [
+    { start: 0, end: 1, zh: "我們今天" },
+    { start: 1.2, end: 2, zh: "要去" },
+    { start: 2.1, end: 3, zh: "飛機場" },
+    { start: 5, end: 6, zh: "你好" }, // pausa longa: frase nova
+  ];
+  assert.deepEqual(
+    mergeAsrCues(cues).map((c) => [c.zh, c.start, c.end]),
+    [
+      ["我們今天要去飛機場", 0, 3],
+      ["你好", 5, 6],
+    ],
+  );
+  // limite de caracteres e pontuação final também quebram
+  assert.equal(mergeAsrCues(cues, 0.8, 6).length, 3);
+  assert.equal(mergeAsrCues([{ start: 0, end: 1, zh: "好。" }, { start: 1, end: 2, zh: "走" }]).length, 2);
+  // não altera a entrada
+  assert.equal(cues[0].zh, "我們今天");
+});

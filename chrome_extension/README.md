@@ -10,7 +10,18 @@ tradução amarela por palavra, frase traduzida no topo) sobre o player do YouTu
 3. Abra um vídeo com legenda chinesa. Não precisa ligar o CC: a extensão captura
    a legenda que o próprio player baixa e, se ele estiver em outra língua, troca
    a faixa do player para a chinesa (o YouTube exige um token na URL da legenda,
-   que só o player tem).
+   que só o player tem). Sem legenda manual, usa a automática do YouTube,
+   juntando os fragmentos em frases.
+4. A tradução chega em streaming: as frases a partir do ponto atual do vídeo
+   aparecem primeiro (cada lote da DeepSeek fica no cache do servidor).
+
+### Vídeos sem legenda chinesa (Whisper)
+
+O popup mostra **Transcrever com Whisper** (ou marque *Transcrever
+automaticamente*). O servidor baixa o áudio com yt-dlp (usando o `cookies.txt`
+do projeto), transcreve com o Whisper (`SUBRIM_WHISPER_MODEL`, default
+`medium`) e guarda em `cache/yt/<id>_whisper.json` — abrir o vídeo de novo
+reaproveita a transcrição. O progresso aparece no lugar da legenda e no popup.
 
 ## Opções (ícone da extensão)
 
@@ -21,6 +32,7 @@ tradução amarela por palavra, frase traduzida no topo) sobre o player do YouTu
   Nos dois casos, se não couber, a fonte encolhe em passos de 5% até 40%.
 - **Caixa opaca** (`BURN_BOX_OPAQUE`): desligado, a caixa fica 50% transparente.
 - **Tamanho da fonte**: 60% a 160% do tamanho do queimado (hanzi = 6% da altura).
+- **Este vídeo**: estado da legenda/tradução e o botão do Whisper.
 
 O popup também mostra se o servidor local está no ar.
 
@@ -28,7 +40,8 @@ O popup também mostra se o servidor local está no ar.
 
 - `inject_main.js` — mundo MAIN: intercepta `fetch`/XHR de `/api/timedtext` (zh*) e faz o fallback.
 - `content.js` — navegação SPA, conversão json3 → cues, sincronia com o vídeo.
-- `background.js` — chamadas ao `localhost:7997` (content script não pode, por CORS/PNA).
+- `background.js` — chamadas ao `localhost:7997` (content script não pode, por CORS/PNA),
+  incluindo o NDJSON de `/pairs/stream` repassado por uma porta (`chrome.runtime.connect`).
 - `render.js` — parser dos pares, casamento por termo mais longo e overlay.
 - `popup.html` / `popup.js` — opções (`chrome.storage.sync`) e status do servidor.
 - `icons/` — gerados do `subrim_icon.png` com `sips -z N N`.
