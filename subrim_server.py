@@ -56,10 +56,10 @@ def _cache_path(video_id: str) -> Path:
     return CACHE_DIR / f"{video_id}_base.txt"
 
 
-def _load_cache(video_id: str) -> dict[str, tuple[list[str], str]]:
-    """{zht: (pares, pt)} das linhas já processadas (com pares) do cache."""
+def _load_cache(video_id: str) -> dict[str, dict]:
+    """{zht: cue} das linhas já processadas (com pares) do cache."""
     path = _cache_path(video_id)
-    out: dict[str, tuple[list[str], str]] = {}
+    out: dict[str, dict] = {}
     if not path.exists():
         return out
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -68,18 +68,26 @@ def _load_cache(video_id: str) -> dict[str, tuple[list[str], str]]:
             continue
         try:
             pairs = json.loads(parts[4])
+            start = float(parts[1].rstrip("s"))
+            end = float(parts[2].rstrip("s"))
         except ValueError:
             continue
         pt = parts[5] if len(parts) >= 6 else "N/A"
-        out[parts[3]] = (pairs, pt)
+        out[parts[3]] = {"start": start, "end": end, "zh": parts[3], "pairs": pairs, "pt": pt}
     return out
 
 
-def _write_cache(video_id: str, cues: list[dict]) -> None:
+def _write_cache(video_id: str, cues: list[dict], cache: dict[str, dict]) -> None:
+    """Grava as cues do pedido + as do cache que o pedido não trouxe.
+
+    Um pedido com só parte das frases não apaga o resto do vídeo do cache.
+    """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     san = processor._sanitize_tsv_field
+    sent = {c["zh"] for c in cues}
+    rows = sorted(cues + [c for z, c in cache.items() if z not in sent], key=lambda c: c["start"])
     lines = []
-    for i, c in enumerate(cues, start=1):
+    for i, c in enumerate(rows, start=1):
         pairs = json.dumps(c["pairs"], ensure_ascii=False) if c["pairs"] else "N/A"
         lines.append(
             f"{i}\t{c['start']:.3f}s\t{c['end']:.3f}s\t{san(c['zh'])}\t{san(pairs)}\t{san(c['pt'] or 'N/A')}"
@@ -206,15 +214,17 @@ def build_cues(video_id: str, raw_cues: list[dict]) -> list[dict]:
                     pairs.update(d)
                 for d in ft.result():
                     pts.update(d)
-            for s in need:
-                if s in pairs:
-                    cache[s] = (pairs[s], pts.get(s, "N/A"))
+            fresh = {s: (pairs[s], pts.get(s, "N/A")) for s in need if s in pairs}
+        else:
+            fresh = {}
 
         for c in cues:
-            if c["zh"] in cache:
-                c["pairs"], c["pt"] = cache[c["zh"]]
-        if need:
-            _write_cache(video_id, cues)
+            if c["zh"] in fresh:
+                c["pairs"], c["pt"] = fresh[c["zh"]]
+            elif c["zh"] in cache:
+                c["pairs"], c["pt"] = cache[c["zh"]]["pairs"], cache[c["zh"]]["pt"]
+        if fresh:
+            _write_cache(video_id, cues, cache)
     return cues
 
 
