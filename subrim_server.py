@@ -9,6 +9,11 @@ fica no .env deste projeto, nunca no navegador.
 Endpoints:
   GET  /health    → {"ok": true}
   GET  /mastered  → {"words": [...]}  (palavras dominadas via word-api)
+  POST /mastered  {word, pinyin, translation, level=3}
+                  → muda o confidence_level na word-api (PATCH; cria a
+                    palavra se ela ainda não existe) → {word, level, previous}
+                    ``previous`` é o nível anterior (None = criada agora),
+                    para a extensão poder desfazer.
   POST /pairs     {video_id, cues:[{start,end,zh}]}
                   → {cues:[{start,end,zh,pairs:[...],pt}]}
   POST /pairs/stream  {video_id, cues, from}
@@ -48,7 +53,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib import request as urlrequest
+from urllib import error as urlerror, parse as urlparse, request as urlrequest
 
 import processor
 import word_vocab
@@ -370,6 +375,45 @@ def start_transcribe(video_id: str) -> dict:
     return job
 
 
+# ── word-api (maestria) ───────────────────────────────────────────────────────
+
+def _word_api(method: str, path: str, payload: dict | None = None):
+    """Chamada JSON à word-api; devolve (status, corpo decodificado ou None)."""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    req = urlrequest.Request(word_vocab.base_url() + path, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urlrequest.urlopen(req, timeout=word_vocab._timeout()) as resp:
+            body = resp.read()
+            return resp.status, (json.loads(body) if body else None)
+    except urlerror.HTTPError as e:
+        return e.code, None
+
+
+def set_word_level(word: str, level: int, pinyin: str = "", translation: str = "") -> dict:
+    """Grava o confidence_level de uma palavra; cria a palavra se não existir.
+
+    O nível anterior vem do /search (o GET /{word} incrementaria o contador
+    ``calls`` da palavra, e isto não é uma consulta de verdade).
+    """
+    if not word_vocab.is_real_word(word) or level not in (1, 2, 3):
+        raise ValueError("palavra ou nível inválido")
+    status, found = _word_api("GET", "/search?q=" + urlparse.quote(word))
+    previous = next((w.get("confidence_level") for w in found or [] if w.get("word") == word), None)
+
+    status, _ = _word_api("PATCH", "/" + urlparse.quote(word), {"confidence_level": level})
+    if status == 404:
+        if not pinyin or not translation:
+            raise ValueError(f"{word} não está na word-api e veio sem pinyin/tradução")
+        status, _ = _word_api("POST", "/", {"word": word, "pinyin": pinyin,
+                                            "translation": translation, "confidence_level": level})
+    if status not in (200, 201):
+        hint = " (o hanzi-api já tem o PATCH /word-api/{word}?)" if status == 405 else ""
+        raise RuntimeError(f"word-api respondeu HTTP {status}{hint}")
+    word_vocab.mastered_words(force=True)
+    return {"word": word, "level": level, "previous": previous}
+
+
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 
 class Handler(BaseHTTPRequestHandler):
@@ -428,11 +472,23 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path not in ("/pairs", "/pairs/stream", "/transcribe"):
+        if self.path not in ("/pairs", "/pairs/stream", "/transcribe", "/mastered"):
             self._json(404, {"error": "not found"})
             return
         body = self._read_body()
         if body is None:
+            return
+        if self.path == "/mastered":
+            try:
+                result = set_word_level(str(body.get("word") or ""), int(body.get("level", 3)),
+                                        str(body.get("pinyin") or ""), str(body.get("translation") or ""))
+            except (TypeError, ValueError) as e:
+                self._json(400, {"error": str(e)})
+                return
+            except Exception as e:  # noqa: BLE001 - word-api fora do ar etc.
+                self._json(502, {"error": str(e)})
+                return
+            self._json(200, result)
             return
         video_id = str(body.get("video_id") or "")
         if not VIDEO_ID_RE.match(video_id):
