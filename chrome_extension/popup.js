@@ -4,7 +4,7 @@
   "use strict";
   const { DEFAULT_OPTIONS } = globalThis.SubrimRender;
   const $ = (id) => document.getElementById(id);
-  const toggles = ["enabled", "topTranslation", "multiline", "opaqueBox", "autoTranscribe"];
+  const toggles = ["enabled", "topTranslation", "multiline", "opaqueBox", "clickToMaster", "autoTranscribe"];
 
   chrome.storage.sync.get(DEFAULT_OPTIONS, (o) => {
     for (const k of toggles) $(k).checked = !!o[k];

@@ -155,6 +155,7 @@
     opaqueBox: true,
     fontScale: 1,
     autoTranscribe: false, // vídeo sem legenda zh → Whisper sem perguntar
+    clickToMaster: true, // clicar numa palavra com ajuda marca como dominada
   };
 
   function el(tag, cls, text) {
@@ -170,7 +171,22 @@
       this.root = el("div", "subrim-overlay");
       this.top = el("div", "subrim-top");
       this.box = el("div", "subrim-box");
-      this.root.append(this.top, this.box);
+      this.toastEl = el("div", "subrim-toast");
+      this.toastEl.style.display = "none";
+      this.root.append(this.top, this.box, this.toastEl);
+      this.onWordClick = null; // (hanzi, pinyin, tradução) => void
+      // Clique numa palavra com ajuda. Não deixa o clique chegar ao player
+      // (que pausaria/daria play no vídeo).
+      for (const type of ["click", "mousedown", "mouseup", "dblclick"]) {
+        this.box.addEventListener(type, (e) => {
+          const col = e.target.closest(".subrim-learn");
+          if (!col || !this.opts.clickToMaster) return;
+          e.stopPropagation();
+          e.preventDefault();
+          if (type === "click" && this.onWordClick) this.onWordClick(col.dataset.word, col.dataset.py, col.dataset.tr);
+        });
+      }
+      this.toastEl.addEventListener("click", (e) => e.stopPropagation());
       this.resizeObs = new ResizeObserver(() => this._resize());
       this.shown = null;
       this.baseHz = 40;
@@ -182,6 +198,7 @@
       this.opts = { ...DEFAULT_OPTIONS, ...opts };
       this.root.classList.toggle("subrim-single", !this.opts.multiline);
       this.root.classList.toggle("subrim-translucent", !this.opts.opaqueBox);
+      this.root.classList.toggle("subrim-clickable", !!this.opts.clickToMaster);
       this.shown = null; // força redesenhar com as opções novas
       this._resize();
     }
@@ -268,6 +285,30 @@
       this._fit();
     }
 
+    /** Aviso no canto do player, com um botão opcional (ex.: Desfazer). */
+    toast(text, action, onAction, ms = 6000) {
+      clearTimeout(this.toastTimer);
+      const parts = [el("span", null, text)];
+      if (action) {
+        const btn = el("button", "subrim-toast-action", action);
+        btn.addEventListener("click", () => {
+          this.toastEl.style.display = "none";
+          onAction();
+        });
+        parts.push(btn);
+      }
+      this.toastEl.replaceChildren(...parts);
+      // Logo abaixo da tradução do topo, para não cobri-la.
+      let top = "4%";
+      if (this.player && this.top.style.display !== "none") {
+        const gap = this.player.clientHeight * 0.015;
+        top = Math.round(this.top.getBoundingClientRect().bottom - this.player.getBoundingClientRect().top + gap) + "px";
+      }
+      this.toastEl.style.top = top;
+      this.toastEl.style.display = "";
+      this.toastTimer = setTimeout(() => (this.toastEl.style.display = "none"), ms);
+    }
+
     /** items = [[hanzi, pinyin, pt], ...]; pt = tradução da frase (opcional). */
     show(key, items, pt) {
       if (this.shown === key) return;
@@ -275,6 +316,10 @@
       const cols = items.map(([z, py, tr]) => {
         const col = el("div", "subrim-word");
         col.append(el("span", "subrim-py", py), el("span", "subrim-hz", z), el("span", "subrim-tr", tr));
+        if (py && tr) {
+          col.classList.add("subrim-learn");
+          Object.assign(col.dataset, { word: z, py, tr });
+        }
         return col;
       });
       this.box.replaceChildren(...cols);

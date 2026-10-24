@@ -8,7 +8,10 @@ const SERVER = "http://localhost:7997";
 
 async function call(path, init) {
   const resp = await fetch(SERVER + path, init);
-  if (!resp.ok) throw new Error(`${path}: HTTP ${resp.status}`);
+  if (!resp.ok) {
+    const detail = await resp.json().then((b) => b?.error, () => null);
+    throw new Error(detail || `${path}: HTTP ${resp.status}`);
+  }
   return resp.json();
 }
 
@@ -29,6 +32,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_id: msg.videoId }),
+    });
+  } else if (msg?.type === "set-level") {
+    job = call("/mastered", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ word: msg.word, pinyin: msg.pinyin, translation: msg.translation, level: msg.level }),
     });
   } else if (msg?.type === "job") {
     job = call("/jobs/" + encodeURIComponent(msg.videoId));

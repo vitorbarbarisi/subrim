@@ -32,6 +32,11 @@ reaproveita a transcrição. O progresso aparece no lugar da legenda e no popup.
   Nos dois casos, se não couber, a fonte encolhe em passos de 5% até 40%.
 - **Caixa opaca** (`BURN_BOX_OPAQUE`): desligado, a caixa fica 50% transparente.
 - **Tamanho da fonte**: 60% a 160% do tamanho do queimado (hanzi = 6% da altura).
+- **Clicar na palavra marca como dominada**: clicar numa palavra que ainda tem
+  pinyin/tradução grava `confidence_level = 3` na word-api (via
+  `PATCH /word-api/{word}` do hanzi-api; se a palavra não existe lá, ela é
+  criada) e a ajuda some na hora. O aviso no canto tem **Desfazer**, que volta
+  ao nível anterior. Vale para todo o subrim (queima, Coleções), não só aqui.
 - **Este vídeo**: estado da legenda/tradução e o botão do Whisper.
 
 O popup também mostra se o servidor local está no ar.

@@ -223,6 +223,37 @@
       .sort((a, b) => a.start - b.start);
   }
 
+  // ------------------------------------------------------------ dominadas
+
+  // Clique numa palavra: some a ajuda na hora (otimista) e grava na word-api.
+  // O aviso oferece Desfazer, que volta ao nível anterior.
+  overlay.onWordClick = async (word, pinyin, translation) => {
+    if (mastered.has(word)) return;
+    setMasteredLocal(word, true);
+    const r = await send({ type: "set-level", word, pinyin, translation, level: 3 });
+    if (!r.ok) {
+      setMasteredLocal(word, false);
+      overlay.toast(`Não deu para marcar ${word}: ${r.error}`);
+      return;
+    }
+    const previous = r.data?.previous;
+    overlay.toast(`${word} marcada como dominada`, "Desfazer", async () => {
+      setMasteredLocal(word, false);
+      // Palavra criada agora não tem nível anterior: volta para 1 (aprendendo).
+      const u = await send({ type: "set-level", word, level: previous && previous !== 3 ? previous : 1 });
+      if (!u.ok) {
+        setMasteredLocal(word, true);
+        overlay.toast(`Não deu para desfazer ${word}: ${u.error}`);
+      }
+    });
+  };
+
+  function setMasteredLocal(word, on) {
+    if (on) mastered.add(word);
+    else mastered.delete(word);
+    if (state?.ready) buildDisplay(state);
+  }
+
   // ------------------------------------------------------------ Whisper
 
   // Sem legenda chinesa: usa uma transcrição já feita, transcreve sozinho
