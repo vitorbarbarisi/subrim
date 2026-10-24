@@ -11,9 +11,25 @@ Endpoints:
   GET  /mastered  → {"words": [...]}  (palavras dominadas via word-api)
   POST /pairs     {video_id, cues:[{start,end,zh}]}
                   → {cues:[{start,end,zh,pairs:[...],pt}]}
+  POST /pairs/stream  {video_id, cues, from}
+                  → NDJSON, um {"cues":[...]} por lote pronto: primeiro o que
+                    já está no cache, depois a partir de ``from`` (segundos —
+                    o ponto atual do vídeo) e por fim o trecho anterior.
+  POST /transcribe {video_id}  → inicia (ou devolve) o job do Whisper para
+                  vídeos sem legenda chinesa: yt-dlp baixa o áudio, whisper
+                  transcreve. → {state, progress, error}
+  GET  /jobs/<video_id>  → {state, progress, error, cues?}
+                  state: downloading | transcribing | done | error
 
 Cache: ``cache/yt/<video_id>_base.txt`` no mesmo TSV do base
 (índice, begin, end, zht, pares, pt) — reaproveitável no pipeline de queima.
+A transcrição do Whisper fica em ``cache/yt/<video_id>_whisper.json``.
+
+Áudio: yt-dlp com o ``cookies.txt`` do projeto (o do youtube_monitor) ou, sem
+ele, os cookies do navegador ``SUBRIM_COOKIES_BROWSER`` (default chrome).
+Whisper: ``SUBRIM_WHISPER_BIN`` (default: ``whisper`` no PATH ou
+``whisper_env_py313/bin/whisper``) e ``SUBRIM_WHISPER_MODEL`` (default medium,
+como o transcribe_video.py).
 
 Uso:
   python subrim_server.py [--port 7997]
@@ -25,6 +41,8 @@ import argparse
 import json
 import os
 import re
+import shutil
+import subprocess
 import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -34,6 +52,7 @@ from urllib import request as urlrequest
 
 import processor
 import word_vocab
+import youtube_downloader
 
 DEFAULT_PORT = 7997
 CACHE_DIR = Path(__file__).resolve().parent / "cache" / "yt"
@@ -186,8 +205,7 @@ def _fetch_pt(batch: list[str]) -> dict[str, str]:
     return got
 
 
-def build_cues(video_id: str, raw_cues: list[dict]) -> list[dict]:
-    """Normaliza as cues, completa pares/pt (cache → DeepSeek) e grava o cache."""
+def _normalize_cues(raw_cues: list[dict]) -> list[dict]:
     cues = []
     for c in raw_cues:
         zh = processor._sanitize_tsv_field(str(c.get("zh") or ""))
@@ -197,35 +215,159 @@ def build_cues(video_id: str, raw_cues: list[dict]) -> list[dict]:
         cues.append({"start": float(c.get("start", 0)), "end": float(c.get("end", 0)),
                      "zh": zh, "pairs": [], "pt": ""})
     cues.sort(key=lambda c: c["start"])
+    return cues
 
+
+def iter_cues(video_id: str, cues: list[dict], from_t: float = 0.0):
+    """Completa pares/pt das cues (cache → DeepSeek), lote a lote.
+
+    Gera listas de cues prontas: primeiro as do cache, depois cada lote da
+    DeepSeek — a partir de ``from_t`` e por fim o trecho anterior, para a
+    legenda do ponto atual do vídeo chegar logo. O cache é gravado a cada lote.
+    """
     with _video_lock(video_id):
         cache = _load_cache(video_id)
-        need = list(dict.fromkeys(c["zh"] for c in cues if c["zh"] not in cache))
-        if need:
-            batch_size = max(1, processor._env_int("DEEPSEEK_PAIRS_BATCH", 20))
-            batches = [need[i:i + batch_size] for i in range(0, len(need), batch_size)]
-            pairs: dict[str, list[str]] = {}
-            pts: dict[str, str] = {}
+        ready = []
+        for c in cues:
+            if c["zh"] in cache:
+                c["pairs"], c["pt"] = cache[c["zh"]]["pairs"], cache[c["zh"]]["pt"]
+                ready.append(c)
+        if ready:
+            yield ready
+
+        ahead = [c["zh"] for c in cues if c["zh"] not in cache and c["end"] >= from_t]
+        behind = [c["zh"] for c in cues if c["zh"] not in cache and c["end"] < from_t]
+        need = list(dict.fromkeys(ahead + behind))
+        batch_size = max(1, processor._env_int("DEEPSEEK_PAIRS_BATCH", 20))
+        for i in range(0, len(need), batch_size):
+            batch = need[i:i + batch_size]
             # Pares e PT são chamadas independentes: rodam lado a lado.
             with ThreadPoolExecutor(max_workers=2) as ex:
-                fp = ex.submit(lambda: [_fetch_pairs(b) for b in batches])
-                ft = ex.submit(lambda: [_fetch_pt(b) for b in batches])
-                for d in fp.result():
-                    pairs.update(d)
-                for d in ft.result():
-                    pts.update(d)
-            fresh = {s: (pairs[s], pts.get(s, "N/A")) for s in need if s in pairs}
-        else:
-            fresh = {}
+                fp = ex.submit(_fetch_pairs, batch)
+                ft = ex.submit(_fetch_pt, batch)
+                pairs, pts = fp.result(), ft.result()
+            done = []
+            for c in cues:
+                if c["zh"] in pairs and c["zh"] in batch:
+                    c["pairs"], c["pt"] = pairs[c["zh"]], pts.get(c["zh"], "N/A")
+                    done.append(c)
+            for c in done:
+                cache[c["zh"]] = dict(c)
+            if done:
+                _write_cache(video_id, cues, cache)
+                yield done
 
-        for c in cues:
-            if c["zh"] in fresh:
-                c["pairs"], c["pt"] = fresh[c["zh"]]
-            elif c["zh"] in cache:
-                c["pairs"], c["pt"] = cache[c["zh"]]["pairs"], cache[c["zh"]]["pt"]
-        if fresh:
-            _write_cache(video_id, cues, cache)
+
+def build_cues(video_id: str, raw_cues: list[dict]) -> list[dict]:
+    """Versão sem streaming: devolve todas as cues já completadas."""
+    cues = _normalize_cues(raw_cues)
+    for _ in iter_cues(video_id, cues):
+        pass
     return cues
+
+
+# ── Whisper (vídeos sem legenda chinesa) ──────────────────────────────────────
+
+_jobs: dict[str, dict] = {}
+_jobs_guard = threading.Lock()
+_SEG_RE = re.compile(r"-->\s*(?:(\d+):)?(\d+):(\d+(?:\.\d+)?)\]")
+
+
+def _whisper_path(video_id: str) -> Path:
+    return CACHE_DIR / f"{video_id}_whisper.json"
+
+
+def _whisper_bin() -> str:
+    env = os.getenv("SUBRIM_WHISPER_BIN")
+    if env:
+        return env
+    local = Path(__file__).resolve().parent / "whisper_env_py313" / "bin" / "whisper"
+    return shutil.which("whisper") or str(local)
+
+
+def _audio_duration(path: Path) -> float:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                        "-of", "default=nw=1:nk=1", str(path)], capture_output=True, text=True)
+    try:
+        return float(r.stdout.strip())
+    except ValueError:
+        return 0.0
+
+
+def _yt_dlp_flags(work: Path) -> list[str]:
+    """Flags do youtube_downloader, mas com o cookies.txt do projeto quando existe.
+
+    É o mesmo arquivo do youtube_monitor; sem ele, lê os cookies do navegador
+    em ``SUBRIM_COOKIES_BROWSER`` (default chrome).
+    """
+    flags = youtube_downloader._base_flags(os.getenv("SUBRIM_COOKIES_BROWSER", "chrome"), work, "audio")
+    cookies = Path(__file__).resolve().parent / "cookies.txt"
+    if cookies.exists():
+        i = flags.index("--cookies-from-browser")
+        flags[i:i + 2] = ["--cookies", str(cookies)]
+    return flags
+
+
+def _run_transcribe(video_id: str) -> None:
+    job = _jobs[video_id]
+    work = CACHE_DIR / f"{video_id}_audio"
+    try:
+        work.mkdir(parents=True, exist_ok=True)
+        yt = youtube_downloader._check_yt_dlp()
+        url = f"https://www.youtube.com/watch?v={video_id}"
+        cmd = [yt] + _yt_dlp_flags(work) + ["--format", "bestaudio/best", url]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        audio = next((f for f in work.glob("audio.*") if f.suffix not in (".part", ".json")), None)
+        if r.returncode != 0 or audio is None:
+            raise RuntimeError("yt-dlp falhou: " + (r.stderr.strip().splitlines() or ["?"])[-1])
+
+        job.update(state="transcribing", progress=0.0)
+        duration = _audio_duration(audio)
+        model = os.getenv("SUBRIM_WHISPER_MODEL", "medium")
+        proc = subprocess.Popen(
+            [_whisper_bin(), str(audio), "--model", model, "--language", "zh",
+             "--output_format", "json", "--output_dir", str(work), "--verbose", "True"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+        )
+        tail: list[str] = []
+        for line in proc.stdout:
+            tail = (tail + [line.strip()])[-5:]
+            m = _SEG_RE.search(line)
+            if m and duration > 0:
+                secs = int(m.group(1) or 0) * 3600 + int(m.group(2)) * 60 + float(m.group(3))
+                job["progress"] = round(min(1.0, secs / duration), 3)
+        if proc.wait() != 0:
+            raise RuntimeError("whisper falhou: " + " | ".join(tail))
+
+        data = json.loads((work / f"{audio.stem}.json").read_text(encoding="utf-8"))
+        cues = [{"start": round(seg["start"], 3), "end": round(seg["end"], 3), "zh": seg["text"].strip()}
+                for seg in data.get("segments", []) if seg.get("text", "").strip()]
+        _whisper_path(video_id).write_text(json.dumps(cues, ensure_ascii=False), encoding="utf-8")
+        job.update(state="done", progress=1.0, cues=cues)
+    except BaseException as e:  # noqa: BLE001 - inclui o SystemExit do _check_yt_dlp
+        job.update(state="error", error=str(e) or type(e).__name__)
+        print(f"⚠️  transcrição de {video_id} falhou: {job['error']}", file=sys.stderr)
+    finally:
+        shutil.rmtree(work, ignore_errors=True)
+
+
+def start_transcribe(video_id: str) -> dict:
+    with _jobs_guard:
+        job = _jobs.get(video_id)
+        if job and job["state"] != "error":
+            return job
+        path = _whisper_path(video_id)
+        if path.exists():
+            job = {"state": "done", "progress": 1.0, "error": None,
+                   "cues": json.loads(path.read_text(encoding="utf-8"))}
+            _jobs[video_id] = job
+            return job
+        job = {"state": "downloading", "progress": 0.0, "error": None}
+        _jobs[video_id] = job
+    CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    threading.Thread(target=_run_transcribe, args=(video_id,), daemon=True).start()
+    return job
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -257,8 +399,28 @@ class Handler(BaseHTTPRequestHandler):
         self._cors()
         self.end_headers()
 
+    def _read_body(self) -> dict | None:
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+        except ValueError:
+            body = None
+        if not isinstance(body, dict):
+            self._json(400, {"error": "JSON inválido"})
+            return None
+        return body
+
     def do_GET(self) -> None:  # noqa: N802
-        if self.path == "/health":
+        if self.path.startswith("/jobs/"):
+            video_id = self.path[len("/jobs/"):]
+            job = _jobs.get(video_id)
+            if job is None and VIDEO_ID_RE.match(video_id) and _whisper_path(video_id).exists():
+                job = start_transcribe(video_id)  # já transcrito antes: carrega do cache
+            if job is None:
+                self._json(404, {"error": "sem job"})
+            else:
+                self._json(200, {k: v for k, v in job.items() if k != "cues" or job["state"] == "done"})
+        elif self.path == "/health":
             self._json(200, {"ok": True})
         elif self.path == "/mastered":
             self._json(200, {"words": sorted(word_vocab.mastered_words(force=True))})
@@ -266,26 +428,57 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path != "/pairs":
+        if self.path not in ("/pairs", "/pairs/stream", "/transcribe"):
             self._json(404, {"error": "not found"})
             return
-        try:
-            length = int(self.headers.get("Content-Length") or 0)
-            body = json.loads(self.rfile.read(length) or b"{}")
-        except ValueError:
-            self._json(400, {"error": "JSON inválido"})
+        body = self._read_body()
+        if body is None:
             return
         video_id = str(body.get("video_id") or "")
+        if not VIDEO_ID_RE.match(video_id):
+            self._json(400, {"error": "video_id inválido"})
+            return
+        if self.path == "/transcribe":
+            job = start_transcribe(video_id)
+            self._json(200, {k: v for k, v in job.items() if k != "cues"})
+            return
         raw_cues = body.get("cues")
-        if not VIDEO_ID_RE.match(video_id) or not isinstance(raw_cues, list):
+        if not isinstance(raw_cues, list):
             self._json(400, {"error": "esperado {video_id, cues:[...]}"})
             return
-        try:
-            cues = build_cues(video_id, raw_cues)
-        except Exception as e:  # noqa: BLE001
-            self._json(500, {"error": str(e)})
+        if self.path == "/pairs":
+            try:
+                cues = build_cues(video_id, raw_cues)
+            except Exception as e:  # noqa: BLE001
+                self._json(500, {"error": str(e)})
+                return
+            self._json(200, {"video_id": video_id, "cues": cues})
             return
-        self._json(200, {"video_id": video_id, "cues": cues})
+
+        # /pairs/stream: sem Content-Length; a conexão fecha no fim (HTTP/1.0).
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", "application/x-ndjson; charset=utf-8")
+        self.end_headers()
+        self.close_connection = True
+        try:
+            from_t = float(body.get("from") or 0)
+        except (TypeError, ValueError):
+            from_t = 0.0
+        cues = _normalize_cues(raw_cues)
+        try:
+            self._ndjson({"total": len(cues)})
+            for chunk in iter_cues(video_id, cues, from_t):
+                self._ndjson({"cues": chunk})
+            self._ndjson({"done": True})
+        except (BrokenPipeError, ConnectionResetError):
+            pass  # a aba fechou/navegou: o que já foi feito ficou no cache
+        except Exception as e:  # noqa: BLE001
+            self._ndjson({"error": str(e)})
+
+    def _ndjson(self, obj) -> None:
+        self.wfile.write(json.dumps(obj, ensure_ascii=False).encode("utf-8") + b"\n")
+        self.wfile.flush()
 
     def log_message(self, fmt: str, *args) -> None:
         sys.stderr.write(f"[subrim_server] {fmt % args}\n")
