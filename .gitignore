@@ -13,6 +13,9 @@ dictation/.hanzi_cache.json
 warehouse/*
 
 
+# Cache do subrim_server.py (bases gerados para vídeos do YouTube)
+cache/
+
 # Ignore audio files
 *.mp3
 
