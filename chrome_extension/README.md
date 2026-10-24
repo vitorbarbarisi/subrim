@@ -7,9 +7,10 @@ tradução amarela por palavra, frase traduzida no topo) sobre o player do YouTu
 
 1. Suba o servidor local: `python subrim_server.py` (porta 7997).
 2. `chrome://extensions` → modo do desenvolvedor → **Carregar sem compactação** → esta pasta.
-3. Abra um vídeo com legenda chinesa e **ligue o CC** (a extensão captura a
-   legenda que o próprio player baixa; sem CC ela tenta ler as faixas do
-   `playerResponse`, o que pode falhar se o YouTube exigir token na URL).
+3. Abra um vídeo com legenda chinesa. Não precisa ligar o CC: a extensão captura
+   a legenda que o próprio player baixa e, se ele estiver em outra língua, troca
+   a faixa do player para a chinesa (o YouTube exige um token na URL da legenda,
+   que só o player tem).
 
 ## Arquivos
 

@@ -24,7 +24,10 @@
     return { lang, videoId: u.searchParams.get("v") || "", kind: u.searchParams.get("kind") || "" };
   }
 
+  const captured = new Set(); // videoIds cuja legenda zh já foi repassada
+
   function post(info, body, url, origin) {
+    captured.add(info.videoId);
     window.postMessage({ source: SOURCE, type: "timedtext", ...info, url, body, origin }, "*");
   }
 
@@ -94,6 +97,21 @@
     if (!track?.baseUrl) {
       window.postMessage({ source: SOURCE, type: "no-tracks", videoId }, "*");
       return;
+    }
+    // O baseUrl sem o token "pot" volta vazio. Trocar a faixa do player faz ele
+    // mesmo baixar a legenda zh (com o token), e a interceptação acima a captura.
+    const player = document.getElementById("movie_player");
+    if (player?.setOption) {
+      try {
+        player.loadModule?.("captions");
+        player.setOption("captions", "track", {
+          languageCode: track.languageCode,
+          vss_id: track.vssId,
+          kind: track.kind || "",
+        });
+      } catch {}
+      await new Promise((r) => setTimeout(r, 4000));
+      if (captured.has(videoId)) return;
     }
     const url = track.baseUrl + "&fmt=json3";
     try {
