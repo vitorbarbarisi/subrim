@@ -1,0 +1,96 @@
+/* Tamanhos em função de --subrim-hz (altura do hanzi em px), que render.js
+   recalcula a partir da altura do #movie_player — vale em tela cheia também. */
+
+#movie_player.subrim-active .ytp-caption-window-container {
+  display: none !important;
+}
+
+.subrim-overlay {
+  --subrim-hz: 40px;
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 40;
+  font-family: "PingFang TC", "Noto Sans TC", "Microsoft JhengHei", "Noto Sans CJK TC", sans-serif;
+  /* equivalente ao borderw/bordercolor=black do drawtext */
+  text-shadow: 0 0 2px #000, 0 0 2px #000;
+}
+
+.subrim-top {
+  position: absolute;
+  top: 4%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 85%;
+  padding: 0.2em 0.6em;
+  background: rgba(0, 0, 0, 0.75);
+  color: #cc9900;
+  font-size: calc(var(--subrim-hz) * 0.6);
+  line-height: 1.25;
+  text-align: center;
+}
+
+.subrim-box {
+  position: absolute;
+  bottom: 8%;
+  left: 50%;
+  transform: translateX(-50%);
+  max-width: 85%;
+  display: flex;
+  flex-wrap: nowrap;
+  justify-content: center;
+  align-items: flex-end;
+  gap: calc(var(--subrim-hz) * 0.25);
+  padding: calc(var(--subrim-hz) * 0.15) calc(var(--subrim-hz) * 0.35);
+  background: rgba(0, 0, 0, 0.8);
+  white-space: nowrap;
+  transition: bottom 0.15s ease;
+}
+
+/* Controles visíveis (pausado / mouse em cima): sobe acima da barra. */
+#movie_player:not(.ytp-autohide) .subrim-box {
+  bottom: calc(8% + 56px);
+}
+#movie_player.ytp-fullscreen:not(.ytp-autohide) .subrim-box {
+  bottom: calc(8% + 80px);
+}
+
+.subrim-word {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.subrim-py {
+  color: #9370db;
+  font-size: calc(var(--subrim-hz) * 0.65);
+  line-height: 1.15;
+}
+
+.subrim-hz {
+  color: #fff;
+  font-size: var(--subrim-hz);
+  line-height: 1.15;
+}
+
+.subrim-tr {
+  color: #ffff00;
+  font-size: calc(var(--subrim-hz) * 0.45);
+  line-height: 1.2;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Dominadas / caracteres avulsos: linhas vazias mantêm o hanzi alinhado. */
+.subrim-py:empty::before,
+.subrim-tr:empty::before {
+  content: "\00a0";
+}
+
+.subrim-status {
+  color: #ccc;
+  font-size: calc(var(--subrim-hz) * 0.45);
+}

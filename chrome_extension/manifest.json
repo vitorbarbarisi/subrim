@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Subrim — legendas no YouTube",
+  "version": "0.1.0",
+  "description": "Mostra legendas chinesas estilo subrim (pinyin, hanzi e tradução por palavra) sobre vídeos do YouTube.",
+  "host_permissions": ["http://localhost:7997/*"],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["inject_main.js"],
+      "world": "MAIN",
+      "run_at": "document_start"
+    },
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["render.js", "content.js"],
+      "css": ["styles.css"],
+      "run_at": "document_start"
+    }
+  ]
+}
