@@ -30,6 +30,7 @@ import re
 import sys
 from pathlib import Path
 
+import llm_provider
 from processor import (
     _call_deepseek_pairs,
     _call_deepseek_pairs_batch,
@@ -216,13 +217,15 @@ def main() -> int:
     parser.add_argument("stem", help="Nome do txt sem extensão (ex.: sutra1)")
     parser.add_argument("--force", action="store_true",
                         help="Recomeça do zero, descartando o base existente")
-    parser.add_argument("--batch", type=int, default=20,
-                        help="Frases por chamada em lote da LLM (padrão: 20)")
+    parser.add_argument("--batch", type=int, default=None,
+                        help="Frases por chamada em lote da LLM "
+                             "(padrão: o do provedor — DeepSeek 20, local 8)")
     args = parser.parse_args()
 
     print("📝 Text Pipeline — base.txt a partir de texto")
     print("=" * 60)
-    return build(args.stem, force=args.force, batch_size=max(1, args.batch))
+    batch = args.batch or llm_provider.batch_size("pairs")
+    return build(args.stem, force=args.force, batch_size=max(1, batch))
 
 
 if __name__ == "__main__":

@@ -52,6 +52,8 @@ import xml.etree.ElementTree as ET
 import time
 from concurrent.futures import ThreadPoolExecutor
 
+import llm_provider
+
 
 def _get_ssl_context():
     """Return SSL context for HTTPS requests. If DISABLE_SSL_VERIFY=1, skips certificate verification (e.g. corporate proxy)."""
@@ -632,27 +634,14 @@ def _retry_api_call(func, *args, max_retries: int = None, base_delay: float = No
     raise last_exception
 
 
-def _call_deepseek_pairs(zht_text: str, timeout_sec: float = None) -> str:
-    """Call DeepSeek chat API to extract list ["palavra: tradução", ...] for zht_text.
+def _call_deepseek_pairs(zht_text: str, timeout_sec: float = None, provider: str | None = None) -> str:
+    """Extrai a lista ["palavra (pinyin): tradução", ...] de zht_text via LLM.
 
-    Reads configuration from env vars:
-      - DEEPSEEK_API_KEY (required to enable calls)
-      - DEEPSEEK_API_BASE (default: https://api.deepseek.com)
-      - DEEPSEEK_MODEL (default: deepseek-chat)
+    O provedor (DeepSeek ou local) vem de ``provider`` ou de SUBRIM_LLM_PROVIDER
+    (ver llm_provider.py). No local o pinyin é refeito pelo pypinyin.
 
     Returns the raw model string on success, raises RuntimeError on network errors for retry.
     """
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key or api_key.strip() == "":
-        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente")
-
-    if timeout_sec is None:
-        timeout_sec = _deepseek_timeout(1)
-
-    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-    url = f"{api_base.rstrip('/')}/chat/completions"
-
     prompt = (
         "Você é um extrator. Dada a frase em chinês tradicional (zht), responda EXTRAINDO "
         "apenas as palavras da própria frase com suas traduções para pt-BR.\n"
@@ -662,67 +651,26 @@ def _call_deepseek_pairs(zht_text: str, timeout_sec: float = None) -> str:
         "Não invente palavras fora da frase.\n\n"
         f"Frase: {zht_text}"
     )
-
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": prompt},
-        ],
-        "temperature": 0.2,
-    }
-    data = json.dumps(body).encode("utf-8")
-
-    req = urlrequest.Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
-
+    # Sem json_object: a resposta é uma LISTA, e o modo JSON só aceita objeto.
+    content = llm_provider.chat(prompt, temperature=0.2, timeout_sec=timeout_sec, provider=provider)
+    if not content:
+        return "N/A"
+    # Mantém só uma lista JSON de strings. A cerca ```json já veio removida
+    # pelo llm_provider — sem isso ela ia PARA DENTRO do base e a linha perdia
+    # pinyin e tradução para sempre.
     try:
-        with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
-            resp_data = resp.read().decode("utf-8", errors="replace")
-            _log_deepseek("deepseek", prompt, resp_data)
-            obj = json.loads(resp_data)
-            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
-            if not content:
-                return "N/A"
-            # Strip optional ```json fences before parsing, como o _call_deepseek_pairs_batch
-            # já fazia. Sem isto, uma resposta cercada não vira JSON, cai no
-            # sanitize cru e a cerca ia PARA DENTRO do base — a linha perde
-            # pinyin e tradução para sempre, porque nenhum leitor do repo
-            # consegue mais parsear aquele array.
-            stripped = content.strip()
-            if stripped.startswith("```"):
-                stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
-                stripped = re.sub(r"\s*```$", "", stripped)
-            # Try to strictly keep only a JSON array of strings
-            try:
-                parsed = json.loads(stripped)
-                if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
-                    return json.dumps(parsed, ensure_ascii=False)
-            except Exception:
-                pass
-            # Fallback: sanitize raw content
-            return _sanitize_tsv_field(stripped)
-    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
-        # Enhanced error handling with more specific messages for pairs extraction
-        if isinstance(exc, urlerror.HTTPError):
-            if exc.code == 401:
-                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
-            elif exc.code == 429:
-                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
-            elif exc.code >= 500:
-                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
-        elif isinstance(exc, TimeoutError):
-            raise RuntimeError(f"Timeout na extração de pares DeepSeek API ({timeout_sec}s). Possível problema de rede ou servidor sobrecarregado.")
-        elif isinstance(exc, OSError) and getattr(exc, 'errno', None) == 53:
-            raise RuntimeError("Conexão abortada na extração de pares DeepSeek API (Errno 53). Servidor pode ter fechado a conexão.")
-        elif "connection abort" in str(exc).lower() or "software caused connection abort" in str(exc).lower():
-            raise RuntimeError("Conexão abortada na extração de pares DeepSeek API. Possível problema de rede ou servidor indisponível.")
-        else:
-            raise RuntimeError(f"Falha ao extrair pares via DeepSeek: {exc}")
+        parsed = json.loads(content)
+        if isinstance(parsed, list) and all(isinstance(x, str) for x in parsed):
+            return json.dumps(llm_provider.fix_pinyin(parsed, provider), ensure_ascii=False)
+    except Exception:
+        pass
+    # Fallback: sanitize raw content
+    return _sanitize_tsv_field(content)
 
 
-def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) -> dict[str, str]:
-    """Extract word pairs for MANY zht sentences in a single API call.
+def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None,
+                               provider: str | None = None) -> dict[str, str]:
+    """Extract word pairs for MANY zht sentences in a single LLM call.
 
     Sends a numbered list of sentences and asks for a JSON object mapping the
     sentence number (string) to its list of "palavra (pinyin): tradução". Returns
@@ -735,17 +683,6 @@ def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) 
     if not sentences:
         return {}
 
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key or api_key.strip() == "":
-        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente")
-
-    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-    url = f"{api_base.rstrip('/')}/chat/completions"
-
-    if timeout_sec is None:
-        timeout_sec = _deepseek_timeout(len(sentences))
-
     numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, start=1))
     prompt = (
         "Você é um extrator. Para CADA frase em chinês tradicional (zht) abaixo, "
@@ -757,47 +694,16 @@ def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) 
         "Não invente palavras fora de cada frase.\n\n"
         f"Frases:\n{numbered}"
     )
-
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.2,
+    content = llm_provider.chat(
+        prompt, temperature=0.2, timeout_sec=timeout_sec, n_items=len(sentences),
         # Listas de pares por frase → escala com o lote (per_item maior).
-        "max_tokens": _deepseek_max_tokens(len(sentences), per_item=300),
-    }
-    data = json.dumps(body).encode("utf-8")
-
-    req = urlrequest.Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
-
-    try:
-        with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
-            resp_data = resp.read().decode("utf-8", errors="replace")
-            _log_deepseek("deepseek", prompt, resp_data)
-            obj = json.loads(resp_data)
-            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
-    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
-        if isinstance(exc, urlerror.HTTPError):
-            if exc.code == 401:
-                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
-            elif exc.code == 429:
-                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
-            elif exc.code >= 500:
-                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
-        raise RuntimeError(f"Falha no batch de pares via DeepSeek: {exc}")
-
+        max_tokens=_deepseek_max_tokens(len(sentences), per_item=300),
+        json_object=True, provider=provider,
+    )
     if not content:
         return {}
-
-    # Strip optional ```json fences before parsing.
-    stripped = content.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped)
-
     try:
-        parsed = json.loads(stripped)
+        parsed = json.loads(content)
     except Exception:
         return {}  # malformed → caller falls back per-sentence
     if not isinstance(parsed, dict):
@@ -807,27 +713,17 @@ def _call_deepseek_pairs_batch(sentences: list[str], timeout_sec: float = None) 
     for i, sentence in enumerate(sentences, start=1):
         val = parsed.get(str(i))
         if isinstance(val, list) and all(isinstance(x, str) for x in val):
-            result[sentence] = json.dumps(val, ensure_ascii=False)
+            result[sentence] = json.dumps(llm_provider.fix_pinyin(val, provider), ensure_ascii=False)
     return result
 
 
-def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = None) -> str:
+def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: float = None,
+                                    provider: str | None = None) -> str:
     """Translate 'text' from source_lang ("pt" or "es") to Traditional Chinese (zht).
 
     On any failure (missing API key, HTTP/timeout, or empty response), raises
     RuntimeError to stop the pipeline, avoiding writing untranslated content.
     """
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key or api_key.strip() == "":
-        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
-
-    if timeout_sec is None:
-        timeout_sec = _deepseek_timeout(1)
-
-    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-    url = f"{api_base.rstrip('/')}/chat/completions"
-
     sl = source_lang.lower()
     if sl.startswith("pt"):
         src_label = "português do Brasil"
@@ -842,53 +738,18 @@ def _call_deepseek_translate_to_zht(text: str, source_lang: str, timeout_sec: fl
         "RETORNE SOMENTE o texto traduzido (sem marcações, sem explicações).\n\n"
         f"Texto: {text}"
     )
-
-    body = {
-        "model": model,
-        "messages": [
-            {"role": "user", "content": prompt},
-        ],
-        # 0.4 (e não 0.2): temperatura baixa demais puxa a tradução mais
-        # canônica/literal — o registro escrito. Um pouco de folga deixa a
-        # escolha coloquial aparecer sem soltar o formato de saída.
-        "temperature": 0.4,
-    }
-    data = json.dumps(body).encode("utf-8")
-
-    req = urlrequest.Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
-
-    try:
-        with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
-            resp_data = resp.read().decode("utf-8", errors="replace")
-            _log_deepseek("deepseek", prompt, resp_data)
-            obj = json.loads(resp_data)
-            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
-            if not content:
-                raise RuntimeError("DeepSeek retornou resposta vazia para tradução")
-            return content.strip()
-    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
-        # Enhanced error handling with more specific messages
-        if isinstance(exc, urlerror.HTTPError):
-            if exc.code == 401:
-                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
-            elif exc.code == 429:
-                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
-            elif exc.code >= 500:
-                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
-        elif isinstance(exc, TimeoutError):
-            raise RuntimeError(f"Timeout na conexão com DeepSeek API ({timeout_sec}s). Possível problema de rede ou servidor sobrecarregado.")
-        elif isinstance(exc, OSError) and getattr(exc, 'errno', None) == 53:
-            raise RuntimeError("Conexão abortada com DeepSeek API (Errno 53). Servidor pode ter fechado a conexão.")
-        elif "connection abort" in str(exc).lower() or "software caused connection abort" in str(exc).lower():
-            raise RuntimeError("Conexão abortada com DeepSeek API. Possível problema de rede ou servidor indisponível.")
-        else:
-            raise RuntimeError(f"Falha ao chamar DeepSeek para tradução: {exc}")
+    # 0.4 (e não 0.2): temperatura baixa demais puxa a tradução mais
+    # canônica/literal — o registro escrito. Um pouco de folga deixa a
+    # escolha coloquial aparecer sem soltar o formato de saída.
+    content = llm_provider.chat(prompt, temperature=0.4, timeout_sec=timeout_sec, provider=provider)
+    if not content:
+        raise RuntimeError("LLM retornou resposta vazia para tradução")
+    return content
 
 
 def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
-                                          timeout_sec: float = None) -> list[str | None]:
+                                          timeout_sec: float = None,
+                                          provider: str | None = None) -> list[str | None]:
     """Translate MANY consecutive subtitle segments to zht in ONE call.
 
     The segments are sent together so the model has the surrounding context (a
@@ -902,14 +763,6 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
     if not texts:
         return []
 
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key or api_key.strip() == "":
-        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente para tradução via LLM")
-
-    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-    url = f"{api_base.rstrip('/')}/chat/completions"
-
     sl = source_lang.lower()
     if sl.startswith("pt"):
         src_label = "português do Brasil"
@@ -917,9 +770,6 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
         src_label = "espanhol"
     else:
         src_label = "inglês"
-
-    if timeout_sec is None:
-        timeout_sec = _deepseek_timeout(len(texts))
 
     numbered = "\n".join(f"{i}. {t}" for i, t in enumerate(texts, start=1))
     prompt = (
@@ -934,48 +784,20 @@ def _call_deepseek_translate_to_zht_batch(texts: list[str], source_lang: str,
         "Exemplo: {\"1\": \"對不起\", \"2\": \"爸爸來晚了\"}\n\n"
         f"Segmentos:\n{numbered}"
     )
-
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
+    content = llm_provider.chat(
+        prompt,
         # 0.4 (e não 0.2): temperatura baixa demais puxa a tradução mais
         # canônica/literal — o registro escrito. Um pouco de folga deixa a
         # escolha coloquial aparecer sem soltar o formato de saída.
-        "temperature": 0.4,
+        temperature=0.4, timeout_sec=timeout_sec, n_items=len(texts),
         # Traduções zht curtas (uma por segmento) → teto enxuto e escalado.
-        "max_tokens": _deepseek_max_tokens(len(texts), per_item=120),
-    }
-    data = json.dumps(body).encode("utf-8")
-
-    req = urlrequest.Request(url, data=data, method="POST")
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
-
-    try:
-        with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as resp:
-            resp_data = resp.read().decode("utf-8", errors="replace")
-            _log_deepseek("deepseek", prompt, resp_data)
-            obj = json.loads(resp_data)
-            content = obj.get("choices", [{}])[0].get("message", {}).get("content")
-    except (urlerror.URLError, urlerror.HTTPError, TimeoutError, ValueError, KeyError, OSError) as exc:
-        if isinstance(exc, urlerror.HTTPError):
-            if exc.code == 401:
-                raise RuntimeError("Erro de autenticação com DeepSeek API. Verifique sua API key.")
-            elif exc.code == 429:
-                raise RuntimeError("Limite de taxa da API DeepSeek excedido. Aguarde alguns minutos.")
-            elif exc.code >= 500:
-                raise RuntimeError(f"Erro no servidor DeepSeek (HTTP {exc.code}). Tente novamente mais tarde.")
-        raise RuntimeError(f"Falha no batch de tradução via DeepSeek: {exc}")
-
+        max_tokens=_deepseek_max_tokens(len(texts), per_item=120),
+        json_object=True, provider=provider,
+    )
     if not content:
         return [None] * len(texts)
-
-    stripped = content.strip()
-    if stripped.startswith("```"):
-        stripped = re.sub(r"^```[a-zA-Z]*\s*", "", stripped)
-        stripped = re.sub(r"\s*```$", "", stripped)
     try:
-        parsed = json.loads(stripped)
+        parsed = json.loads(content)
     except Exception:
         return [None] * len(texts)
     if not isinstance(parsed, dict):
@@ -1093,7 +915,7 @@ def create_zht_secs_from_source(source_secs: Path, source_lang: str) -> Path:
     # ── Fase 2: tradução em LOTES (contexto entre segmentos + menos round-trips) ──
     # Os segmentos do lote vão juntos para a LLM (melhor contexto p/ falas quebradas),
     # mas voltam um-a-um, preservando o timing de cada um. Fallback por segmento.
-    BATCH = max(1, int(os.getenv("DEEPSEEK_TRANSLATE_BATCH", "15") or 15))
+    BATCH = llm_provider.batch_size("translate")   # DeepSeek 15, local 8 (env)
 
     def _fatal_llm(sample_text: str, e: Exception):
         print(f"\n❌ Erro fatal na tradução via LLM:", file=sys.stderr)
@@ -1385,7 +1207,7 @@ def generate_zht_base_file(zht_secs_path: Path, pt_secs_path: Path, resume_from_
     # em vez de devolver 429), então paralelizar não aumenta o throughput e ainda
     # arrisca timeouts. Por isso CONCURRENCY=1 por default; ajustável por env caso
     # se queira experimentar.
-    BATCH = max(1, int(os.getenv("DEEPSEEK_PAIRS_BATCH", "20") or 20))
+    BATCH = llm_provider.batch_size("pairs")   # DeepSeek 20, local 8 (env)
     CONCURRENCY = max(1, int(os.getenv("DEEPSEEK_PAIRS_CONCURRENCY", "1") or 1))
     GROUP = BATCH * CONCURRENCY   # entradas por grupo de escrita (resume por grupo)
 
@@ -1703,48 +1525,21 @@ def convert_simplified_to_traditional(text: str) -> str:
             result = result.replace(simplified, traditional)
         return result
 
-def _call_deepseek_translate_to_pt(text: str, timeout_sec: float = None) -> str:
+def _call_deepseek_translate_to_pt(text: str, timeout_sec: float = None,
+                                   provider: str | None = None) -> str:
     """
-    Call DeepSeek API to translate Chinese text to Portuguese.
+    Translate Chinese text to Portuguese via LLM (DeepSeek ou local).
     """
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-
-    if timeout_sec is None:
-        timeout_sec = _deepseek_timeout(1)
-
-    if not api_key:
-        raise ValueError("DEEPSEEK_API_KEY not found in environment")
-    
-    url = f"{api_base}/v1/chat/completions"
-    
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "Content-Type": "application/json"
-    }
-    
-    data = {
-        "model": model,
-        "messages": [
-            {
-                "role": "system",
-                "content": "Você é um tradutor especializado em chinês para português brasileiro. Traduza o texto chinês fornecido para português brasileiro natural e fluido. Mantenha o significado original e use linguagem apropriada para o contexto."
-            },
-            {
-                "role": "user", 
-                "content": f"Traduza para português brasileiro: {text}"
-            }
-        ],
-        "temperature": 0.3,
-        "max_tokens": 1000
-    }
-    
-    req = urlrequest.Request(url, data=json.dumps(data).encode('utf-8'), headers=headers)
-    
-    with urlrequest.urlopen(req, timeout=timeout_sec, context=_get_ssl_context()) as response:
-        result = json.loads(response.read().decode('utf-8'))
-        return result['choices'][0]['message']['content'].strip()
+    content = llm_provider.chat(
+        f"Traduza para português brasileiro: {text}",
+        system=("Você é um tradutor especializado em chinês para português brasileiro. "
+                "Traduza o texto chinês fornecido para português brasileiro natural e fluido. "
+                "Mantenha o significado original e use linguagem apropriada para o contexto."),
+        temperature=0.3, max_tokens=1000, timeout_sec=timeout_sec, provider=provider,
+    )
+    if not content:
+        raise RuntimeError("LLM retornou resposta vazia para tradução")
+    return content
 
 def translate_chinese_to_portuguese(text: str) -> str:
     """
