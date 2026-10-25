@@ -30,8 +30,10 @@ Endpoints:
                     done/total = frases com pares / frases do base (selo S
                     das miniaturas na extensão).
 
-Cache: ``cache/yt/<video_id>_base.txt`` no mesmo TSV do base
-(índice, begin, end, zht, pares, pt) — reaproveitável no pipeline de queima.
+Cache: ``cache/yt/<video_id>_base.txt`` em disco, no mesmo TSV do base
+(índice, begin, end, zht, pares, pt) — gravado a cada lote, sobrevive a
+reinícios do servidor e é reaproveitável no pipeline de queima. Pares ``N/A`` =
+frase ainda não processada; ``[]`` = processada, sem pares.
 A transcrição do Whisper fica em ``cache/yt/<video_id>_whisper.json``.
 
 Áudio: yt-dlp com o ``cookies.txt`` do projeto (o do youtube_monitor) ou, sem
@@ -109,6 +111,9 @@ def _write_cache(video_id: str, cues: list[dict], cache: dict[str, dict]) -> Non
     """Grava as cues do pedido + as do cache que o pedido não trouxe.
 
     Um pedido com só parte das frases não apaga o resto do vídeo do cache.
+    Frase processada (está em ``cache``) grava a lista de pares mesmo vazia
+    (``[]``); ``N/A`` fica só para a que ainda não passou pela LLM — senão a
+    frase sem pares voltaria à LLM a cada abertura do vídeo.
     """
     CACHE_DIR.mkdir(parents=True, exist_ok=True)
     san = processor._sanitize_tsv_field
@@ -116,7 +121,7 @@ def _write_cache(video_id: str, cues: list[dict], cache: dict[str, dict]) -> Non
     rows = sorted(cues + [c for z, c in cache.items() if z not in sent], key=lambda c: c["start"])
     lines = []
     for i, c in enumerate(rows, start=1):
-        pairs = json.dumps(c["pairs"], ensure_ascii=False) if c["pairs"] else "N/A"
+        pairs = json.dumps(c["pairs"], ensure_ascii=False) if c["zh"] in cache else "N/A"
         lines.append(
             f"{i}\t{c['start']:.3f}s\t{c['end']:.3f}s\t{san(c['zh'])}\t{san(pairs)}\t{san(c['pt'] or 'N/A')}"
         )
