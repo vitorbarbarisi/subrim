@@ -20,6 +20,7 @@
   const LANG_RANK = ["zh-Hant", "zh-TW", "zh-Hans", "zh"];
 
   const overlay = new Overlay();
+  const thumbs = globalThis.SubrimThumbs.createThumbBadges({ send });
   const cache = new Map(); // videoId -> cues enriquecidas do servidor
   let mastered = new Set();
 
@@ -31,11 +32,20 @@
   chrome.storage.sync.get(DEFAULT_OPTIONS, (o) => {
     options = { ...DEFAULT_OPTIONS, ...o };
     overlay.setOptions(options);
+    thumbs.setEnabled(options.enabled);
   });
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== "sync") return;
     for (const [k, { newValue }] of Object.entries(changes)) if (k in DEFAULT_OPTIONS) options[k] = newValue;
     overlay.setOptions(options);
+    thumbs.setEnabled(options.enabled);
+    // Trocou de LLM no meio da tradução: o resto do vídeo segue com a nova.
+    // O que já está no cache do servidor não é refeito.
+    if (changes.provider && state?.port && state.status === "loading") {
+      state.port.disconnect();
+      state.port = null;
+      requestPairs(state);
+    }
   });
 
   function log(...args) {
@@ -109,7 +119,10 @@
   document.addEventListener("yt-navigate-start", () => {
     if (state && state.videoId !== currentVideoId()) reset();
   });
-  document.addEventListener("yt-navigate-finish", onNavigate);
+  document.addEventListener("yt-navigate-finish", () => {
+    onNavigate();
+    thumbs.scan();
+  });
   window.addEventListener("popstate", () => setTimeout(onNavigate, 0));
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", onNavigate);
   else onNavigate();
@@ -163,6 +176,7 @@
       s.ready = new Map(cached.map((c) => [cueKey(c), c]));
       s.status = "ready";
       buildDisplay(s);
+      thumbs.setLocal(s.videoId, { done: cached.length, total: cached.length });
       return;
     }
     const cues = s.cues;
@@ -184,6 +198,8 @@
       if (Array.isArray(m.cues)) {
         for (const c of m.cues) s.ready.set(cueKey(c), c);
         buildDisplay(s);
+        // O selo S do vídeo (nas sugestões, histórico…) enche junto.
+        thumbs.setLocal(s.videoId, { done: s.ready.size, total: s.total });
       }
       if (m.done) {
         finished = true;
@@ -203,7 +219,7 @@
       if (!finished && state === s && s.cues === cues) offline(s, cues, "conexão encerrada");
     });
     const video = document.querySelector("#movie_player video");
-    port.postMessage({ videoId: s.videoId, cues, from: video ? video.currentTime : 0 });
+    port.postMessage({ videoId: s.videoId, cues, from: video ? video.currentTime : 0, provider: options.provider });
   }
 
   function offline(s, cues, error) {

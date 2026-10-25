@@ -5,12 +5,30 @@
   const { DEFAULT_OPTIONS } = globalThis.SubrimRender;
   const $ = (id) => document.getElementById(id);
   const toggles = ["enabled", "topTranslation", "multiline", "opaqueBox", "clickToMaster", "autoTranscribe"];
+  const radios = document.querySelectorAll('input[name="provider"]');
+  let providers = null; // /health → {deepseek: {ok, detail}, local: {...}}
 
   chrome.storage.sync.get(DEFAULT_OPTIONS, (o) => {
     for (const k of toggles) $(k).checked = !!o[k];
     $("fontScale").value = Math.round(o.fontScale * 100);
     $("fontScaleOut").textContent = Math.round(o.fontScale * 100) + "%";
+    setProvider(o.provider);
   });
+
+  // ------------------------------------------------------------ LLM
+
+  function setProvider(p) {
+    for (const r of radios) r.checked = r.value === p;
+    const st = providers?.[p];
+    $("providerStatus").textContent = st ? st.detail : "";
+    $("providerStatus").className = st ? (st.ok ? "ok" : "bad") : "";
+  }
+  for (const r of radios) {
+    r.addEventListener("change", () => {
+      chrome.storage.sync.set({ provider: r.value });
+      setProvider(r.value);
+    });
+  }
 
   for (const k of toggles) {
     $(k).addEventListener("change", (e) => chrome.storage.sync.set({ [k]: e.target.checked }));
@@ -26,6 +44,8 @@
     $("server").textContent = ok ? "servidor ok" : "servidor offline";
     $("server").className = ok ? "ok" : "bad";
     $("hint").hidden = ok;
+    providers = ok ? r.data?.providers || null : null;
+    setProvider([...radios].find((x) => x.checked)?.value || DEFAULT_OPTIONS.provider);
   });
 
   // ------------------------------------------------------------ este vídeo

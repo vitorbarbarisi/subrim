@@ -21,7 +21,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
     job = call("/pairs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ video_id: msg.videoId, cues: msg.cues }),
+      body: JSON.stringify({ video_id: msg.videoId, cues: msg.cues, provider: msg.provider }),
     });
   } else if (msg?.type === "mastered") {
     job = call("/mastered");
@@ -38,6 +38,12 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ word: msg.word, pinyin: msg.pinyin, translation: msg.translation, level: msg.level }),
+    });
+  } else if (msg?.type === "bases") {
+    job = call("/bases", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ video_ids: msg.videoIds }),
     });
   } else if (msg?.type === "job") {
     job = call("/jobs/" + encodeURIComponent(msg.videoId));
@@ -63,7 +69,7 @@ chrome.runtime.onConnect.addListener((port) => {
       const resp = await fetch(SERVER + "/pairs/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ video_id: msg.videoId, cues: msg.cues, from: msg.from }),
+        body: JSON.stringify({ video_id: msg.videoId, cues: msg.cues, from: msg.from, provider: msg.provider }),
         signal: abort.signal,
       });
       if (!resp.ok) throw new Error(`/pairs/stream: HTTP ${resp.status}`);

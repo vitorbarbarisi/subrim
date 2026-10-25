@@ -156,6 +156,7 @@
     fontScale: 1,
     autoTranscribe: false, // vídeo sem legenda zh → Whisper sem perguntar
     clickToMaster: true, // clicar numa palavra com ajuda marca como dominada
+    provider: "deepseek", // LLM das traduções novas: deepseek | local (Ollama)
   };
 
   function el(tag, cls, text) {

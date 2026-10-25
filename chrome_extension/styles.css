@@ -175,3 +175,33 @@
   text-decoration: underline;
   cursor: pointer;
 }
+
+/* Selo S nas miniaturas (thumbs.js): borda preta fixa; o interior enche de
+   roxo pelo gradiente do próprio SVG. Sem estado ainda = escondido. */
+.subrim-thumb-host {
+  position: relative;
+}
+.subrim-badge {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  width: 30px;
+  height: 30px;
+  z-index: 5;
+  pointer-events: auto; /* tooltip; o clique sobe para o <a> */
+  overflow: visible;
+}
+.subrim-badge text {
+  font-family: "Arial Black", Arial, sans-serif;
+  font-weight: 900;
+  font-size: 28px;
+  stroke: #111;
+  stroke-width: 2.2px;
+  stroke-linejoin: round;
+  paint-order: stroke;
+}
+.subrim-badge:not(.subrim-badge--none):not(.subrim-badge--partial):not(.subrim-badge--full),
+html.subrim-thumbs-off .subrim-badge,
+html.subrim-thumbs-hidden .subrim-badge {
+  display: none;
+}

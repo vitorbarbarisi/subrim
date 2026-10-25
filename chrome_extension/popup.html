@@ -69,6 +69,20 @@
     }
     button:hover { background: var(--border); }
     .sub { color: var(--muted); }
+    .provider { padding: 6px 0; }
+    .seg {
+      display: flex;
+      margin-top: 6px;
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      overflow: hidden;
+    }
+    .seg label { flex: 1; justify-content: center; padding: 4px 0; font-size: 13px; }
+    .seg input { position: absolute; opacity: 0; pointer-events: none; }
+    .seg label:has(input:checked) { background: var(--fg); color: var(--bg); }
+    #providerStatus { font-size: 12px; color: var(--muted); margin: 4px 0 0; }
+    #providerStatus.ok::before { content: "● "; color: var(--ok); }
+    #providerStatus.bad::before { content: "● "; color: var(--bad); }
   </style>
 </head>
 <body>
@@ -79,6 +93,14 @@
   </header>
   <label>Legendas subrim <input type="checkbox" id="enabled"></label>
   <hr>
+  <div class="provider">
+    <div>Tradução por</div>
+    <div class="seg">
+      <label><input type="radio" name="provider" value="deepseek">DeepSeek</label>
+      <label><input type="radio" name="provider" value="local">LLM local</label>
+    </div>
+    <p id="providerStatus"></p>
+  </div>
   <label>Tradução da frase no topo <input type="checkbox" id="topTranslation"></label>
   <label>Várias linhas <input type="checkbox" id="multiline"></label>
   <label>Caixa opaca <input type="checkbox" id="opaqueBox"></label>
