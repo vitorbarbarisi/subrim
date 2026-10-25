@@ -7,14 +7,15 @@ A extensão captura a legenda chinesa do YouTube e pede aqui os pares
 fica no .env deste projeto, nunca no navegador.
 
 Endpoints:
-  GET  /health    → {"ok": true}
+  GET  /health    → {"ok": true, "providers": {"deepseek": {ok, detail}, "local": {...}}}
   GET  /mastered  → {"words": [...]}  (palavras dominadas via word-api)
   POST /mastered  {word, pinyin, translation, level=3}
                   → muda o confidence_level na word-api (PATCH; cria a
                     palavra se ela ainda não existe) → {word, level, previous}
                     ``previous`` é o nível anterior (None = criada agora),
                     para a extensão poder desfazer.
-  POST /pairs     {video_id, cues:[{start,end,zh}]}
+  POST /pairs     {video_id, cues:[{start,end,zh}], provider?}
+                  provider: "deepseek" (default) | "local" (Ollama; ver llm_provider.py)
                   → {cues:[{start,end,zh,pairs:[...],pt}]}
   POST /pairs/stream  {video_id, cues, from}
                   → NDJSON, um {"cues":[...]} por lote pronto: primeiro o que
@@ -61,6 +62,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib import error as urlerror, parse as urlparse, request as urlrequest
 
+import llm_provider
 import processor
 import word_vocab
 import youtube_downloader
@@ -153,18 +155,12 @@ def base_status(video_id: str) -> dict | None:
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
 
-def _call_deepseek_translate_to_pt_batch(sentences: list[str]) -> dict[str, str]:
+def _call_deepseek_translate_to_pt_batch(sentences: list[str], provider: str | None = None) -> dict[str, str]:
     """Tradução PT de várias frases numa chamada só ({frase: tradução}).
 
     Frases ausentes da resposta ficam fora do dict; o chamador cai para a
     tradução 1-a-1 de ``processor._call_deepseek_translate_to_pt``.
     """
-    api_key = os.getenv("DEEPSEEK_API_KEY")
-    if not api_key:
-        raise RuntimeError("DEEPSEEK_API_KEY não encontrada ou vazia no ambiente")
-    api_base = os.getenv("DEEPSEEK_API_BASE", "https://api.deepseek.com")
-    model = os.getenv("DEEPSEEK_MODEL", "deepseek-chat")
-
     numbered = "\n".join(f"{i}. {s}" for i, s in enumerate(sentences, start=1))
     prompt = (
         "Traduza CADA fala de legenda em chinês abaixo para português brasileiro "
@@ -173,27 +169,11 @@ def _call_deepseek_translate_to_pt_batch(sentences: list[str]) -> dict[str, str]
         "o valor é a tradução. Sem explicações, sem markdown.\n\n"
         f"Frases:\n{numbered}"
     )
-    body = {
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.3,
-        "max_tokens": processor._deepseek_max_tokens(len(sentences), per_item=80),
-    }
-    req = urlrequest.Request(
-        f"{api_base.rstrip('/')}/chat/completions",
-        data=json.dumps(body).encode("utf-8"), method="POST",
+    content = llm_provider.chat(
+        prompt, temperature=0.3, n_items=len(sentences),
+        max_tokens=processor._deepseek_max_tokens(len(sentences), per_item=80),
+        json_object=True, provider=provider,
     )
-    req.add_header("Content-Type", "application/json")
-    req.add_header("Authorization", f"Bearer {api_key}")
-    try:
-        with urlrequest.urlopen(req, timeout=processor._deepseek_timeout(len(sentences)),
-                                context=processor._get_ssl_context()) as resp:
-            obj = json.loads(resp.read().decode("utf-8", errors="replace"))
-    except Exception as exc:  # noqa: BLE001 - o retry decide se tenta de novo
-        raise RuntimeError(f"Falha no batch de tradução PT via DeepSeek: {exc}")
-
-    content = (obj.get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
-    content = re.sub(r"^```[a-zA-Z]*\s*|\s*```$", "", content)
     try:
         parsed = json.loads(content)
     except ValueError:
@@ -204,10 +184,10 @@ def _call_deepseek_translate_to_pt_batch(sentences: list[str]) -> dict[str, str]
             if isinstance(parsed.get(str(i)), str) and parsed[str(i)].strip()}
 
 
-def _fetch_pairs(batch: list[str]) -> dict[str, list[str]]:
+def _fetch_pairs(batch: list[str], provider: str | None = None) -> dict[str, list[str]]:
     """Pares de um lote; cai para 1-a-1 nas frases que o lote não cobriu."""
     try:
-        got = processor._retry_api_call(processor._call_deepseek_pairs_batch, batch)
+        got = processor._retry_api_call(processor._call_deepseek_pairs_batch, batch, provider=provider)
     except Exception:
         got = {}
     out: dict[str, list[str]] = {}
@@ -215,7 +195,7 @@ def _fetch_pairs(batch: list[str]) -> dict[str, list[str]]:
         raw = got.get(s)
         if raw is None:
             try:
-                raw = processor._retry_api_call(processor._call_deepseek_pairs, s)
+                raw = processor._retry_api_call(processor._call_deepseek_pairs, s, provider=provider)
             except Exception as e:  # noqa: BLE001 - uma frase ruim não derruba o vídeo
                 print(f"⚠️  pares falharam para {s!r}: {e}", file=sys.stderr)
                 continue
@@ -228,15 +208,15 @@ def _fetch_pairs(batch: list[str]) -> dict[str, list[str]]:
     return out
 
 
-def _fetch_pt(batch: list[str]) -> dict[str, str]:
+def _fetch_pt(batch: list[str], provider: str | None = None) -> dict[str, str]:
     try:
-        got = processor._retry_api_call(_call_deepseek_translate_to_pt_batch, batch)
+        got = processor._retry_api_call(_call_deepseek_translate_to_pt_batch, batch, provider=provider)
     except Exception:
         got = {}
     for s in batch:
         if s not in got:
             try:
-                got[s] = processor._retry_api_call(processor._call_deepseek_translate_to_pt, s)
+                got[s] = processor._retry_api_call(processor._call_deepseek_translate_to_pt, s, provider=provider)
             except Exception as e:  # noqa: BLE001
                 print(f"⚠️  tradução falhou para {s!r}: {e}", file=sys.stderr)
     return got
@@ -255,12 +235,14 @@ def _normalize_cues(raw_cues: list[dict]) -> list[dict]:
     return cues
 
 
-def iter_cues(video_id: str, cues: list[dict], from_t: float = 0.0):
-    """Completa pares/pt das cues (cache → DeepSeek), lote a lote.
+def iter_cues(video_id: str, cues: list[dict], from_t: float = 0.0, provider: str | None = None):
+    """Completa pares/pt das cues (cache → LLM), lote a lote.
 
     Gera listas de cues prontas: primeiro as do cache, depois cada lote da
-    DeepSeek — a partir de ``from_t`` e por fim o trecho anterior, para a
-    legenda do ponto atual do vídeo chegar logo. O cache é gravado a cada lote.
+    LLM (``provider``: deepseek | local) — a partir de ``from_t`` e por fim o
+    trecho anterior, para a legenda do ponto atual do vídeo chegar logo. O
+    cache é gravado a cada lote; frase já no cache não é refeita, seja qual
+    for o provedor.
     """
     with _video_lock(video_id):
         cache = _load_cache(video_id)
@@ -275,13 +257,13 @@ def iter_cues(video_id: str, cues: list[dict], from_t: float = 0.0):
         ahead = [c["zh"] for c in cues if c["zh"] not in cache and c["end"] >= from_t]
         behind = [c["zh"] for c in cues if c["zh"] not in cache and c["end"] < from_t]
         need = list(dict.fromkeys(ahead + behind))
-        batch_size = max(1, processor._env_int("DEEPSEEK_PAIRS_BATCH", 20))
+        batch_size = llm_provider.batch_size("pairs", provider)
         for i in range(0, len(need), batch_size):
             batch = need[i:i + batch_size]
             # Pares e PT são chamadas independentes: rodam lado a lado.
             with ThreadPoolExecutor(max_workers=2) as ex:
-                fp = ex.submit(_fetch_pairs, batch)
-                ft = ex.submit(_fetch_pt, batch)
+                fp = ex.submit(_fetch_pairs, batch, provider)
+                ft = ex.submit(_fetch_pt, batch, provider)
                 pairs, pts = fp.result(), ft.result()
             done = []
             for c in cues:
@@ -295,10 +277,10 @@ def iter_cues(video_id: str, cues: list[dict], from_t: float = 0.0):
                 yield done
 
 
-def build_cues(video_id: str, raw_cues: list[dict]) -> list[dict]:
+def build_cues(video_id: str, raw_cues: list[dict], provider: str | None = None) -> list[dict]:
     """Versão sem streaming: devolve todas as cues já completadas."""
     cues = _normalize_cues(raw_cues)
-    for _ in iter_cues(video_id, cues):
+    for _ in iter_cues(video_id, cues, provider=provider):
         pass
     return cues
 
@@ -497,7 +479,8 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self._json(200, {k: v for k, v in job.items() if k != "cues" or job["state"] == "done"})
         elif self.path == "/health":
-            self._json(200, {"ok": True})
+            self._json(200, {"ok": True,
+                             "providers": {p: llm_provider.status(p) for p in llm_provider.PROVIDERS}})
         elif self.path == "/mastered":
             self._json(200, {"words": sorted(word_vocab.mastered_words(force=True))})
         else:
@@ -543,12 +526,17 @@ class Handler(BaseHTTPRequestHandler):
             self._json(200, {k: v for k, v in job.items() if k != "cues"})
             return
         raw_cues = body.get("cues")
+        try:
+            provider = llm_provider.active(body.get("provider") or "deepseek")
+        except ValueError as e:
+            self._json(400, {"error": str(e)})
+            return
         if not isinstance(raw_cues, list):
             self._json(400, {"error": "esperado {video_id, cues:[...]}"})
             return
         if self.path == "/pairs":
             try:
-                cues = build_cues(video_id, raw_cues)
+                cues = build_cues(video_id, raw_cues, provider)
             except Exception as e:  # noqa: BLE001
                 self._json(500, {"error": str(e)})
                 return
@@ -568,7 +556,7 @@ class Handler(BaseHTTPRequestHandler):
         cues = _normalize_cues(raw_cues)
         try:
             self._ndjson({"total": len(cues)})
-            for chunk in iter_cues(video_id, cues, from_t):
+            for chunk in iter_cues(video_id, cues, from_t, provider):
                 self._ndjson({"cues": chunk})
             self._ndjson({"done": True})
         except (BrokenPipeError, ConnectionResetError):
