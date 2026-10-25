@@ -243,14 +243,29 @@ def iter_cues(video_id: str, cues: list[dict], from_t: float = 0.0, provider: st
     trecho anterior, para a legenda do ponto atual do vídeo chegar logo. O
     cache é gravado a cada lote; frase já no cache não é refeita, seja qual
     for o provedor.
+
+    O que já está no base sai antes do lock: outra requisição do mesmo vídeo
+    (página recarregada, troca de faixa) pode estar no meio de um lote da LLM,
+    e o base em disco nunca está pela metade (``_write_cache`` usa replace).
     """
-    with _video_lock(video_id):
-        cache = _load_cache(video_id)
+    sent: set[str] = set()
+
+    def from_cache(cache: dict[str, dict]) -> list[dict]:
         ready = []
         for c in cues:
-            if c["zh"] in cache:
+            if c["zh"] in cache and c["zh"] not in sent:
                 c["pairs"], c["pt"] = cache[c["zh"]]["pairs"], cache[c["zh"]]["pt"]
                 ready.append(c)
+        sent.update(c["zh"] for c in ready)
+        return ready
+
+    ready = from_cache(_load_cache(video_id))
+    if ready:
+        yield ready
+    with _video_lock(video_id):
+        # Relê: quem segurava o lock pode ter gravado mais frases.
+        cache = _load_cache(video_id)
+        ready = from_cache(cache)
         if ready:
             yield ready
 
