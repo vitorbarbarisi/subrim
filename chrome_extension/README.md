@@ -12,7 +12,11 @@ tradução amarela por palavra, frase traduzida no topo) sobre o player do YouTu
    a faixa do player para a chinesa (o YouTube exige um token na URL da legenda,
    que só o player tem). Sem legenda manual, usa a automática do YouTube,
    juntando os fragmentos em frases.
-4. A tradução chega em streaming: as frases a partir do ponto atual do vídeo
+4. Vídeo que já tem base no servidor (`cache/yt/<id>_base.txt`): a legenda
+   aparece assim que a página abre (`GET /base/<id>`), sem esperar o player
+   baixar a do YouTube. Quando ela é capturada, o fluxo normal completa as
+   frases que faltam.
+5. A tradução chega em streaming: as frases a partir do ponto atual do vídeo
    aparecem primeiro (cada lote da DeepSeek fica no cache do servidor).
 
 ### Vídeos sem legenda chinesa (Whisper)
@@ -64,7 +68,7 @@ O popup também mostra se o servidor local está no ar.
 
 - `inject_main.js` — mundo MAIN: intercepta `fetch`/XHR de `/api/timedtext` (zh*) e faz o fallback.
 - `thumbs.js` — selo S nas miniaturas (MutationObserver + `POST /bases`).
-- `content.js` — navegação SPA, conversão json3 → cues, sincronia com o vídeo.
+- `content.js` — navegação SPA, base já gravado (`GET /base/<id>`), conversão json3 → cues, sincronia com o vídeo.
 - `background.js` — chamadas ao `localhost:7997` (content script não pode, por CORS/PNA),
   incluindo o NDJSON de `/pairs/stream` repassado por uma porta (`chrome.runtime.connect`).
 - `render.js` — parser dos pares, casamento por termo mais longo e overlay.
@@ -76,4 +80,5 @@ O popup também mostra se o servidor local está no ar.
 
 ```bash
 cd chrome_extension && node --test
+python -m unittest test_subrim_server_base   # na raiz: GET /base/<id>
 ```
