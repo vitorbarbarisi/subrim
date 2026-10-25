@@ -25,6 +25,10 @@ Endpoints:
                   transcreve. → {state, progress, error}
   GET  /jobs/<video_id>  → {state, progress, error, cues?}
                   state: downloading | transcribing | done | error
+  POST /bases     {video_ids:[...]}  (até 200)
+                  → {"bases": {id: {done, total}}} só dos vídeos que têm base;
+                    done/total = frases com pares / frases do base (selo S
+                    das miniaturas na extensão).
 
 Cache: ``cache/yt/<video_id>_base.txt`` no mesmo TSV do base
 (índice, begin, end, zht, pares, pt) — reaproveitável no pipeline de queima.
@@ -116,7 +120,30 @@ def _write_cache(video_id: str, cues: list[dict], cache: dict[str, dict]) -> Non
         lines.append(
             f"{i}\t{c['start']:.3f}s\t{c['end']:.3f}s\t{san(c['zh'])}\t{san(pairs)}\t{san(c['pt'] or 'N/A')}"
         )
-    _cache_path(video_id).write_text("\n".join(lines) + "\n", encoding="utf-8")
+    # tmp + replace: o /bases nunca lê um base gravado pela metade.
+    tmp = _cache_path(video_id).with_suffix(".txt.tmp")
+    tmp.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    tmp.replace(_cache_path(video_id))
+
+
+def base_status(video_id: str) -> dict | None:
+    """{done, total} do base do vídeo: linhas com pares / todas as linhas.
+
+    ``_write_cache`` grava todas as cues do pedido (``N/A`` nas que ainda não
+    têm pares), então a razão é o progresso da tradução. None = sem base.
+    """
+    path = _cache_path(video_id)
+    if not path.exists():
+        return None
+    done = total = 0
+    for line in path.read_text(encoding="utf-8").splitlines():
+        parts = line.split("\t")
+        if len(parts) < 4:
+            continue
+        total += 1
+        if len(parts) >= 5 and parts[4].strip() not in ("", "N/A"):
+            done += 1
+    return {"done": done, "total": total} if total else None
 
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
@@ -472,7 +499,7 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
-        if self.path not in ("/pairs", "/pairs/stream", "/transcribe", "/mastered"):
+        if self.path not in ("/pairs", "/pairs/stream", "/transcribe", "/mastered", "/bases"):
             self._json(404, {"error": "not found"})
             return
         body = self._read_body()
@@ -489,6 +516,18 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(502, {"error": str(e)})
                 return
             self._json(200, result)
+            return
+        if self.path == "/bases":
+            ids = body.get("video_ids")
+            if not isinstance(ids, list):
+                self._json(400, {"error": "esperado {video_ids:[...]}"})
+                return
+            bases = {}
+            for vid in dict.fromkeys(str(v) for v in ids[:200]):
+                st = base_status(vid) if VIDEO_ID_RE.match(vid) else None
+                if st:
+                    bases[vid] = st
+            self._json(200, {"bases": bases})
             return
         video_id = str(body.get("video_id") or "")
         if not VIDEO_ID_RE.match(video_id):
