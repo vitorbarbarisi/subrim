@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import ttk
 
 # Maestria de vocabulário (word-api). Só stdlib, seguro importar no topo.
+import llm_provider
 import word_vocab
 import youtube_monitor as ytm
 from app_identity import set_app_name
@@ -826,6 +827,19 @@ class App(tk.Tk):
         ttk.Checkbutton(detail, text="Enviar para o drive",
                         variable=self._drive_upload_on,
                         command=self._on_drive_toggle).pack(anchor=tk.W, pady=(2, 2))
+
+        # LLM dos pares/traduções desta queima (também no batch e no text
+        # pipeline): DeepSeek (API) ou modelo local no Ollama. Ver llm_provider.py.
+        ttk.Label(detail, text="LLM", foreground="#888").pack(anchor=tk.W, pady=(6, 0))
+        self._llm_provider = tk.StringVar(value="deepseek")
+        for value, text in (("deepseek", "DeepSeek"),
+                            ("local", f"Local ({llm_provider.local_model()})")):
+            ttk.Radiobutton(detail, text=text, value=value, variable=self._llm_provider,
+                            command=self._refresh_llm_status).pack(anchor=tk.W, pady=(1, 1))
+        self._llm_status = tk.StringVar(value="")
+        ttk.Label(detail, textvariable=self._llm_status, foreground="#888",
+                  wraplength=210, justify=tk.LEFT).pack(anchor=tk.W)
+        self._refresh_llm_status()
 
         ttk.Label(detail, text="Estilo", foreground="#888").pack(anchor=tk.W,
                                                                  pady=(6, 0))
@@ -4500,6 +4514,18 @@ class App(tk.Tk):
         else:
             self._status_var.set(f"▶  {len(running)} em execução")
 
+    def _refresh_llm_status(self):
+        """Status do provedor escolhido no painel Pipeline (fora da thread do Tk:
+        checar o Ollama é uma chamada HTTP)."""
+        provider = self._llm_provider.get()
+        self._llm_status.set("verificando…")
+
+        def _check():
+            st = llm_provider.status(provider)
+            text = ("● " if st["ok"] else "⚠ ") + st["detail"]
+            self.after(0, lambda: self._llm_provider.get() == provider and self._llm_status.set(text))
+        threading.Thread(target=_check, daemon=True).start()
+
     def _launch(self, cmd: list, label: str = "", pause_rate: float = None,
                 on_done=None, job: "Job" = None):
         """Roda ``cmd`` em paralelo aos demais, com log numa sub-aba própria.
@@ -4508,6 +4534,13 @@ class App(tk.Tk):
         lote). ``on_done`` (opcional) roda na thread do Tk quando o processo
         termina — é o gancho de encadeamento do lote.
         """
+        llm = self._llm_provider.get()
+        if job is None and llm == "local":
+            st = llm_provider.status("local")
+            if not st["ok"] and not messagebox.askyesno(
+                    "LLM local indisponível",
+                    f"{st['detail']}.\nIniciar mesmo assim? As chamadas à LLM vão falhar."):
+                return
         if job is None:
             if any(j.label == label for j in self._running_jobs()):
                 if not messagebox.askyesno(
@@ -4549,6 +4582,7 @@ class App(tk.Tk):
             env["BURN_MULTILINE"] = "1" if multiline else "0"
             env["EXTRACT_AUDIO"] = "1" if extract_audio else "0"
             env["DRIVE_UPLOAD"] = "1" if drive_upload else "0"
+            env["SUBRIM_LLM_PROVIDER"] = llm
             if debug_ds:
                 env["DEEPSEEK_DEBUG"] = "1"
             else:
