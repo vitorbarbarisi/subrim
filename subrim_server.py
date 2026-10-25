@@ -14,6 +14,9 @@ Endpoints:
                     palavra se ela ainda não existe) → {word, level, previous}
                     ``previous`` é o nível anterior (None = criada agora),
                     para a extensão poder desfazer.
+  GET  /base/<video_id>  → {cues:[{start,end,zh,pairs,pt}], total} das frases
+                  já processadas do base em disco (404 sem base) — a extensão
+                  mostra a legenda logo ao abrir o vídeo, sem esperar a do YouTube.
   POST /pairs     {video_id, cues:[{start,end,zh}], provider?}
                   provider: "deepseek" (default) | "local" (Ollama; ver llm_provider.py)
                   → {cues:[{start,end,zh,pairs:[...],pt}]}
@@ -88,10 +91,10 @@ def _cache_path(video_id: str) -> Path:
     return CACHE_DIR / f"{video_id}_base.txt"
 
 
-def _load_cache(video_id: str) -> dict[str, dict]:
-    """{zht: cue} das linhas já processadas (com pares) do cache."""
+def _load_rows(video_id: str) -> list[dict]:
+    """Cues das linhas já processadas (com pares) do cache, na ordem do arquivo."""
     path = _cache_path(video_id)
-    out: dict[str, dict] = {}
+    out: list[dict] = []
     if not path.exists():
         return out
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -105,8 +108,13 @@ def _load_cache(video_id: str) -> dict[str, dict]:
         except ValueError:
             continue
         pt = parts[5] if len(parts) >= 6 else "N/A"
-        out[parts[3]] = {"start": start, "end": end, "zh": parts[3], "pairs": pairs, "pt": pt}
+        out.append({"start": start, "end": end, "zh": parts[3], "pairs": pairs, "pt": pt})
     return out
+
+
+def _load_cache(video_id: str) -> dict[str, dict]:
+    """{zht: cue} das linhas já processadas (com pares) do cache."""
+    return {c["zh"]: c for c in _load_rows(video_id)}
 
 
 def _write_cache(video_id: str, cues: list[dict], cache: dict[str, dict]) -> None:
@@ -151,6 +159,19 @@ def base_status(video_id: str) -> dict | None:
         if len(parts) >= 5 and parts[4].strip() not in ("", "N/A"):
             done += 1
     return {"done": done, "total": total} if total else None
+
+
+def base_cues(video_id: str) -> dict | None:
+    """{cues, total} do base em disco: as frases já processadas + o total.
+
+    A extensão mostra isto assim que a página abre, sem esperar a legenda do
+    YouTube; frase repetida aparece em cada tempo (``_load_cache`` junta por
+    zht). None = sem base.
+    """
+    st = base_status(video_id)
+    if st is None:
+        return None
+    return {"cues": _load_rows(video_id), "total": st["total"]}
 
 
 # ── LLM ───────────────────────────────────────────────────────────────────────
@@ -493,6 +514,13 @@ class Handler(BaseHTTPRequestHandler):
                 self._json(404, {"error": "sem job"})
             else:
                 self._json(200, {k: v for k, v in job.items() if k != "cues" or job["state"] == "done"})
+        elif self.path.startswith("/base/"):
+            video_id = self.path[len("/base/"):]
+            base = base_cues(video_id) if VIDEO_ID_RE.match(video_id) else None
+            if base is None:
+                self._json(404, {"error": "sem base"})
+            else:
+                self._json(200, base)
         elif self.path == "/health":
             self._json(200, {"ok": True,
                              "providers": {p: llm_provider.status(p) for p in llm_provider.PROVIDERS}})

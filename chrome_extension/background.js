@@ -45,6 +45,8 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ video_ids: msg.videoIds }),
     });
+  } else if (msg?.type === "base") {
+    job = call("/base/" + encodeURIComponent(msg.videoId));
   } else if (msg?.type === "job") {
     job = call("/jobs/" + encodeURIComponent(msg.videoId));
   } else {

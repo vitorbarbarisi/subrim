@@ -106,6 +106,7 @@
     log("vídeo", videoId);
     refreshMastered();
     const s = state;
+    loadBase(s);
     s.timers.push(
       setTimeout(() => {
         if (state === s && !s.cues) {
@@ -114,6 +115,18 @@
         }
       }, FALLBACK_DELAY_MS),
     );
+  }
+
+  // Base já gravado no servidor: a legenda aparece logo, sem esperar o player
+  // baixar a do YouTube. Quando ela chega, requestPairs completa o que faltar.
+  async function loadBase(s) {
+    const r = await send({ type: "base", videoId: s.videoId });
+    if (state !== s || s.ready || !r.ok || !Array.isArray(r.data?.cues) || !r.data.cues.length) return;
+    s.ready = new Map(r.data.cues.map((c) => [cueKey(c), c]));
+    s.total = r.data.total || s.ready.size;
+    if (s.status === "waiting" || s.status === "no-tracks") s.status = "ready"; // não esconde o Whisper
+    buildDisplay(s);
+    log(`base do servidor: ${s.ready.size}/${s.total} frases`);
   }
 
   document.addEventListener("yt-navigate-start", () => {
@@ -181,7 +194,10 @@
     }
     const cues = s.cues;
     s.status = "loading";
-    s.ready = new Map();
+    // Mantém o que veio do base (loadBase) nas frases desta faixa: a legenda
+    // não pisca enquanto o stream repete o que já está no cache.
+    const keys = new Set(cues.map(cueKey));
+    s.ready = new Map([...(s.ready || [])].filter(([k]) => keys.has(k)));
     s.total = cues.length;
     buildDisplay(s);
     let port;
@@ -275,11 +291,13 @@
   // Sem legenda chinesa: usa uma transcrição já feita, transcreve sozinho
   // (opção do popup) ou espera o botão do popup.
   async function onNoTracks(s) {
-    s.status = "no-tracks";
+    // Com o base já na tela, o status segue "ready"; só o Whisper pode trazer
+    // a lista completa de frases (job já feito), sem transcrever de novo.
+    if (!s.ready) s.status = "no-tracks";
     const r = await send({ type: "job", videoId: s.videoId });
     if (state !== s || s.cues) return;
     if (r.ok && r.data?.state && r.data.state !== "error") return followJob(s, r.data);
-    if (options.autoTranscribe) startTranscribe(s);
+    if (options.autoTranscribe && !s.ready) startTranscribe(s);
   }
 
   async function startTranscribe(s) {
@@ -370,8 +388,8 @@
     overlay.attach(player);
     if (player.classList.contains("ad-showing")) return overlay.hide();
 
-    // Sem cues ainda (sem legenda / transcrevendo): o status fica na tela.
-    if (!s.cues) return overlay.status(statusText(s) || "");
+    // Sem cues nem base (sem legenda / transcrevendo): o status fica na tela.
+    if (!s.cues && !s.display) return overlay.status(statusText(s) || "");
 
     const t = video.currentTime;
     const i = s.display ? findActiveCue(s.display, t) : -1;
@@ -381,7 +399,7 @@
     }
     // Fala sem pares ainda: diz por quê (traduzindo / servidor fora).
     const text = statusText(s);
-    if (text && findActiveCue(s.cues, t) >= 0) overlay.status(text);
+    if (text && s.cues && findActiveCue(s.cues, t) >= 0) overlay.status(text);
     else overlay.hide();
   }
   requestAnimationFrame(tick);
