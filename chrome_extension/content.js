@@ -361,7 +361,7 @@
   function statusText(s) {
     switch (s.status) {
       case "offline":
-        return "subrim: servidor local (7997) não respondeu";
+        return "subrim: o servidor não respondeu (confira o IP no popup)";
       case "no-tracks":
         return "subrim: sem legenda chinesa (ver popup)";
       case "transcribing":

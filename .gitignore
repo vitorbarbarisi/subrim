@@ -58,3 +58,4 @@ deepseek_debug.log
 
 # Ícones da extensão Chrome (gerados do subrim_icon.png com sips, mas versionados)
 !chrome_extension/icons/*.png
+.subrim_client.json

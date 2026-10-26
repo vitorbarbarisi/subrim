@@ -55,6 +55,22 @@
     input[type="range"] { width: 100%; margin: 6px 0 0; }
     hr { border: 0; border-top: 1px solid var(--border); margin: 6px 0; }
     #hint { font-size: 12px; color: var(--muted); margin: 6px 0 0; }
+    .host { display: flex; align-items: center; gap: 6px; padding: 0 0 8px; }
+    .host span { font-size: 13px; color: var(--muted); }
+    .host input {
+      flex: 1;
+      min-width: 0;
+      padding: 4px 6px;
+      font: inherit;
+      font-size: 13px;
+      color: var(--fg);
+      background: transparent;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+    }
+    #hostDot { font-size: 14px; color: var(--muted); }
+    #hostDot.ok { color: var(--ok); }
+    #hostDot.bad { color: var(--bad); }
     h2 { font-size: 14px; font-weight: 500; margin: 4px 0 2px; }
     #videoStatus { color: var(--muted); margin: 0 0 8px; }
     button {
@@ -91,6 +107,11 @@
     <strong>Subrim</strong>
     <span id="server">verificando…</span>
   </header>
+  <div class="host">
+    <span>Servidor</span>
+    <input id="serverHost" placeholder="192.168.0.42" spellcheck="false" autocomplete="off">
+    <span id="hostDot" title="">●</span>
+  </div>
   <label>Legendas subrim <input type="checkbox" id="enabled"></label>
   <hr>
   <div class="provider">
@@ -109,7 +130,7 @@
     <div>Tamanho da fonte <span id="fontScaleOut">100%</span></div>
     <input type="range" id="fontScale" min="60" max="160" step="10">
   </div>
-  <p id="hint" hidden>Suba o servidor: <code>python subrim_server.py</code></p>
+  <p id="hint" hidden>Informe o IP da máquina que roda <code>python subrim_server.py</code> e tecle Enter.</p>
   <hr>
   <h2>Este vídeo</h2>
   <p id="videoStatus">Abra um vídeo do YouTube.</p>

@@ -1,490 +1,92 @@
 #!/usr/bin/env python3
-"""Subrim Manager — GUI para gerenciar o pipeline de processamento de vídeos."""
+"""Subrim Manager — GUI (client) do pipeline de processamento de vídeos.
+
+Esta máquina só exibe: vídeos, bases, coleções e todo o processamento (inclusive
+as chamadas à DeepSeek e à word-api) ficam no servidor (subrim_server.py) de
+outra máquina da rede local, cujo IP vai no campo "Servidor" do topo. Os
+caminhos abaixo são ``RemotePath`` — cada operação de arquivo é uma chamada ao
+servidor (ver subrim_remote.py); a lógica de dados mora em manager_core.py.
+"""
 
 import json
 import os
 import queue
 import re
-import shutil
 import subprocess
-import sys
+import tempfile
 import threading
 import time
 from datetime import datetime
 from pathlib import Path
+
+import project_python
+project_python.ensure("tkinter")  # python3 do brew pode vir sem Tk
+
 from tkinter import filedialog, messagebox, scrolledtext
 import tkinter as tk
 from tkinter import ttk
 
-# Maestria de vocabulário (word-api). Só stdlib, seguro importar no topo.
-import llm_provider
-import word_vocab
-import youtube_monitor as ytm
+import subrim_remote as sr
+from subrim_remote import CLIENT, PY, SCRAPER_PY, WHISPER_PY, RemoteError, RemoteModule, RemotePath
+# Só utilitários puros (sem I/O): rodam aqui mesmo, sem ida ao servidor.
+from manager_core import PHASES, wh_readable_name as _wh_readable_name
+import youtube_monitor as ytm   # idem: só sanitize_name/is_valid_prefix
 from app_identity import set_app_name
 
 APP_NAME = "Subrim Manager"
 
-# ─── Paths ─────────────────────────────────────────────────────────────────────
-REPO      = Path(__file__).parent
+# ─── Arquivos locais (só preferências da interface) ───────────────────────────
+LOCAL = Path(__file__).parent
+# Ajustes de leitura do preview das Coleções (painel à direita). Sobrevivem a
+# fechar o app; só a visualização os usa, nunca o salvar coleção.
+VIEWER_PREFS = LOCAL / ".subrim_viewer.json"
+VIEWER_DEFAULTS = {"trad_opaque": False, "trad_scale": 1.0, "trad_hide": False,
+                   "leg_opaque": False, "leg_scale": 1.0, "leg_hide": False,
+                   "auto_audio": False}
+VIEWER_SCALE_MIN, VIEWER_SCALE_MAX = 0.6, 2.0
+# Último IP digitado no campo "Servidor".
+CLIENT_PREFS = LOCAL / ".subrim_client.json"
+
+# ─── Paths no servidor ────────────────────────────────────────────────────────
+REPO      = RemotePath(".")
 ASSETS    = REPO / "assets"
 SOURCE    = ASSETS / "source"
 TEXTS     = ASSETS / "text"          # txt do modo Texto (um arquivo = um asset)
 WAREHOUSE = REPO / "warehouse"
 TEXT_WAREHOUSE = WAREHOUSE / "text"  # bases gerados pelo text_pipeline.py
-FRAMES    = WAREHOUSE / "frames"   # cache de frames de episódios arquivados
-FRAMES_PERIODS = WAREHOUSE / "frames_periods"   # idem, arquivados por período
-DEEPSEEK_LOG = REPO / "deepseek_debug.log"
-# Ajustes de leitura do preview das Coleções (painel à direita). Sobrevivem a
-# fechar o app; só a visualização os usa, nunca o salvar coleção.
-VIEWER_PREFS = REPO / ".subrim_viewer.json"
-VIEWER_DEFAULTS = {"trad_opaque": False, "trad_scale": 1.0, "trad_hide": False,
-                   "leg_opaque": False, "leg_scale": 1.0, "leg_hide": False,
-                   "auto_audio": False}
-VIEWER_SCALE_MIN, VIEWER_SCALE_MAX = 0.6, 2.0
+
+# Módulos que rodam no servidor.
+core = RemoteModule("manager_core")
+cb = RemoteModule("collection_builder")
+periods_base = RemoteModule("periods_base")
+
+# Nota (0-10) das frases — os mesmos valores do collection_builder, que não é
+# importado aqui (puxa OpenCV).
+NOTA_MIN, NOTA_MAX, NOTA_DEFAULT = 0, 10, 5
 
 
-def _wh_frames_dir(prefix: str) -> Path | None:
-    """Cache de frames do episódio — o de períodos tem precedência. None se não há."""
-    for d in (FRAMES_PERIODS / prefix, FRAMES / prefix):
-        if d.is_dir() and next(d.glob("line*.jpg"), None) is not None:
-            return d
-    return None
+def clamp_nota(value: int) -> int:
+    return max(NOTA_MIN, min(NOTA_MAX, int(value)))
 
 
-def _wh_is_archived(prefix: str) -> bool:
-    """True se o episódio foi arquivado (sem mp4, mas com cache de frames)."""
-    return _wh_frames_dir(prefix) is not None
-
-
-def _external_drives() -> list:
-    """HDs externos graváveis montados em /Volumes (ordem alfabética).
-
-    Exclui o disco de boot (mesmo device de "/", ex.: "Macintosh HD") e volumes
-    somente-leitura (imagens .dmg montadas)."""
-    root_dev = os.stat("/").st_dev
-    out = []
+def _load_client_prefs() -> dict:
     try:
-        vols = sorted(Path("/Volumes").iterdir())
+        return json.loads(CLIENT_PREFS.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_client_prefs(prefs: dict) -> None:
+    try:
+        CLIENT_PREFS.write_text(json.dumps(prefs, ensure_ascii=False, indent=2),
+                                encoding="utf-8")
     except OSError:
-        return out
-    for v in vols:
-        try:
-            if not v.is_dir() or v.stat().st_dev == root_dev:
-                continue
-            if os.statvfs(v).f_flag & os.ST_RDONLY:
-                continue
-        except OSError:
-            continue
-        out.append(v)
-    return out
-
-
-def _wh_readable_name(stem: str) -> str:
-    """Converte 'amor80_base' → 'Amor 80', 'Death_Becomes_Her_base' → 'Death Becomes Her'."""
-    name = stem.replace("_base", "").replace("_", " ").strip()
-    # separa letras de dígitos colados: 'amor80' → 'amor 80'
-    name = re.sub(r"([a-zA-Z])(\d)", r"\1 \2", name)
-    name = re.sub(r"(\d)([a-zA-Z])", r"\1 \2", name)
-    return name.title()
-
-
-# Assinaturas de canal no nome que não trazem o "@<canal>" do YouTube.
-_WH_SIGNATURES = {"公視": "pts"}
-
-
-def _wh_channel_rules():
-    """(prefixos, assinaturas) dos canais do YouTube Monitor, para agrupar.
-
-    Assinatura = "@<nome do canal>" → prefixo (ex.: "@TVBSNEWS01" → "tvbs")."""
-    try:
-        cfg = ytm.load_channels_config(ytm.DEFAULT_CONFIG, required=False)
-    except Exception:  # noqa: BLE001
-        return [], dict(_WH_SIGNATURES)
-    prefixes, signatures = [], {}
-    for c in cfg.get("channels", []):
-        p = c.get("prefix")
-        if not p:
-            continue
-        prefixes.append(p)
-        if c.get("name"):
-            signatures[f"@{c['name']}"] = p
-    signatures.update(_WH_SIGNATURES)
-    return prefixes, signatures
-
-
-def _wh_group_keys(stems: list, prefixes: list, signatures: dict) -> dict:
-    """Grupo de cada stem (sem "_base") da lista do Warehouse; None = "Outros".
-
-    Ordem das regras: prefixo de canal explícito ("acquiring_…"), assinatura do
-    canal no nome ("@TVBSNEWS01", "公視"), letras + número ("clone100" → "clone")
-    e, por fim, série com sufixo numérico compartilhada por ≥2 itens
-    ("Cinco_Relacionamento_Confucio_1/_2")."""
-    out, series = {}, {}
-    for stem in stems:
-        key = next((p.lower() for p in prefixes if stem.startswith(f"{p}_")), None)
-        if key is None:
-            key = next((p.lower() for sig, p in signatures.items() if sig in stem), None)
-        if key is None:
-            m = re.match(r"([A-Za-z]+)\d", stem)
-            if m:
-                key = m.group(1).lower()
-        if key is None:
-            base = re.sub(r"[_ ]?\d+$", "", stem)
-            if base != stem and base:
-                series.setdefault(base, []).append(stem)
-        out[stem] = key
-    for base, members in series.items():
-        if len(members) >= 2:
-            for stem in members:
-                out[stem] = base
-    return out
-
-
-def _natural_key(s: str):
-    """Ordenação natural: 'Clone 37' antes de 'Clone 100'."""
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", s)]
-
-
-def _wh_group_list(stems: list) -> list:
-    """Stems (sem "_base") agrupados como na lista do Warehouse.
-
-    Devolve ``[(key, nome, [stems])]``: grupos por nome, "Outros" (key None)
-    por último; dentro do grupo, ordem natural do nome legível."""
-    prefixes, signatures = _wh_channel_rules()
-    keys = _wh_group_keys(stems, prefixes, signatures)
-    groups: dict = {}
-    for stem in stems:
-        groups.setdefault(keys[stem], []).append(stem)
-    order = sorted(groups, key=lambda k: (k is None,
-                                          _wh_readable_name(k).lower() if k else ""))
-    return [(k, _wh_readable_name(k) if k else "Outros",
-             sorted(groups[k], key=lambda s: _natural_key(_wh_readable_name(s))))
-            for k in order]
-
-
-# Uma "palavra" precisa ter ao menos um caractere com conteúdo (CJK, letra ou
-# dígito). Sem isso, pontuação solta que sobra do parsing entrava na tabela
-# como se fosse vocabulário. A regra mora no word_vocab, que é o módulo comum
-# a esta tela e ao registro em sanitize_base: filtrar só aqui escondia o lixo
-# da tabela, mas continuava mandando-o para a API.
-
-
-def _wh_split_items(arr: str) -> list:
-    """Itens de um array de pares do base, tolerante a arrays malformados.
-
-    O array é escrito com f-string à mão (não ``json.dumps``), então há duas
-    malformações reais no corpus, e cada uma quebra uma estratégia diferente:
-
-    - tradução com aspa — ``["「 (「): "", "嘰嘰喳喳 (jī ji zhā zhā): tagarelice", …]``
-      — varrer pares de aspas dessincroniza e perde tudo depois do primeiro item;
-      dividir pelo separador ``", "`` acerta.
-    - aspa fechando cedo — ``… "佔 (zhàn)": pegar, "便宜 (pián yi)": vantagem]`` —
-      aí é o inverso: o separador não aparece entre os dois últimos pares, então o
-      split junta ambos num item e perde uma palavra; varrer aspas acerta.
-
-    Como nenhuma domina, geramos as duas e ficamos com a que rende mais itens
-    aproveitáveis. Perder palavra chinesa num contador de vocabulário é o pior
-    resultado possível, então vale o custo de parsear duas vezes.
-    """
-    arr = arr.strip()
-    if not arr.startswith("["):
-        return []
-    try:
-        data = json.loads(arr)
-        if isinstance(data, list):
-            return [str(x) for x in data]
-    except Exception:  # noqa: BLE001 - array malformado é o caso comum aqui
         pass
 
-    inner = arr[1:-1] if arr.endswith("]") else arr[1:]
-    por_separador = [c.strip().strip('"') for c in inner.split('", "')]
-    por_aspas = re.findall(r'"([^"]*)"', arr)
 
-    def _score(items):
-        """(itens com pinyin E tradução, com pinyin, válidos) — maior é melhor."""
-        ambos = com_py = validos = 0
-        for it in items:
-            p = _wh_parse_item(it)
-            if not p:
-                continue
-            validos += 1
-            if p[1]:
-                com_py += 1
-                if p[2]:
-                    ambos += 1
-        return (ambos, com_py, validos)
-
-    melhor = max((por_separador, por_aspas), key=_score)
-    return [c for c in melhor if c.strip()]
-
-
-def _wh_parse_item(item: str):
-    """``(palavra, pinyin, tradução)`` de um item, ou ``None`` se não der.
-
-    Cobre as formas malformadas que existem de verdade no corpus, além da
-    canônica — sem isso elas caem como "entrada nua" e aparecem na tabela como
-    Conhecida=Sim mesmo tendo pinyin e tradução no arquivo.
-    """
-    # Aspas soltas sobram das malformações do array; nenhuma palavra as contém, e
-    # sem tirar isso a palavra sai deformada (ex.: `[OSMAR]"` em vez de `[OSMAR]`).
-    item = item.strip().strip('"').strip()
-    if not item:
-        return None
-
-    pats = (
-        r'^([^\s("]+)\s*\(([^)]*)\)\s*:\s*(.*)$',   # 當 (dāng): quando
-        r'^([^\s("]+)\s*\(([^):]*)\s*:\s*(.*)$',    # 匯票 (huì piào: ordens…  (sem ")")
-        r'^([^\s("]+)\s*\(([^)]*)\)\s*$',           # daughter (nǚ ér)  (sem tradução)
-    )
-    for i, pat in enumerate(pats):
-        m = re.match(pat, item)
-        if m:
-            word = m.group(1)
-            pinyin = m.group(2).strip()
-            trad = m.group(3).strip() if i < 2 else ""
-            break
-    else:
-        m = re.match(r'^([^\s(:"]+)\s*:\s*(.*)$', item)   # HELENA: Helena
-        if m:
-            word, pinyin, trad = m.group(1), "", m.group(2).strip()
-        else:
-            m = re.match(r'^([^\s(:"]+)', item)           # entrada nua
-            if not m:
-                return None
-            word, pinyin, trad = m.group(1), "", ""
-
-    if not word or not word_vocab.is_real_word(word):
-        return None
-    return (word, pinyin, trad)
-
-
-def _wh_analyse(base_path: Path, mastered=None, vocab=None) -> dict:
-    """Analisa um base.txt do warehouse e retorna estatísticas de palavras.
-
-    ``mastered`` (conjunto de dominadas) e ``vocab`` (``{palavra: (pinyin,
-    tradução)}``) devem ser carregados pelo chamador — esta função roda em thread
-    e não deve fazer I/O de rede. Se vierem ``None``, usa o cache do processo.
-
-    Uma palavra é "conhecida" quando não há ajuda a exibir no render: o base não
-    tem pinyin/tradução para ela (entrada nua) OU ela já é dominada na word-api.
-
-    Pinyin e tradução exibidos vêm do PRÓPRIO base (é a tradução no contexto
-    daquele episódio); quando a mesma palavra aparece com traduções diferentes,
-    vale a mais frequente. Se o base não tiver, cai para o vocabulário da API e a
-    entrada é marcada com ``from_api`` — a GUI colore essas linhas, para não
-    ficar ambíguo de onde veio o dado.
-
-    Retorna:
-      total_words   – palavras distintas no array
-      known         – palavras conhecidas (sem ajuda a exibir)
-      unknown       – palavras a aprender (com pinyin+tradução e não dominadas)
-      freq          – lista de dicts (word, count, conhecida, pinyin, traducao,
-                      from_api) por frequência desc
-    """
-    if mastered is None:
-        mastered = word_vocab.mastered_words()
-    if vocab is None:
-        vocab = word_vocab.vocabulary()
-
-    from collections import Counter, defaultdict
-    word_count: dict = defaultdict(int)
-    word_meta: dict = {}                      # palavra → (has_pinyin, has_translation)
-    pys: dict = defaultdict(Counter)          # palavra → Counter de pinyin
-    trs: dict = defaultdict(Counter)          # palavra → Counter de traduções
-
-    try:
-        with open(base_path, "r", encoding="utf-8") as f:
-            for line in f:
-                parts = line.rstrip("\r\n").split("\t")
-                if len(parts) < 5:
-                    continue
-                for item in _wh_split_items(parts[4]):
-                    parsed = _wh_parse_item(item)
-                    if not parsed:
-                        continue
-                    word, pinyin, trad = parsed
-                    word_count[word] += 1
-                    if pinyin:
-                        pys[word][pinyin] += 1
-                    if trad:
-                        trs[word][trad] += 1
-                    has_py, has_tr = bool(pinyin), bool(trad)
-                    existing = word_meta.get(word, (False, False))
-                    word_meta[word] = (existing[0] or has_py, existing[1] or has_tr)
-    except Exception:
-        pass
-
-    def _top(counter):
-        return counter.most_common(1)[0][0] if counter else ""
-
-    freq = []
-    for word in sorted(word_count.keys(), key=lambda w: -word_count[w]):
-        has_py, has_tr = word_meta[word]
-        pinyin, trad = _top(pys[word]), _top(trs[word])
-        from_api = False
-        if not pinyin or not trad:
-            api_py, api_tr = vocab.get(word, ("", ""))
-            if not pinyin and api_py:
-                pinyin, from_api = api_py, True
-            if not trad and api_tr:
-                trad, from_api = api_tr, True
-        freq.append({
-            "word": word,
-            "count": word_count[word],
-            "conhecida": word_vocab.is_known(word, has_py, has_tr, mastered),
-            "pinyin": pinyin,
-            "traducao": trad,
-            "from_api": from_api,
-        })
-
-    known = sum(1 for w, (hp, ht) in word_meta.items()
-                if word_vocab.is_known(w, hp, ht, mastered))
-    unknown = len(word_meta) - known
-    return {
-        "total_words": len(word_meta),
-        "known": known,
-        "unknown": unknown,
-        "freq": freq,
-    }
-
-
-def _scraper_python() -> str:
-    """Python da venv do scraper (selenium está instalado lá, não no Python do sistema)."""
-    cand = REPO / "globoplay_scraper_env" / "bin" / "python3"
-    return str(cand) if cand.exists() else sys.executable
-
-# ─── Pipeline phase metadata ───────────────────────────────────────────────────
-PHASES = {
-    "empty":    ("Vazio",        "#9E9E9E"),
-    "ready":    ("Aguardando",   "#E67E22"),
-    "phase1":   ("Legendas ✓",   "#3498DB"),
-    "phase2":   ("Dividido",     "#9B59B6"),
-    "phase3":   ("Processando",  "#E74C3C"),
-    "merged":   ("Falta Drive ☁", "#F1C40F"),
-    "complete": ("Completo ✓",   "#27AE60"),
-}
-
-
-# ─── Status detection ──────────────────────────────────────────────────────────
-def detect_status(path: Path, drive_required: bool = True) -> dict:
-    """``drive_required=False`` (envio ao Drive desmarcado): basta o merge para o
-    asset contar como completo, em vez de ficar eternamente em "Falta Drive"."""
-    sub = path.parent / f"{path.name}_sub"
-
-    has_video = bool(list(path.glob("*.mp4")))
-    has_srt   = bool(list(path.glob("*.srt")) + list(path.glob("*.vtt")))
-    bases     = list(path.glob("*base.txt"))
-
-    chromecasts = list(sub.glob("*_chromecast.mp4"))       if sub.exists() else []
-    raw_chunks  = [f for f in sub.glob("*_chunk_*.mp4")
-                   if "_processed" not in f.name]          if sub.exists() else []
-    proc_chunks = list(sub.glob("*_processed.mp4"))        if sub.exists() else []
-    merged      = (list(sub.glob("*_merged.mp4")) if sub.exists() else []) + \
-                  list(path.glob("*_merged.mp4"))
-    uploaded    = bool(list(sub.glob("*_drive.json"))) if sub.exists() else False
-
-    n_total  = len(raw_chunks)
-    n_done   = len(proc_chunks)
-    denominator = max(n_total, n_done)
-    progress = int(n_done / denominator * 100) if denominator > 0 else 0
-
-    if merged and (uploaded or not drive_required):
-        phase, progress = "complete", 100
-    elif merged:
-        # Merge pronto, mas o envio ao Drive (Fase 5) ainda não foi confirmado.
-        phase, progress = "merged", 100
-    elif proc_chunks:
-        phase = "phase3"
-    elif chromecasts:
-        phase, progress = "phase2", 0
-    elif bases:
-        phase, progress = "phase1", 100
-    elif has_video:
-        phase, progress = "ready", 0
-    else:
-        phase, progress = "empty", 0
-
-    return {
-        "name":         path.name,
-        "path":         path,
-        "phase":        phase,
-        "progress":     progress,
-        "has_video":    has_video,
-        "has_srt":      has_srt,
-        "has_base":     bool(bases),
-        "chunks_total": n_total,
-        "chunks_done":  n_done,
-        "complete":     bool(merged and (uploaded or not drive_required)),
-        "merged":       bool(merged),
-        "uploaded":     uploaded,
-    }
-
-
-def list_assets(drive_required: bool = True) -> list:
-    if not ASSETS.exists():
-        return []
-    # "text" é a pasta do modo Texto, não um asset de vídeo — sem esta exclusão
-    # ela aparecia na lista como um asset fantasma, eternamente "Vazio".
-    dirs = sorted(
-        d for d in ASSETS.iterdir()
-        if d.is_dir() and not d.name.endswith("_sub")
-        and d.name not in ("source", "text", "final")
-    )
-    return [detect_status(d, drive_required) for d in dirs]
-
-
-def list_texts() -> list:
-    """Assets do modo Texto: um ``assets/text/*.txt`` por item.
-
-    "Arquivado" aqui significa exatamente ter o ``*_base.txt`` correspondente no
-    ``warehouse/text/`` — não há etapa de arquivamento separada, porque o
-    ``text_pipeline.py`` já escreve direto no destino final.
-    """
-    if not TEXTS.exists():
-        return []
-    out = []
-    for f in sorted(TEXTS.glob("*.txt")):
-        base = TEXT_WAREHOUSE / f"{f.stem}_base.txt"
-        n_frases = 0
-        if base.exists():
-            try:
-                n_frases = sum(1 for ln in base.read_text(encoding="utf-8").splitlines()
-                               if ln.strip())
-            except Exception:  # noqa: BLE001 - a lista nunca deve quebrar por I/O
-                n_frases = 0
-        try:
-            n_linhas = sum(1 for ln in f.read_text(encoding="utf-8").splitlines()
-                           if ln.strip())
-        except Exception:  # noqa: BLE001
-            n_linhas = 0
-        out.append({
-            "name":     f.stem,
-            "path":     f,
-            "base":     base,
-            "archived": base.exists(),
-            "linhas":   n_linhas,
-            "frases":   n_frases,
-        })
-    return out
-
-
-def list_sources() -> list:
-    if not SOURCE.exists():
-        return []
-    result = []
-    for f in sorted(SOURCE.glob("*.json")):
-        try:
-            data = json.loads(f.read_text(encoding="utf-8"))
-            n = len(data.get("episodes", []))
-        except Exception:
-            n = "?"
-        result.append({
-            "name":  f.stem,
-            "path":  f,
-            "episodes": n,
-            "mtime": datetime.fromtimestamp(f.stat().st_mtime).strftime("%d/%m %H:%M"),
-        })
-    return result
+def _open_url(url: str) -> None:
+    """Abre uma URL do servidor no app padrão (vídeo: navegador, em streaming)."""
+    subprocess.Popen(["open", url])
 
 
 # ─── Processos em execução ─────────────────────────────────────────────────────
@@ -524,7 +126,7 @@ class App(tk.Tk):
         # coletado derruba o ícone. Caminho absoluto porque o app nem sempre é
         # iniciado a partir da raiz do repo.
         try:
-            self._icon_image = tk.PhotoImage(file=str(REPO / "subrim_icon.png"))
+            self._icon_image = tk.PhotoImage(file=str(LOCAL / "subrim_icon.png"))
             self.iconphoto(True, self._icon_image)
         except tk.TclError as e:
             print(f"Ícone não carregado: {e}")
@@ -610,12 +212,89 @@ class App(tk.Tk):
         # Total de chunks lido ao vivo dos logs do pipeline: asset_name -> total
         self._live_chunk_total: dict = {}
 
+        # Conexão com o servidor (campo "Servidor" do topo).
+        self._prefs = _load_client_prefs()
+        self._server_var = tk.StringVar(value=self._prefs.get("server", ""))
+        self._attached_procs: set = set()   # ids remotos com sub-aba de log aberta
+
         self._setup_style()
         self._build_ui()
         self.protocol("WM_DELETE_WINDOW", self._on_close)
+        CLIENT.on_change(lambda ok, info: self.after(0, self._on_conn_change, ok, info))
+        CLIENT.set_host(self._server_var.get())
+        CLIENT.start_monitor()
         self._schedule_refresh()
         self._poll_log()
         self._nota_start_writer()
+
+    def report_callback_exception(self, exc, val, tb):
+        """Sem servidor, qualquer ação vira aviso na barra — não um traceback."""
+        if isinstance(val, RemoteError):
+            self._status_var.set("⚠ " + str(val).splitlines()[0][:90])
+            self._log_line(f"⚠️ {val}", "warning")
+            return
+        super().report_callback_exception(exc, val, tb)
+
+    # ── Conexão com o servidor ─────────────────────────────────────────────────
+    def _apply_server(self, _=None):
+        """Enter/sair do campo: aponta para o IP digitado e o guarda para a próxima vez."""
+        texto = self._server_var.get().strip()
+        if texto == self._prefs.get("server", "") and CLIENT.base:
+            return
+        self._prefs["server"] = texto
+        _save_client_prefs(self._prefs)
+        if not CLIENT.set_host(texto):
+            self._conn_icon.config(foreground="#E74C3C")
+            self._status_var.set("IP inválido" if texto else "Informe o IP do servidor")
+            return
+        self._conn_icon.config(foreground="#E67E22")   # tentando…
+        self._status_var.set(f"Conectando a {CLIENT.base}…")
+
+    def _on_conn_change(self, ok: bool, info: dict):
+        if ok:
+            self._conn_icon.config(foreground="#27AE60")
+            self._conn_tip = f"Conectado a {info.get('host', '?')} ({CLIENT.base})"
+            self._log_line(f"🔌 {self._conn_tip}", "success")
+            self._update_job_controls()
+            self._refresh_all()
+            self._attach_remote_jobs()
+        else:
+            self._conn_icon.config(foreground="#E74C3C")
+            self._conn_tip = ("Servidor não configurado" if not CLIENT.base
+                              else f"Servidor inacessível ({CLIENT.base})")
+            self._status_var.set(self._conn_tip)
+            if CLIENT.base:
+                self._log_line(f"🔌 {self._conn_tip}", "warning")
+
+    def _refresh_all(self):
+        """Recarrega as telas que vêm do servidor (ao conectar)."""
+        for fn in (self._refresh_llm_labels, self._apply_mode, self._refresh_sources,
+                   self._ytm_refresh, self._ds_refresh):
+            try:
+                fn()
+            except RemoteError:
+                return
+
+    def _attach_remote_jobs(self):
+        """Processos que já rodam no servidor (iniciados antes de abrir o app, ou
+        antes de a rede cair) ganham uma sub-aba de log e seguem acompanhados."""
+        def _work():
+            try:
+                lista = CLIENT.procs()
+            except RemoteError:
+                return
+            self.after(0, lambda: self._attach_jobs(lista))
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _attach_jobs(self, lista: list):
+        for info in lista:
+            if not info["running"] or info["id"] in self._attached_procs:
+                continue
+            job = self._new_job(info["label"])
+            self._log_line(f"↪ Retomando o acompanhamento (processo #{info['id']} no servidor)",
+                           "cmd", job)
+            self._follow(job, sr.RemoteProc(info["id"]))
+        self._update_job_controls()
 
     def _setup_style(self):
         s = ttk.Style(self)
@@ -631,6 +310,23 @@ class App(tk.Tk):
         bar = ttk.Frame(self, padding=(10, 5))
         bar.pack(fill=tk.X)
         ttk.Label(bar, text="Subrim Manager", font=("", 14, "bold")).pack(side=tk.LEFT)
+
+        # Servidor: IP (ou IP:porta) da máquina com o subrim_server. O ● fica
+        # verde conectado, laranja tentando e vermelho sem conexão.
+        srv = ttk.Frame(bar)
+        srv.pack(side=tk.LEFT, padx=(16, 0))
+        ttk.Label(srv, text="Servidor", foreground="#777").pack(side=tk.LEFT)
+        ent = ttk.Entry(srv, textvariable=self._server_var, width=16)
+        ent.pack(side=tk.LEFT, padx=(6, 4))
+        ent.bind("<Return>", self._apply_server)
+        ent.bind("<KP_Enter>", self._apply_server)
+        ent.bind("<FocusOut>", self._apply_server)
+        self._conn_tip = ""
+        self._conn_icon = ttk.Label(srv, text="●", font=("", 14),
+                                    foreground="#E67E22" if self._server_var.get() else "#E74C3C")
+        self._conn_icon.pack(side=tk.LEFT)
+        self._conn_icon.bind("<Button-1>", lambda _: self._conn_tip and
+                             self._status_var.set(self._conn_tip))
 
         self._status_var = tk.StringVar(value="Pronto")
         ttk.Label(bar, textvariable=self._status_var, foreground="#777").pack(side=tk.RIGHT, padx=8)
@@ -831,11 +527,14 @@ class App(tk.Tk):
         # LLM dos pares/traduções desta queima (também no batch e no text
         # pipeline): DeepSeek (API) ou modelo local no Ollama. Ver llm_provider.py.
         ttk.Label(detail, text="LLM", foreground="#888").pack(anchor=tk.W, pady=(6, 0))
+        # As duas rodam no servidor: esta máquina nunca chama a DeepSeek.
         self._llm_provider = tk.StringVar(value="deepseek")
-        for value, text in (("deepseek", "DeepSeek"),
-                            ("local", f"Local ({llm_provider.local_model()})")):
-            ttk.Radiobutton(detail, text=text, value=value, variable=self._llm_provider,
-                            command=self._refresh_llm_status).pack(anchor=tk.W, pady=(1, 1))
+        self._llm_radios = {}
+        for value, text in (("deepseek", "DeepSeek"), ("local", "Local (Ollama)")):
+            rb = ttk.Radiobutton(detail, text=text, value=value, variable=self._llm_provider,
+                                 command=self._refresh_llm_status)
+            rb.pack(anchor=tk.W, pady=(1, 1))
+            self._llm_radios[value] = rb
         self._llm_status = tk.StringVar(value="")
         ttk.Label(detail, textvariable=self._llm_status, foreground="#888",
                   wraplength=210, justify=tk.LEFT).pack(anchor=tk.W)
@@ -978,7 +677,7 @@ class App(tk.Tk):
     def _refresh_texts(self, *_):
         sel = self._text_selected["name"] if self._text_selected else None
         self._txt_tree.delete(*self._txt_tree.get_children())
-        texts = list_texts()
+        texts = core.list_texts() if CLIENT.connected else []
         for t in texts:
             status = "Arquivado ✓" if t["archived"] else "Aguardando"
             tag = "archived" if t["archived"] else "pending"
@@ -1019,7 +718,7 @@ class App(tk.Tk):
         if not self._text_selected:
             return
         name = self._text_selected["name"]
-        self._launch([sys.executable, str(REPO / "text_pipeline.py"), name],
+        self._launch([PY, str(REPO / "text_pipeline.py"), name],
                      label=f"Texto: {name}", pause_rate=0.0)
 
     def _force_text_selected(self):
@@ -1031,11 +730,21 @@ class App(tk.Tk):
                 f"Reprocessar '{name}' do zero?\n"
                 f"O warehouse/text/{name}_base.txt atual será descartado."):
             self._launch(
-                [sys.executable, str(REPO / "text_pipeline.py"), name, "--force"],
+                [PY, str(REPO / "text_pipeline.py"), name, "--force"],
                 label=f"Texto (force): {name}", pause_rate=0.0)
 
     def _open_text_folder(self):
-        subprocess.Popen(["open", str(TEXTS)])
+        self._show_server_path(TEXTS)
+
+    def _show_server_path(self, path):
+        """As pastas moram no servidor: mostra o caminho de lá e o copia."""
+        repo = CLIENT.info.get("repo", "")
+        full = str(path) if str(path).startswith("/") else f"{repo}/{path}".rstrip("/.")
+        self.clipboard_clear()
+        self.clipboard_append(full)
+        messagebox.showinfo("Pasta no servidor",
+                            f"Esta pasta fica no servidor ({CLIENT.info.get('host', '?')}):\n\n"
+                            f"{full}\n\nCaminho copiado para a área de transferência.")
 
     # ── Warehouse Tab ──────────────────────────────────────────────────────────
     def _build_warehouse_tab(self):
@@ -1180,7 +889,7 @@ class App(tk.Tk):
 
         self._wh_refresh()
 
-    def _wh_root(self) -> Path:
+    def _wh_root(self) -> RemotePath:
         """Diretório varrido pela aba Warehouse no modo atual."""
         return TEXT_WAREHOUSE if self._is_text_mode() else WAREHOUSE
 
@@ -1195,44 +904,18 @@ class App(tk.Tk):
         self._wh_selected_base = None
         self._wh_detail.set("Selecione um arquivo para ver os detalhes.")
 
-        root = self._wh_root()
-        if not root.exists():
-            self._wh_count_var.set(f"{root.name}/ não encontrada")
+        if not CLIENT.connected:
+            self._wh_count_var.set("sem servidor")
             return
-
-        bases = list(root.glob("*_base.txt"))
         texto = self._is_text_mode()
-        # (base, nome legível, status, tag) de cada item.
-        rows = []
-        complete = archived = 0
-        for bf in bases:
-            prefix = bf.stem.replace("_base", "")
-            # No modo Texto todo base listado JÁ é o arquivo arquivado — não há
-            # vídeo nem cache de frames a considerar, então o status é fixo.
-            if texto:
-                status, tag = "Arquivado", "archived"
-            else:
-                # vídeo correspondente: mesmo prefixo sem _base, extensão .mp4
-                has_video = any(True for _ in WAREHOUSE.glob(f"{prefix}.mp4"))
-                fdir = _wh_frames_dir(prefix)
-                complete += has_video
-                archived += fdir is not None
-                if has_video:
-                    status, tag = "Completo", "ok"
-                    if (WAREHOUSE / f"{prefix}_periods.txt").exists():
-                        status = "Completo · períodos"
-                elif fdir is not None:
-                    status, tag = "Arquivado", "archived"
-                    if fdir.parent == FRAMES_PERIODS:
-                        status = "Arquivado · períodos"
-                else:
-                    status, tag = "Falta vídeo", "missing"
-            rows.append((bf, _wh_readable_name(bf.stem), status, tag))
-
-        by_stem = {row[0].stem.replace("_base", ""): row for row in rows}
-        groups = _wh_group_list(list(by_stem))
-        for key, nome, stems in groups:
-            members = [by_stem[st] for st in stems]
+        data = core.wh_rows(texto)
+        if data["missing_root"]:
+            self._wh_count_var.set(f"{data['missing_root']}/ não encontrada")
+            return
+        groups = data["groups"]
+        complete, archived = data["complete"], data["archived"]
+        bases = range(data["n_bases"])   # só a contagem é usada abaixo
+        for key, nome, members in groups:
             gid = f"grp:{key or ''}"
             n_ok  = sum(1 for r in members if r[3] == "ok")
             n_arq = sum(1 for r in members if r[3] == "archived")
@@ -1265,7 +948,7 @@ class App(tk.Tk):
             filhos = tree.get_children(gid)
             for iid in filhos:
                 if gid in sel or iid in sel:
-                    out.append(Path(iid))
+                    out.append(RemotePath(iid))
         return out
 
     def _wh_extend_selection(self, direction: int):
@@ -1282,13 +965,8 @@ class App(tk.Tk):
 
     def _wh_archivable_selection(self):
         """Bases selecionadas que ainda têm mp4 original (candidatas a arquivar)."""
-        out = []
-        for bf in self._wh_selected_bases():
-            prefix = bf.stem.replace("_base", "")
-            mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
-            if mp4:
-                out.append((bf, prefix, mp4))
-        return out
+        bases = self._wh_selected_bases()
+        return core.wh_archivable(bases) if bases else []
 
     def _wh_update_archive_btn(self):
         """Habilita/rotula o botão conforme a seleção (1 ou vários com mp4)."""
@@ -1316,50 +994,27 @@ class App(tk.Tk):
         if item.startswith("grp:"):
             self._wh_show_group(item)
             return
-        bf = Path(item)
-        prefix = bf.stem.replace("_base", "")
+        bf = RemotePath(item)
         self._wh_selected_base = bf
 
-        # Fonte: o mp4 no modo Vídeo, o txt de origem no modo Texto.
-        if self._is_text_mode():
-            origem = TEXTS / f"{prefix}.txt"
-            fonte_rot = "Texto  "
-            fonte_line = origem.name if origem.exists() else "— (txt removido)"
-        else:
-            fonte_rot = "Vídeo  "
-            mp4 = next(WAREHOUSE.glob(f"{prefix}.mp4"), None)
-            if mp4:
-                fonte_line = mp4.name
-            elif _wh_is_archived(prefix):
-                fdir = _wh_frames_dir(prefix)
-                por = " por período" if fdir and fdir.parent == FRAMES_PERIODS else ""
-                n_frames = len(list(fdir.glob("line*.jpg"))) if fdir else 0
-                fonte_line = f"— (arquivado{por}: {n_frames} frames)"
-            else:
-                fonte_line = "—"
-
-        periods_file = bf.with_name(f"{prefix}_periods.txt")
-        if periods_file.exists():
-            n_per = sum(1 for _ in periods_file.open(encoding="utf-8"))
-            periods_line = f"{periods_file.name} ({n_per} frase(s))"
-        else:
-            periods_line = "— (não gerado; o arquivamento gera)"
-
-        # análise (em thread para não travar a UI)
+        # análise (em thread para não travar a UI) — fonte, períodos e a
+        # frequência de palavras vêm todos do servidor.
         self._wh_detail.set("Analisando…")
         self._wh_freq_tree.delete(*self._wh_freq_tree.get_children())
-
-        # Maestria e vocabulário lidos aqui, na thread da GUI (usam o cache da
-        # sessão), para que a thread de análise não faça I/O de rede.
-        mastered = word_vocab.mastered_words()
-        vocab = word_vocab.vocabulary()
+        texto = self._is_text_mode()
 
         def _work():
-            stats = _wh_analyse(bf, mastered, vocab)
+            try:
+                info = core.wh_select_info(bf, texto)
+                stats = core.wh_analyse(bf)
+            except RemoteError as e:
+                erro = f"Erro: {e}"
+                self.after(0, lambda: self._wh_detail.set(erro))
+                return
             detail = (
                 f"Arquivo : {bf.name}\n"
-                f"{fonte_rot} : {fonte_line}\n"
-                f"Períodos: {periods_line}\n"
+                f"{info['fonte_rot']} : {info['fonte_line']}\n"
+                f"Períodos: {info['periods_line']}\n"
                 f"\n"
                 f"Palavras distintas : {stats['total_words']}\n"
                 f"  Conhecidas (nuas ou dominadas) : {stats['known']}\n"
@@ -1377,7 +1032,7 @@ class App(tk.Tk):
         iid = self._wh_tree.identify_row(event.y)
         if not iid or iid.startswith("grp:"):
             return None
-        prefix = Path(iid).stem.replace("_base", "")
+        prefix = RemotePath(iid).stem.replace("_base", "")
         self._col_asset_filter = {prefix}
         self._col_update_filter_btn()
         self._col_word.set("1")
@@ -1417,7 +1072,6 @@ class App(tk.Tk):
         """
         if self._wh_archiving:
             return
-        import periods_base
 
         bases = self._wh_selected_bases()
         if not bases:
@@ -1430,8 +1084,7 @@ class App(tk.Tk):
             feito = pulado = erro = 0
             for bf in bases:
                 prefix = bf.stem.replace("_base", "")
-                cache = _wh_frames_dir(prefix)
-                if cache is not None and cache.parent == FRAMES_PERIODS:
+                if core.wh_frames_periods(prefix):
                     self._log_q.put((
                         f"    ↷ '{prefix}' já foi arquivado por períodos — mantido "
                         f"(os frames estão numerados pelo arquivo atual).", "warning"))
@@ -1440,7 +1093,7 @@ class App(tk.Tk):
                 try:
                     res = periods_base.generate(bf)
                     self._log_q.put((
-                        "    ✓ " + periods_base.format_stats(Path(res["path"]).name, res),
+                        "    ✓ " + periods_base.format_stats(RemotePath(res["path"]).name, res),
                         "success"))
                     feito += 1
                 except Exception as e:  # noqa: BLE001
@@ -1611,7 +1264,7 @@ class App(tk.Tk):
 
     def _wh_pick_drive(self):
         """HD externo de destino. None se não há (já avisa) ou se cancelou."""
-        drives = _external_drives()
+        drives = core.external_drives()
         if not drives:
             messagebox.showerror(
                 "Expurgar",
@@ -1637,7 +1290,7 @@ class App(tk.Tk):
         chosen = {"v": None}
 
         def _ok():
-            chosen["v"] = Path(var.get())
+            chosen["v"] = RemotePath(var.get())
             dlg.destroy()
 
         btns = ttk.Frame(frm)
@@ -1680,7 +1333,7 @@ class App(tk.Tk):
 
         total = sum(n for _, _, n in plan)
         try:
-            livre = shutil.disk_usage(drive).free
+            livre = core.disk_free(drive)
         except OSError as e:
             messagebox.showerror("Expurgar", f"Não foi possível ler o HD {drive}:\n{e}")
             return
@@ -1697,10 +1350,8 @@ class App(tk.Tk):
                       else "arquivado")
             linhas.append(f"“{_wh_readable_name(a)}” ({estado}, {n / 1024**2:.0f} MB)")
             if len(plan) == 1:
-                linhas += [f"    • {p.relative_to(WAREHOUSE)}"
-                           + (f"/ ({sum(1 for f in p.rglob('*') if f.is_file())} arquivo(s))"
-                              if p.is_dir() else "")
-                           for p in paths]
+                linhas += [f"    • {rel}" + (f"/ ({n} arquivo(s))" if n is not None else "")
+                           for rel, n in core.path_summary(paths)]
         if len(plan) > 5:
             linhas.append(f"… e mais {len(plan) - 5} episódio(s)")
         if not messagebox.askyesno(
@@ -1837,12 +1488,7 @@ class App(tk.Tk):
             return
 
         def _scan():
-            status = {}
-            for bf in hd.glob("*_base.txt"):
-                a = bf.name[:-len("_base.txt")]
-                status[a] = ("Já no computador" if (WAREHOUSE / bf.name).exists()
-                             else cb.remote_status(hd, a))
-            return status
+            return core.wh_restore_status(hd)
 
         RestoreDialog(self, hd, title="Restaurar do HD", scan=_scan,
                       size=lambda a: cb.footprint_size(cb.asset_footprint(a, hd)),
@@ -1851,7 +1497,6 @@ class App(tk.Tk):
 
     def _wh_restore_run(self, hd: Path, plan: list, delete_src: bool):
         """Restaura em thread. ``plan`` = [(asset, bytes)]."""
-        import collection_builder as cb
         self._wh_restoring = True
         self._wh_update_archive_btn()
         acao = "apagando do HD" if delete_src else "mantendo no HD"
@@ -2287,23 +1932,23 @@ class App(tk.Tk):
                   foreground="#888").pack(side=tk.LEFT, padx=10)
 
     def _col_import(self):
-        """Importa collection_builder de forma preguiçosa (cv2/PIL podem faltar)."""
+        """O collection_builder do servidor (renderiza com o OpenCV de lá; aqui
+        só o Pillow, para exibir). None — e avisa — se não há conexão."""
         try:
-            import collection_builder  # noqa: F401
             from PIL import Image, ImageTk  # noqa: F401
-            return collection_builder
         except Exception as e:  # noqa: BLE001
             messagebox.showerror("Dependência ausente",
-                                 f"Não foi possível carregar o módulo de coleções:\n{e}\n\n"
-                                 "Verifique se opencv-python e Pillow estão instalados.")
+                                 f"Não foi possível carregar o Pillow:\n{e}\n\n"
+                                 "Instale com: pip install Pillow")
             return None
+        if not CLIENT.connected:
+            self._status_var.set("⚠ Sem conexão com o servidor")
+            return None
+        return cb
 
     def _col_available_assets(self) -> list:
         """Lista de assets disponíveis (a partir dos *_base.txt do warehouse do modo)."""
-        root = self._wh_root()
-        if not root.exists():
-            return []
-        return sorted(b.stem.replace("_base", "") for b in root.glob("*_base.txt"))
+        return core.wh_available_assets(self._is_text_mode())
 
     # ── Nota: persistência serializada ──────────────────────────────────────────
     def _nota_start_writer(self):
@@ -2316,7 +1961,6 @@ class App(tk.Tk):
         neutraliza o estado intermediário de digitar "1" e depois "0" (=10).
         """
         def _work():
-            import collection_builder as cb
             while True:
                 try:
                     item = self._nota_q.get()
@@ -2384,11 +2028,10 @@ class App(tk.Tk):
         m = self._nota_current_match()
         if m is None:
             return
-        import collection_builder as cb
         base = m.get("nota")
         if base is None:
-            base = cb.NOTA_DEFAULT
-        novo = cb.clamp_nota(base + delta)
+            base = NOTA_DEFAULT
+        novo = clamp_nota(base + delta)
         self._nota_typing = ""
         self._nota_persist(m, novo)
         self._nota_show(novo)
@@ -2398,7 +2041,6 @@ class App(tk.Tk):
         m = self._nota_current_match()
         if m is None:
             return
-        import collection_builder as cb
         agora = time.monotonic()
         # Só continua o número anterior se o dígito veio logo em seguida.
         if self._nota_typing == "1" and digit == "0" and (agora - self._nota_typing_at) < 1.0:
@@ -2406,7 +2048,7 @@ class App(tk.Tk):
         else:
             self._nota_typing = digit
         self._nota_typing_at = agora
-        novo = cb.clamp_nota(int(self._nota_typing))
+        novo = clamp_nota(int(self._nota_typing))
         self._nota_persist(m, novo)
         self._nota_show(novo)
 
@@ -2445,7 +2087,7 @@ class App(tk.Tk):
 
         def _work():
             try:
-                n = word_vocab.reload_mastered()
+                n = core.reload_mastered()
                 self._log_q.put((f"✓ vocabulário recarregado: {n} palavra(s) dominada(s)",
                                  "success"))
             except Exception as e:  # noqa: BLE001
@@ -2679,8 +2321,7 @@ class App(tk.Tk):
             return
         self._nota_typing = ""
         if m.get("nota") is None:
-            import collection_builder as cb
-            self._nota_persist(m, cb.NOTA_DEFAULT)
+            self._nota_persist(m, NOTA_DEFAULT)
         self._nota_show(m.get("nota"))
 
     def _col_sort(self, col: str):
@@ -2855,8 +2496,11 @@ class App(tk.Tk):
         self._col_audio_btn.config(state=tk.DISABLED, text="⏳")
 
         def _work():
+            # O clipe é gerado/lido no servidor e baixado para um temporário
+            # local só para tocar (some no próximo clique ou ao fechar).
             try:
-                path = cb.audio_clip_for_match(m)
+                remoto = cb.audio_clip_for_match(m)
+                path = self._col_audio_local(remoto) if remoto is not None else None
             except Exception as e:  # noqa: BLE001
                 path = None
                 self._log_q.put((f"Erro ao extrair áudio: {e}", "error"))
@@ -2876,6 +2520,20 @@ class App(tk.Tk):
                 "deste recurso existir).")
             return
         self._col_play_path(path)
+
+    def _col_audio_local(self, remoto) -> Path:
+        data = CLIENT.fetch(remoto)
+        old = getattr(self, "_col_audio_tmp", None)
+        fd, tmp = tempfile.mkstemp(prefix="subrim_audio_", suffix=remoto.suffix or ".mp3")
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        self._col_audio_tmp = tmp
+        if old:
+            try:
+                os.unlink(old)
+            except OSError:
+                pass
+        return Path(tmp)
 
     def _col_play_path(self, path):
         if self._col_audio_proc is not None and self._col_audio_proc.poll() is None:
@@ -3262,11 +2920,15 @@ class App(tk.Tk):
         """
         cb = self._col_import()
         itens, n_zero, n_sem_cjk = [], 0, 0
+        candidatas = []
         for m in self._col_matches:
             if skip_zero and m.get("nota") == 0:
                 n_zero += 1
                 continue
-            if cb and not cb.has_clean_sentence(m):
+            candidatas.append(m)
+        limpas = core.clean_flags(candidatas) if cb else [True] * len(candidatas)
+        for m, limpa in zip(candidatas, limpas):
+            if not limpa:
                 n_sem_cjk += 1
                 continue
             itens.append(m)
@@ -3351,8 +3013,9 @@ class App(tk.Tk):
             return
 
         if messagebox.askyesno("Concluído",
-                               f"Coleção salva em {saida.name}.\nAbrir a pasta?"):
-            subprocess.Popen(["open", str(saida)])
+                               f"Coleção salva no servidor em {saida.name}.\n"
+                               "Mostrar o caminho?"):
+            self._show_server_path(saida)
 
     def _col_bundle_run(self, pasta):
         """Roda o make_bundle.py na pasta da coleção.
@@ -3361,7 +3024,7 @@ class App(tk.Tk):
         blocos de 150, então o ditado quebra considerando a coleção toda.
         """
         self._launch(
-            [sys.executable, str(REPO / "dictation" / "make_bundle.py"), str(pasta)],
+            [PY, str(REPO / "dictation" / "make_bundle.py"), str(pasta)],
             label=f"Ditado: {pasta.name}",
             pause_rate=0.0,
         )
@@ -3465,23 +3128,18 @@ class App(tk.Tk):
         self._ds_refresh()
 
     def _ds_refresh(self):
-        """Recarrega as chamadas do deepseek_debug.log (mantém as últimas 500)."""
-        records = []
-        if DEEPSEEK_LOG.exists():
-            try:
-                with open(DEEPSEEK_LOG, "r", encoding="utf-8") as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            records.append(json.loads(line))
-                        except Exception:
-                            continue
-            except Exception as e:  # noqa: BLE001
-                self._ds_count.set(f"erro ao ler log: {e}")
-                return
-        records = records[-500:]
+        """Recarrega as chamadas do deepseek_debug.log do servidor (últimas 500).
+
+        O log é escrito pelos processos do servidor — esta máquina nunca chama a
+        DeepSeek; aqui só se lê o registro."""
+        if not CLIENT.connected:
+            self._ds_count.set("sem servidor")
+            return
+        try:
+            records = core.ds_records(500)
+        except RemoteError as e:
+            self._ds_count.set(f"erro ao ler log: {e}")
+            return
         self._ds_records = records
 
         # Preserva seleção pelo índice atual
@@ -3521,14 +3179,15 @@ class App(tk.Tk):
             widget.insert(tk.END, content)
 
     def _ds_clear(self):
-        if not DEEPSEEK_LOG.exists():
+        if not self._ds_records:
             self._ds_refresh()
             return
         if messagebox.askyesno("Limpar log",
-                               f"Apagar {DEEPSEEK_LOG.name}?\nIsso remove o histórico de chamadas."):
+                               "Apagar deepseek_debug.log no servidor?\n"
+                               "Isso remove o histórico de chamadas."):
             try:
-                DEEPSEEK_LOG.unlink()
-            except OSError as e:
+                core.ds_clear()
+            except RemoteError as e:
                 messagebox.showerror("Erro", f"Não foi possível apagar: {e}")
             for w in (self._ds_prompt, self._ds_response):
                 w.config(state=tk.NORMAL)
@@ -3536,127 +3195,6 @@ class App(tk.Tk):
             self._ds_refresh()
 
     # ── Asset logic ────────────────────────────────────────────────────────────
-    @staticmethod
-    def _video_duration(video: Path) -> float:
-        """Duração do vídeo em segundos via ffprobe (rápido, sem decodificar)."""
-        try:
-            out = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration",
-                 "-of", "default=nw=1:nk=1", str(video)],
-                capture_output=True, text=True, timeout=30,
-            )
-            return float(out.stdout.strip())
-        except Exception:
-            return 0.0
-
-    @staticmethod
-    def _source_video(asset_path: Path):
-        """Vídeo de referência do asset: o chromecast do ``_sub`` se existir,
-        senão o mp4 original. Retorna ``None`` se não houver vídeo."""
-        sub = asset_path.parent / f"{asset_path.name}_sub"
-        if sub.exists():
-            cc = sorted(sub.glob("*_chromecast.mp4"))
-            if cc:
-                return cc[0]
-        return App._original_video(asset_path)
-
-    @staticmethod
-    def _original_video(asset_path: Path):
-        """O mp4 original do asset (sem os derivados do pipeline), ou ``None``."""
-        for cand in sorted(asset_path.glob("*.mp4")):
-            if not any(s in cand.name for s in
-                       ("_chromecast", "_merged", "_processed", "_chunk")):
-                return cand
-        return None
-
-    def _compute_chunk_total(self, asset_path: Path):
-        """Calcula quantos chunks o split vai gerar (total previsto) para o asset.
-
-        Usa o mesmo algoritmo do split_video (subtitle-boundary aware), então o
-        número bate com o que o pipeline realmente produz. Retorna ``None`` se não
-        for possível determinar (sem base ou sem vídeo)."""
-        bases = list(asset_path.glob("*base.txt"))
-        if not bases:
-            return None
-        base = bases[0]
-
-        video = self._source_video(asset_path)
-        if video is None:
-            return None
-
-        dur = self._video_duration(video)
-        if dur <= 0:
-            return None
-
-        try:
-            from split_video import parse_base_file, create_video_chunks
-            subtitles = parse_base_file(str(base))
-            return len(create_video_chunks(subtitles, dur))
-        except Exception:
-            return None
-
-    def _maybe_fill_totals(self, assets: list):
-        """Preenche o cache de totais previstos em background, sem travar a UI."""
-        pending = []
-        for a in assets:
-            if not a["has_base"]:
-                continue
-            name = a["name"]
-            bases = list(a["path"].glob("*base.txt"))
-            if not bases:
-                continue
-            mtime = bases[0].stat().st_mtime
-            cached = self._chunk_total_cache.get(name)
-            if cached is None or cached[0] != mtime:
-                pending.append((name, a["path"], mtime))
-
-        if not pending or self._total_fill_running:
-            return
-        self._total_fill_running = True
-
-        def worker():
-            try:
-                for name, path, mtime in pending:
-                    total = self._compute_chunk_total(path)
-                    self._chunk_total_cache[name] = (mtime, total)
-            finally:
-                self._total_fill_running = False
-                self.after(0, self._refresh_assets)
-
-        threading.Thread(target=worker, daemon=True).start()
-
-    def _maybe_fill_durations(self, assets: list):
-        """Preenche o cache de durações em background (um ffprobe por vídeo)."""
-        pending = []
-        for a in assets:
-            if not a["has_video"]:
-                continue
-            video = self._source_video(a["path"])
-            if video is None:
-                continue
-            try:
-                mtime = video.stat().st_mtime
-            except OSError:
-                continue
-            cached = self._duration_cache.get(a["name"])
-            if cached is None or cached[0] != video or cached[1] != mtime:
-                pending.append((a["name"], video, mtime))
-
-        if not pending or self._duration_fill_running:
-            return
-        self._duration_fill_running = True
-
-        def worker():
-            try:
-                for name, video, mtime in pending:
-                    secs = self._video_duration(video)
-                    self._duration_cache[name] = (video, mtime, secs)
-            finally:
-                self._duration_fill_running = False
-                self.after(0, self._refresh_assets)
-
-        threading.Thread(target=worker, daemon=True).start()
-
     def _format_duration(self, name: str) -> str:
         """Coluna Duração: ``M:SS`` ou ``H:MM:SS``; ``—`` se ainda desconhecida."""
         cached = self._duration_cache.get(name)
@@ -3670,7 +3208,23 @@ class App(tk.Tk):
         flt = self._filter_var.get().strip().lower()
         inc = self._only_inc.get()
 
-        assets = list_assets(self._drive_upload_on.get())
+        if not CLIENT.connected:
+            self._count_var.set("sem servidor")
+            return
+        # Duração e total previsto de chunks vêm prontos do servidor (ffprobe
+        # lá, em cache); enquanto calcula, a lista volta a ser pedida em breve.
+        res = core.list_assets_full(self._drive_upload_on.get())
+        assets = res["assets"]
+        for a in assets:
+            self._duration_cache[a["name"]] = (None, None, a["duration"] or 0)
+            self._chunk_total_cache[a["name"]] = (None, a["chunk_total"])
+        if res["extras_pending"] and not self._total_fill_running:
+            self._total_fill_running = True
+
+            def _again():
+                self._total_fill_running = False
+                self._refresh_assets()
+            self.after(3000, _again)
         if flt:
             assets = [a for a in assets if flt in a["name"].lower()]
         if inc:
@@ -3710,8 +3264,6 @@ class App(tk.Tk):
         complete = sum(1 for a in assets if a["phase"] == "complete")
         self._count_var.set(f"{complete}/{total} completos")
 
-        self._maybe_fill_totals(assets)
-        self._maybe_fill_durations(assets)
 
     def _chunk_total_for(self, name: str):
         """Total previsto de chunks: prioriza o valor lido ao vivo dos logs."""
@@ -3727,11 +3279,12 @@ class App(tk.Tk):
             return
         if len(sel) > 1:
             self._selected = None
-            self._selected_many = [detect_status(ASSETS / n, self._drive_upload_on.get()) for n in sel]
+            self._selected_many = [core.detect_status(ASSETS / n, self._drive_upload_on.get())
+                                   for n in sel]
             self._update_detail_multi(self._selected_many)
             return
         self._selected_many = []
-        s = detect_status(ASSETS / sel[0], self._drive_upload_on.get())
+        s = core.detect_status(ASSETS / sel[0], self._drive_upload_on.get())
         self._selected = s
         self._update_detail(s)
 
@@ -3826,7 +3379,7 @@ class App(tk.Tk):
                     or (not self._drive_upload_on.get() and a.get("merged")))
 
     def _cleanup_cmd(self, a: dict) -> list:
-        cmd = [sys.executable, str(REPO / "cleanup_asset.py"), a["name"]]
+        cmd = [PY, str(REPO / "cleanup_asset.py"), a["name"]]
         if not a.get("uploaded"):
             cmd.append("--skip-drive")
         return cmd
@@ -3835,7 +3388,7 @@ class App(tk.Tk):
         if self._selected_many:
             names = [a["name"] for a in self._selected_many if a["has_video"]]
             self._run_queue([
-                ([sys.executable, str(REPO / "video_burner.py"), n, "--exact"],
+                ([PY, str(REPO / "video_burner.py"), n, "--exact"],
                  f"Pipeline: {n}")
                 for n in names
             ])
@@ -3843,7 +3396,7 @@ class App(tk.Tk):
         if not self._selected:
             return
         self._launch(
-            [sys.executable, str(REPO / "video_burner.py"), self._selected["name"], "--exact"],
+            [PY, str(REPO / "video_burner.py"), self._selected["name"], "--exact"],
             label=f"Pipeline: {self._selected['name']}",
         )
 
@@ -3853,7 +3406,7 @@ class App(tk.Tk):
         name = self._selected["name"]
         if messagebox.askyesno("Confirmar", f"Reprocessar '{name}' do zero?\nIsso irá sobrescrever os arquivos existentes."):
             self._launch(
-                [sys.executable, str(REPO / "video_burner.py"), name, "--exact", "--force"],
+                [PY, str(REPO / "video_burner.py"), name, "--exact", "--force"],
                 label=f"Pipeline (force): {name}",
             )
 
@@ -3863,7 +3416,7 @@ class App(tk.Tk):
             messagebox.showwarning("Aviso", "Informe um prefixo para o batch.\nEx: 'onibus' processa todos os assets onibus*")
             return
         self._launch(
-            [sys.executable, str(REPO / "video_burner.py"), prefix],
+            [PY, str(REPO / "video_burner.py"), prefix],
             label=f"Batch: {prefix}*",
             pause_rate=0.0,  # batch nunca usa pausas, independente do checkbox
         )
@@ -3966,25 +3519,13 @@ class App(tk.Tk):
 
     def _open_folder(self):
         if self._selected:
-            subprocess.Popen(["open", str(self._selected["path"])])
-
-    def _asset_video(self, name: str):
-        """Vídeo a abrir: o merged se o asset já foi processado, senão o original."""
-        path, sub = ASSETS / name, ASSETS / f"{name}_sub"
-        if sub.exists():
-            merged = (sorted(sub.glob("*_chromecast_merged.mp4"))
-                      or sorted(sub.glob("*_merged.mp4")))
-            if merged:
-                return merged[0]
-        merged = sorted(path.glob("*_merged.mp4"))
-        if merged:
-            return merged[0]
-        return self._original_video(path)
+            self._show_server_path(self._selected["path"])
 
     def _open_asset_video(self, name: str):
-        video = self._asset_video(name)
+        """Abre o vídeo do servidor em streaming (navegador), sem copiá-lo para cá."""
+        video = core.asset_video(name)
         if video:
-            subprocess.Popen(["open", str(video)])
+            _open_url(CLIENT.file_url(video))
         else:
             self._log_line(f"⚠️ {name}: nenhum vídeo para abrir", "warning")
 
@@ -4013,16 +3554,16 @@ class App(tk.Tk):
             self._tree.selection_set(row)
             self._tree.focus(row)
             self._selected_many = []
-            self._selected = detect_status(ASSETS / row, self._drive_upload_on.get())
+            self._selected = core.detect_status(ASSETS / row, self._drive_upload_on.get())
             self._update_detail(self._selected)
 
             # Recursivo (ao contrário de has_video): pastas como a do youtube_monitor
             # guardam os mp4 uma subpasta abaixo (uma por canal), não soltos aqui.
-            has_any_mp4 = next(self._selected["path"].rglob("*.mp4"), None) is not None
+            has_any_mp4 = core.has_any_mp4(self._selected["path"])
             self._assets_menu.entryconfigure(
                 0, state=tk.NORMAL if has_any_mp4 else tk.DISABLED)
             self._assets_menu.entryconfigure(
-                1, state=tk.NORMAL if self._asset_video(row) else tk.DISABLED)
+                1, state=tk.NORMAL if core.asset_video(row) else tk.DISABLED)
             self._assets_menu.entryconfigure(3, label="Excluir...")
             self._assets_menu.entryconfigure(4, label="Expurgar...")
         self._assets_menu.entryconfigure(
@@ -4033,7 +3574,7 @@ class App(tk.Tk):
             self._assets_menu.grab_release()
         return "break"
 
-    def _whisper_python(self) -> Path:
+    def _whisper_python(self) -> RemotePath:
         return REPO / "whisper_env_py313" / "bin" / "python3"
 
     def _transcrever_selected(self):
@@ -4053,7 +3594,7 @@ class App(tk.Tk):
                 "pasta própria (nome = nome do vídeo) antes de transcrever."):
             return
         self._launch(
-            [str(py), str(REPO / "transcribe_asset.py"), name],
+            [WHISPER_PY, str(REPO / "transcribe_asset.py"), name],
             label=f"Transcrever: {name}",
             on_done=self._refresh_assets,
         )
@@ -4085,7 +3626,6 @@ class App(tk.Tk):
                 "Aguarde ou pare antes de expurgar:\n"
                 + "\n".join(f"  • {l}" for l in ocupados))
             return
-        import collection_builder as cb
         drive = self._wh_pick_drive()
         if drive is None:
             return
@@ -4100,7 +3640,7 @@ class App(tk.Tk):
             return
         total = sum(b for _, b in plan)
         try:
-            livre = shutil.disk_usage(drive).free
+            livre = core.disk_free(drive)
         except OSError as e:
             messagebox.showerror("Expurgar", f"Não foi possível ler o HD {drive}:\n{e}")
             return
@@ -4149,7 +3689,6 @@ class App(tk.Tk):
         if self._assets_hd_busy:
             messagebox.showinfo("Restaurar", "Aguarde o expurgo/restauro de assets em andamento.")
             return
-        import collection_builder as cb
         drive = self._wh_pick_drive()
         if drive is None:
             return
@@ -4160,11 +3699,9 @@ class App(tk.Tk):
 
         def _scan():
             # Uma listagem só, sem stat por asset: o HD USB pode ser lento.
-            with os.scandir(hd) as it:
-                nomes = [e.name for e in it
-                         if e.is_dir() and not e.name.endswith("_sub")]
-            return {n: "Já no computador" if (ASSETS / n).exists() else "Só no HD"
-                    for n in nomes}
+            nomes = core.hd_asset_names(hd)
+            locais = {a.name for a in ASSETS.iterdir()}
+            return {n: "Já no computador" if n in locais else "Só no HD" for n in nomes}
 
         RestoreDialog(self, hd, title="Restaurar assets do HD", scan=_scan,
                       size=lambda n: cb.footprint_size(cb.raw_asset_paths(n, hd)),
@@ -4172,7 +3709,6 @@ class App(tk.Tk):
                       run=lambda plan, delete: self._assets_restore_run(hd, plan, delete))
 
     def _assets_restore_run(self, hd: Path, plan: list, delete_src: bool):
-        import collection_builder as cb
         self._assets_hd_busy = True
         acao = "apagando do HD" if delete_src else "mantendo no HD"
         self._log_line(f"📥 Restauro de assets: {len(plan)} de {hd} ({acao})", "cmd")
@@ -4218,17 +3754,11 @@ class App(tk.Tk):
         if not messagebox.askyesno("Excluir asset" if len(names) == 1 else "Excluir assets",
                                    msg, icon=messagebox.WARNING, default=messagebox.NO):
             return
+        # Finder do servidor em vez de rmtree: vai para a Lixeira de lá, recuperável.
         failed = set()
-        for p in targets:
-            # Finder em vez de shutil.rmtree: vai para a Lixeira, recuperável.
-            path = str(p.resolve()).replace("\\", "\\\\").replace('"', '\\"')
-            res = subprocess.run(
-                ["osascript", "-e",
-                 f'tell application "Finder" to delete POSIX file "{path}"'],
-                capture_output=True, text=True)
-            if res.returncode != 0:
-                failed.add(p.name)
-                self._log_line(f"❌ Não foi possível excluir {p}: {res.stderr.strip()}", "error")
+        for nome, erro in core.trash(targets):
+            failed.add(nome)
+            self._log_line(f"❌ Não foi possível excluir {nome}: {erro}", "error")
         for n in names:
             if n not in failed and f"{n}_sub" not in failed:
                 self._log_line(f"🗑 Excluído: {n}", "success")
@@ -4243,7 +3773,7 @@ class App(tk.Tk):
     # ── Source / download logic ────────────────────────────────────────────────
     def _refresh_sources(self):
         self._src_tree.delete(*self._src_tree.get_children())
-        for f in list_sources():
+        for f in (core.list_sources() if CLIENT.connected else []):
             self._src_tree.insert("", tk.END, iid=f["name"],
                                   values=(f["name"], f["episodes"], f["mtime"]))
 
@@ -4273,7 +3803,7 @@ class App(tk.Tk):
         if not name:
             messagebox.showwarning("Aviso", "Informe o Nome do asset (ex.: clone45)")
             return
-        cmd = [sys.executable, str(REPO / "youtube_downloader.py"), url,
+        cmd = [PY, str(REPO / "youtube_downloader.py"), url,
                "--name", name,
                "--browser", self._yt_browser.get()]
         if self._yt_subs.get():
@@ -4289,7 +3819,7 @@ class App(tk.Tk):
             messagebox.showwarning("Aviso", "Preencha URL e Nome base")
             return
         SOURCE.mkdir(exist_ok=True)
-        cmd = [_scraper_python(), str(REPO / "scrape_globoplay_episodes.py"),
+        cmd = [SCRAPER_PY, str(REPO / "scrape_globoplay_episodes.py"),
                "--url", url, "--output", str(SOURCE / name),
                "--interaction-time", self._gp_time.get()]
         if self._gp_headless.get():
@@ -4299,8 +3829,10 @@ class App(tk.Tk):
     # ── YouTube Monitor (youtube_channels.json) ──────────────────────────────────
     def _ytm_refresh(self):
         """Relê o JSON do disco e redesenha a tabela."""
+        if not CLIENT.connected:
+            return
         try:
-            self._ytm_cfg = ytm.load_channels_config(ytm.DEFAULT_CONFIG, required=False)
+            self._ytm_cfg = core.ytm_load()
         except Exception as e:
             messagebox.showerror("YouTube Monitor",
                                  f"Não foi possível ler {ytm.DEFAULT_CONFIG.name}:\n{e}")
@@ -4318,7 +3850,7 @@ class App(tk.Tk):
     def _ytm_save(self) -> bool:
         """Grava o config (atômico) e redesenha. Em erro, volta ao que está no disco."""
         try:
-            ytm.save_channels_config(ytm.DEFAULT_CONFIG, self._ytm_cfg)
+            core.ytm_save(self._ytm_cfg)
         except Exception as e:
             messagebox.showerror("YouTube Monitor", f"Falha ao salvar o config:\n{e}")
             self._ytm_refresh()
@@ -4515,16 +4047,30 @@ class App(tk.Tk):
             self._status_var.set(f"▶  {len(running)} em execução")
 
     def _refresh_llm_status(self):
-        """Status do provedor escolhido no painel Pipeline (fora da thread do Tk:
-        checar o Ollama é uma chamada HTTP)."""
+        """Status do provedor escolhido no painel Pipeline, visto pelo servidor
+        (fora da thread do Tk: checar o Ollama de lá é uma chamada HTTP)."""
         provider = self._llm_provider.get()
+        if not CLIENT.connected:
+            self._llm_status.set("sem servidor")
+            return
         self._llm_status.set("verificando…")
 
         def _check():
-            st = llm_provider.status(provider)
-            text = ("● " if st["ok"] else "⚠ ") + st["detail"]
+            try:
+                st = core.llm_status(provider)
+                text = ("● " if st["ok"] else "⚠ ") + st["detail"] + " (no servidor)"
+            except RemoteError as e:
+                text = f"⚠ {e}"
             self.after(0, lambda: self._llm_provider.get() == provider and self._llm_status.set(text))
         threading.Thread(target=_check, daemon=True).start()
+
+    def _refresh_llm_labels(self):
+        """Nome do modelo local configurado no servidor, no rótulo do rádio."""
+        try:
+            self._llm_radios["local"].config(text=f"Local ({core.llm_local_model()})")
+        except RemoteError:
+            pass
+        self._refresh_llm_status()
 
     def _launch(self, cmd: list, label: str = "", pause_rate: float = None,
                 on_done=None, job: "Job" = None):
@@ -4535,8 +4081,10 @@ class App(tk.Tk):
         termina — é o gancho de encadeamento do lote.
         """
         llm = self._llm_provider.get()
+        if not CLIENT.connected:
+            raise sr.Disconnected("Sem conexão com o servidor: o processo não foi iniciado.")
         if job is None and llm == "local":
-            st = llm_provider.status("local")
+            st = core.llm_status("local")
             if not st["ok"] and not messagebox.askyesno(
                     "LLM local indisponível",
                     f"{st['detail']}.\nIniciar mesmo assim? As chamadas à LLM vão falhar."):
@@ -4571,35 +4119,40 @@ class App(tk.Tk):
         jid = job.id
 
         def _run():
-            env = {**os.environ, "PYTHONUNBUFFERED": "1"}
-            if pause_rate > 0:
-                env["BURN_PAUSE_RATE"] = f"{pause_rate}"
-            else:
-                env.pop("BURN_PAUSE_RATE", None)
-            # Sempre explícito: sem a variável o process_chunks assume opaco.
-            env["BURN_BOX_OPAQUE"] = "1" if box_opaque else "0"
-            env["BURN_TOP_TRANSLATION"] = "1" if top_translation else "0"
-            env["BURN_MULTILINE"] = "1" if multiline else "0"
-            env["EXTRACT_AUDIO"] = "1" if extract_audio else "0"
-            env["DRIVE_UPLOAD"] = "1" if drive_upload else "0"
-            env["SUBRIM_LLM_PROVIDER"] = llm
-            if debug_ds:
-                env["DEEPSEEK_DEBUG"] = "1"
-            else:
-                env.pop("DEEPSEEK_DEBUG", None)
+            # Só os ajustes desta janela: o resto do ambiente (PATH, .env, chaves
+            # da DeepSeek) é o do servidor, onde o processo roda. None = remover.
+            env = {
+                "BURN_PAUSE_RATE": f"{pause_rate}" if pause_rate > 0 else None,
+                # Sempre explícito: sem a variável o process_chunks assume opaco.
+                "BURN_BOX_OPAQUE": "1" if box_opaque else "0",
+                "BURN_TOP_TRANSLATION": "1" if top_translation else "0",
+                "BURN_MULTILINE": "1" if multiline else "0",
+                "EXTRACT_AUDIO": "1" if extract_audio else "0",
+                "DRIVE_UPLOAD": "1" if drive_upload else "0",
+                "SUBRIM_LLM_PROVIDER": llm,
+                "DEEPSEEK_DEBUG": "1" if debug_ds else None,
+            }
             try:
-                p = subprocess.Popen(
-                    cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                    text=True, cwd=str(REPO), env=env,
-                )
-            except OSError as e:
-                self._log_q.put((jid, f"❌ Não foi possível iniciar: {e}", "error"))
+                pid = CLIENT.proc_start(cmd, env, label)
+            except RemoteError as e:
+                self._log_q.put((jid, f"❌ Não foi possível iniciar no servidor: {e}", "error"))
                 self.after(0, self._on_job_done, job, -1)
                 return
+            self._log_q.put((jid, f"(processo #{pid} no servidor)", "info"))
+            self._follow(job, sr.RemoteProc(pid), threaded=False)
+
+        threading.Thread(target=_run, daemon=True).start()
+
+    def _follow(self, job: "Job", p, threaded: bool = True):
+        """Acompanha o log de um processo do servidor na sub-aba do ``job``."""
+        jid = job.id
+        self._attached_procs.add(p.pid)
+
+        def _run():
             with self._proc_lock:
                 job.proc = p
                 parar = job.stopped
-            if parar:   # "Parar" clicado antes do Popen terminar
+            if parar:   # "Parar" clicado antes do processo começar
                 p.terminate()
             for raw in p.stdout:
                 line = raw.rstrip()
@@ -4617,13 +4170,21 @@ class App(tk.Tk):
                 )
                 self._log_q.put((jid, line, tag))
             p.wait()
+            self._attached_procs.discard(p.pid)
+            try:
+                CLIENT.proc_forget(p.pid)
+            except RemoteError:
+                pass
             sep = "─" * 70
             tag = "success" if p.returncode == 0 else "error"
             self._log_q.put((jid, sep, "info"))
             self._log_q.put((jid, f"Encerrado  (código {p.returncode})", tag))
             self.after(0, self._on_job_done, job, p.returncode)
 
-        threading.Thread(target=_run, daemon=True).start()
+        if threaded:
+            threading.Thread(target=_run, daemon=True).start()
+        else:
+            _run()
 
     def _on_job_done(self, job: "Job", returncode: int):
         # Garante que as últimas linhas do processo entrem antes do status final.
@@ -4679,20 +4240,36 @@ class App(tk.Tk):
         self._update_job_controls()
 
     def _on_close(self):
+        """Os processos rodam no servidor: fechar a janela não precisa pará-los
+        (ao reabrir, o acompanhamento é retomado). Só os itens de lote ainda não
+        iniciados se perdem, porque a fila do lote mora aqui."""
         running = self._running_jobs()
         if running:
             nomes = "\n".join(f"  • {j.label}" for j in running[:10])
-            if not messagebox.askyesno(
-                    "Processos em execução",
-                    f"{len(running)} processo(s) em execução:\n{nomes}\n\n"
-                    "Fechar o Subrim Manager e interromper todos?"):
+            fila = sum(len(j.queue) for j in running)
+            aviso = (f"\n\n{fila} item(ns) de lote ainda não iniciado(s) não serão iniciados."
+                     if fila else "")
+            resp = messagebox.askyesnocancel(
+                "Processos em execução",
+                f"{len(running)} processo(s) em execução no servidor:\n{nomes}{aviso}\n\n"
+                "Sim = fechar e deixar rodando no servidor\n"
+                "Não = interromper todos e fechar\n"
+                "Cancelar = voltar")
+            if resp is None:
                 return
-            with self._proc_lock:
-                for j in running:
-                    j.queue = []
-                    j.stopped = True
-                    if j.proc:
-                        j.proc.terminate()
+            if resp is False:
+                with self._proc_lock:
+                    for j in running:
+                        j.queue = []
+                        j.stopped = True
+                        if j.proc:
+                            j.proc.terminate()
+        tmp = getattr(self, "_col_audio_tmp", None)
+        if tmp:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
         self.destroy()
 
     # ── Logging ────────────────────────────────────────────────────────────────
@@ -5083,7 +4660,7 @@ class RestoreDialog(tk.Toplevel):
         self._status = status
         tags = {"Completo": "ok", "Arquivado": "archived", "Só texto": "missing",
                 "Só no HD": "ok", "Já no computador": "local"}
-        for key, nome, stems in _wh_group_list(list(status)):
+        for key, nome, stems in core.wh_group_list(list(status)):
             n_local = sum(1 for a in stems if status[a] == "Já no computador")
             n_hd = len(stems) - n_local
             resumo = " · ".join(x for x in (
@@ -5123,7 +4700,7 @@ class RestoreDialog(tk.Toplevel):
         self.update_idletasks()
         try:
             plan = [(a, self._size(a)) for a in assets]
-            livre = shutil.disk_usage(self._local_root).free
+            livre = core.disk_free(self._local_root)
         except OSError as e:
             self.config(cursor="")
             messagebox.showerror("Restaurar", f"Erro ao ler o HD:\n{e}", parent=self)
@@ -5202,7 +4779,7 @@ class AssetFilterDialog(tk.Toplevel):
         self._vars = {}
         self._groups = []   # dicts: key, header, arrow, body, var, cb, count, stems
         self._bulk = False  # marcando um grupo inteiro: sincroniza só no fim
-        for key, nome, stems in _wh_group_list(assets):
+        for key, nome, stems in core.wh_group_list(assets):
             self._add_group(inner, key, nome, stems, current)
 
         if not assets:
@@ -5349,7 +4926,7 @@ class NewScrapingDialog(tk.Toplevel):
             messagebox.showwarning("Campos obrigatórios", "Preencha URL e Nome base.", parent=self)
             return
         SOURCE.mkdir(exist_ok=True)
-        cmd = [_scraper_python(), str(REPO / "scrape_globoplay_episodes.py"),
+        cmd = [SCRAPER_PY, str(REPO / "scrape_globoplay_episodes.py"),
                "--url", url, "--output", str(SOURCE / name),
                "--interaction-time", self._time.get()]
         if self._headless.get():
@@ -5423,7 +5000,7 @@ class DownloadDialog(tk.Toplevel):
             messagebox.showwarning("Aviso", "Número do episódio inválido", parent=self)
             return
         single = self._mode.get() == "single"
-        cmd = [sys.executable, str(REPO / "video_fetcher.py"), self.series, ep]
+        cmd = [PY, str(REPO / "video_fetcher.py"), self.series, ep]
         if single:
             cmd.append("--only")
         label = f"Download: {self.series} ep{ep}" if single else f"Download: {self.series} ep{ep}+"

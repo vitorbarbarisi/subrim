@@ -1,13 +1,29 @@
-// Service worker: faz as chamadas ao servidor local.
+// Service worker: faz as chamadas ao servidor do subrim.
 //
-// O content script não pode chamar http://localhost direto: em MV3 ele herda o
-// CORS (e o Private Network Access) da página do YouTube. O service worker,
-// com host_permissions, pode.
+// O servidor roda em outra máquina da rede local; o IP vem do popup
+// (chrome.storage.local "serverHost", ex.: "192.168.0.42" ou "192.168.0.42:7997").
+// O content script não pode chamá-lo direto: em MV3 ele herda o CORS (e o
+// Private Network Access) da página do YouTube. O service worker, com a
+// permissão de host concedida no popup, pode.
 
-const SERVER = "http://localhost:7997";
+const DEFAULT_PORT = 7997;
+
+/** "192.168.0.42[:porta]" → "http://192.168.0.42:porta", ou null se inválido. */
+function serverUrl(host) {
+  const m = String(host || "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "")
+    .match(/^([\w.-]+)(?::(\d+))?$/);
+  return m ? `http://${m[1]}:${m[2] || DEFAULT_PORT}` : null;
+}
+
+async function server() {
+  const { serverHost } = await chrome.storage.local.get({ serverHost: "" });
+  const url = serverUrl(serverHost);
+  if (!url) throw new Error("servidor não configurado: informe o IP no popup da extensão");
+  return url;
+}
 
 async function call(path, init) {
-  const resp = await fetch(SERVER + path, init);
+  const resp = await fetch((await server()) + path, init);
   if (!resp.ok) {
     const detail = await resp.json().then((b) => b?.error, () => null);
     throw new Error(detail || `${path}: HTTP ${resp.status}`);
@@ -68,7 +84,7 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => abort.abort());
   port.onMessage.addListener(async (msg) => {
     try {
-      const resp = await fetch(SERVER + "/pairs/stream", {
+      const resp = await fetch((await server()) + "/pairs/stream", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ video_id: msg.videoId, cues: msg.cues, from: msg.from, provider: msg.provider }),

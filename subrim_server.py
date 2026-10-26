@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Servidor local do subrim para a extensão Chrome (legenda ao vivo no YouTube).
+"""Servidor do subrim: backend do Subrim Manager e da extensão Chrome.
+
+Roda na máquina que guarda os vídeos/coleções e faz o processamento pesado
+(inclusive as chamadas à DeepSeek); o manager e a extensão se conectam a ele
+pelo IP da rede local. Os endpoints ``/mgr/*`` do manager estão em
+manager_api.py.
 
 A extensão captura a legenda chinesa do YouTube e pede aqui os pares
 "palavra (pinyin): tradução" + a tradução PT de cada frase — os mesmos dados do
@@ -47,7 +52,7 @@ Whisper: ``SUBRIM_WHISPER_BIN`` (default: ``whisper`` no PATH ou
 como o transcribe_video.py).
 
 Uso:
-  python subrim_server.py [--port 7997]
+  python subrim_server.py [--host 0.0.0.0] [--port 7997]
 """
 
 from __future__ import annotations
@@ -65,7 +70,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib import error as urlerror, parse as urlparse, request as urlrequest
 
+import project_python
+project_python.ensure("opencc")  # sem ele a legenda sai com simplificado
+
 import llm_provider
+import manager_api
 import processor
 import word_vocab
 import youtube_downloader
@@ -515,6 +524,8 @@ class Handler(BaseHTTPRequestHandler):
         return body
 
     def do_GET(self) -> None:  # noqa: N802
+        if self.path.startswith("/mgr/") and manager_api.handle_get(self):
+            return
         if self.path.startswith("/jobs/"):
             video_id = self.path[len("/jobs/"):]
             job = _jobs.get(video_id)
@@ -540,6 +551,11 @@ class Handler(BaseHTTPRequestHandler):
             self._json(404, {"error": "not found"})
 
     def do_POST(self) -> None:  # noqa: N802
+        if self.path.startswith("/mgr/"):
+            body = self._read_body()
+            if body is not None:
+                manager_api.handle_post(self, body)
+            return
         if self.path not in ("/pairs", "/pairs/stream", "/transcribe", "/mastered", "/bases"):
             self._json(404, {"error": "not found"})
             return
@@ -625,8 +641,23 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write(f"[subrim_server] {fmt % args}\n")
 
 
+def _lan_ips() -> list[str]:
+    """IPs desta máquina na rede local (para mostrar ao subir)."""
+    import socket
+    ips = set()
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))   # não envia nada; só escolhe a interface
+            ips.add(s.getsockname()[0])
+    except OSError:
+        pass
+    return sorted(ip for ip in ips if not ip.startswith("127."))
+
+
 def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    # 0.0.0.0: o manager e a extensão chegam pela rede local (IP interno).
+    ap.add_argument("--host", default=os.getenv("SUBRIM_SERVER_HOST", "0.0.0.0"))
     ap.add_argument("--port", type=int, default=int(os.getenv("SUBRIM_SERVER_PORT", DEFAULT_PORT)))
     args = ap.parse_args(argv)
     if processor._opencc_s2t() is None:
@@ -634,8 +665,10 @@ def main(argv: list[str]) -> int:
               "simplificado no meio do tradicional. Rode com o Python do projeto "
               "(python3.14) ou: pip install opencc-python-reimplemented", file=sys.stderr)
         return 1
-    httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
-    print(f"🎧 subrim_server em http://127.0.0.1:{args.port}  (cache: {CACHE_DIR})")
+    httpd = ThreadingHTTPServer((args.host, args.port), Handler)
+    print(f"🎧 subrim_server em http://{args.host}:{args.port}  (cache: {CACHE_DIR})")
+    for ip in _lan_ips():
+        print(f"   na rede local: {ip}  ← use este IP no Subrim Manager e na extensão")
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

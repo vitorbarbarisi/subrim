@@ -39,13 +39,55 @@
     chrome.storage.sync.set({ fontScale: pct / 100 });
   });
 
-  chrome.runtime.sendMessage({ type: "health" }, (r) => {
-    const ok = !chrome.runtime.lastError && r?.ok;
-    $("server").textContent = ok ? "servidor ok" : "servidor offline";
-    $("server").className = ok ? "ok" : "bad";
-    $("hint").hidden = ok;
-    providers = ok ? r.data?.providers || null : null;
-    setProvider([...radios].find((x) => x.checked)?.value || DEFAULT_OPTIONS.provider);
+  // ------------------------------------------------------------ servidor
+
+  // Mesmo formato do background.js: "IP" ou "IP:porta" (default 7997).
+  function hostOrigin(host) {
+    const m = String(host || "").trim().replace(/^https?:\/\//, "").replace(/\/+$/, "")
+      .match(/^([\w.-]+)(?::(\d+))?$/);
+    return m ? `http://${m[1]}:${m[2] || 7997}/*` : null;
+  }
+
+  function checkHealth() {
+    $("server").textContent = "verificando…";
+    $("server").className = "";
+    $("hostDot").className = "";
+    chrome.runtime.sendMessage({ type: "health" }, (r) => {
+      const ok = !chrome.runtime.lastError && r?.ok;
+      $("server").textContent = ok ? "servidor ok" : "servidor offline";
+      $("server").className = ok ? "ok" : "bad";
+      $("hostDot").className = ok ? "ok" : "bad";
+      $("hostDot").title = ok ? "Conectado" : (r?.error || "Sem conexão");
+      $("hint").hidden = ok;
+      providers = ok ? r.data?.providers || null : null;
+      setProvider([...radios].find((x) => x.checked)?.value || DEFAULT_OPTIONS.provider);
+    });
+  }
+
+  // Enter grava o IP (o último digitado fica salvo) e pede a permissão de
+  // acesso a ele — o pedido precisa partir de um gesto do usuário.
+  $("serverHost").addEventListener("keydown", (e) => {
+    if (e.key !== "Enter") return;
+    const host = e.target.value.trim();
+    const origin = hostOrigin(host);
+    if (!origin) {
+      $("hostDot").className = "bad";
+      $("hostDot").title = "IP inválido";
+      return;
+    }
+    chrome.permissions.request({ origins: [origin] }, (granted) => {
+      if (!granted) {
+        $("hostDot").className = "bad";
+        $("hostDot").title = "Permissão negada para " + origin;
+        return;
+      }
+      chrome.storage.local.set({ serverHost: host }, checkHealth);
+    });
+  });
+
+  chrome.storage.local.get({ serverHost: "" }, ({ serverHost }) => {
+    $("serverHost").value = serverHost;
+    checkHealth();
   });
 
   // ------------------------------------------------------------ este vídeo

@@ -5,8 +5,11 @@ tradução amarela por palavra, frase traduzida no topo) sobre o player do YouTu
 
 ## Uso
 
-1. Suba o servidor local: `python subrim_server.py` (porta 7997).
+1. Na máquina servidor (a que guarda vídeos/coleções e chama a DeepSeek), suba
+   `python subrim_server.py` (porta 7997, escutando na rede local; ele imprime o IP).
 2. `chrome://extensions` → modo do desenvolvedor → **Carregar sem compactação** → esta pasta.
+   No popup, digite o IP do servidor no campo **Servidor** e tecle Enter (o Chrome
+   pede permissão de acesso a esse endereço; o ● fica verde quando conecta).
 3. Abra um vídeo com legenda chinesa. Não precisa ligar o CC: a extensão captura
    a legenda que o próprio player baixa e, se ele estiver em outra língua, troca
    a faixa do player para a chinesa (o YouTube exige um token na URL da legenda,
@@ -69,7 +72,7 @@ O popup também mostra se o servidor local está no ar.
 - `inject_main.js` — mundo MAIN: intercepta `fetch`/XHR de `/api/timedtext` (zh*) e faz o fallback.
 - `thumbs.js` — selo S nas miniaturas (MutationObserver + `POST /bases`).
 - `content.js` — navegação SPA, base já gravado (`GET /base/<id>`), conversão json3 → cues, sincronia com o vídeo.
-- `background.js` — chamadas ao `localhost:7997` (content script não pode, por CORS/PNA),
+- `background.js` — chamadas ao servidor do IP configurado (content script não pode, por CORS/PNA),
   incluindo o NDJSON de `/pairs/stream` repassado por uma porta (`chrome.runtime.connect`).
 - `render.js` — parser dos pares, casamento por termo mais longo e overlay.
 - `popup.html` / `popup.js` — opções (`chrome.storage.sync`) e status do servidor.
