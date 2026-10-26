@@ -39,6 +39,7 @@ DISABLE_SSL_VERIFY=1 in the environment to skip verification for API calls. Use 
 from __future__ import annotations
 
 import argparse
+import functools
 from dataclasses import dataclass
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
@@ -1498,15 +1499,24 @@ def find_language_files(directory: Path) -> tuple[Path | None, Path, str]:
     return zht_file, other_file, other_lang
 
 
+@functools.lru_cache(maxsize=1)
+def _opencc_s2t():
+    """Conversor OpenCC s2t (criado uma vez só), ou None sem o pacote opencc."""
+    try:
+        import opencc
+    except ImportError:
+        return None
+    return opencc.OpenCC('s2t')  # simplified to traditional
+
+
 def convert_simplified_to_traditional(text: str) -> str:
     """
     Convert simplified Chinese characters to traditional Chinese characters using OpenCC.
     """
-    try:
-        import opencc
-        converter = opencc.OpenCC('s2t')  # simplified to traditional
+    converter = _opencc_s2t()
+    if converter is not None:
         return converter.convert(text)
-    except ImportError:
+    else:
         print("⚠️ OpenCC não disponível, usando conversão básica")
         # Fallback to basic conversion if OpenCC is not available
         conversions = {

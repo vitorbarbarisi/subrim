@@ -87,6 +87,11 @@ def _video_lock(video_id: str) -> threading.Lock:
 
 # ── Cache (TSV do base) ───────────────────────────────────────────────────────
 
+def _to_trad(text: str) -> str:
+    """Tradicional via OpenCC (o main garante que ele existe)."""
+    return processor.convert_simplified_to_traditional(text) if isinstance(text, str) else text
+
+
 def _cache_path(video_id: str) -> Path:
     return CACHE_DIR / f"{video_id}_base.txt"
 
@@ -108,7 +113,10 @@ def _load_rows(video_id: str) -> list[dict]:
         except ValueError:
             continue
         pt = parts[5] if len(parts) >= 6 else "N/A"
-        out.append({"start": start, "end": end, "zh": parts[3], "pairs": pairs, "pt": pt})
+        # Base gravado sem OpenCC pode ter simplificado no meio da frase: converte
+        # na leitura para a chave bater com as cues novas (já convertidas).
+        out.append({"start": start, "end": end, "zh": _to_trad(parts[3]),
+                    "pairs": [_to_trad(p) for p in pairs], "pt": pt})
     return out
 
 
@@ -225,7 +233,9 @@ def _fetch_pairs(batch: list[str], provider: str | None = None) -> dict[str, lis
         except (TypeError, ValueError):
             continue
         if isinstance(pairs, list):
-            out[s] = [p for p in pairs if isinstance(p, str)]
+            # A LLM às vezes escreve a palavra em simplificado mesmo com a frase
+            # em tradicional; aí ela nem casa com a frase na legenda.
+            out[s] = [_to_trad(p) for p in pairs if isinstance(p, str)]
     return out
 
 
@@ -619,6 +629,11 @@ def main(argv: list[str]) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--port", type=int, default=int(os.getenv("SUBRIM_SERVER_PORT", DEFAULT_PORT)))
     args = ap.parse_args(argv)
+    if processor._opencc_s2t() is None:
+        print(f"❌ OpenCC ausente neste Python ({sys.executable}): a legenda sairia com "
+              "simplificado no meio do tradicional. Rode com o Python do projeto "
+              "(python3.14) ou: pip install opencc-python-reimplemented", file=sys.stderr)
+        return 1
     httpd = ThreadingHTTPServer(("127.0.0.1", args.port), Handler)
     print(f"🎧 subrim_server em http://127.0.0.1:{args.port}  (cache: {CACHE_DIR})")
     try:
