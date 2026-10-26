@@ -45,26 +45,50 @@ def _wh_is_archived(prefix: str) -> bool:
     return _wh_frames_dir(prefix) is not None
 
 
-def _external_drives() -> list:
-    """HDs externos graváveis montados em /Volumes (ordem alfabética).
+def mount_roots() -> list:
+    """Onde os HDs externos aparecem neste sistema.
 
-    Exclui o disco de boot (mesmo device de "/", ex.: "Macintosh HD") e volumes
-    somente-leitura (imagens .dmg montadas)."""
+    macOS: /Volumes. Linux: /media/<usuário> e /run/media/<usuário> (montagem
+    automática) e /mnt — no WSL, os discos do Windows ficam em /mnt/<letra>."""
+    if sys.platform == "darwin":
+        return [Path("/Volumes")]
+    user = os.environ.get("USER") or os.environ.get("LOGNAME") or ""
+    roots = [Path("/mnt")]
+    if user:
+        roots += [Path("/media") / user, Path("/run/media") / user]
+    return roots
+
+
+# Pastas de /mnt que o WSL usa para si, não são discos.
+_NOT_DRIVES = {"wsl", "wslg"}
+
+
+def _external_drives() -> list:
+    """HDs externos graváveis montados (ordem alfabética).
+
+    Exclui o disco de boot (mesmo device de "/", ex.: "Macintosh HD"), volumes
+    somente-leitura (imagens .dmg montadas) e, no WSL, o disco do Windows
+    (o C:, que também aparece em /mnt)."""
     root_dev = os.stat("/").st_dev
     out = []
-    try:
-        vols = sorted(Path("/Volumes").iterdir())
-    except OSError:
-        return out
-    for v in vols:
+    for root in mount_roots():
         try:
-            if not v.is_dir() or v.stat().st_dev == root_dev:
-                continue
-            if os.statvfs(v).f_flag & os.ST_RDONLY:
-                continue
+            vols = sorted(root.iterdir())
         except OSError:
             continue
-        out.append(v)
+        for v in vols:
+            if v.name in _NOT_DRIVES:
+                continue
+            try:
+                if not v.is_dir() or v.stat().st_dev == root_dev:
+                    continue
+                if os.statvfs(v).f_flag & os.ST_RDONLY:
+                    continue
+                if (v / "Windows" / "System32").is_dir():
+                    continue
+            except OSError:
+                continue
+            out.append(v)
     return out
 
 
@@ -642,15 +666,21 @@ def list_assets_full(drive_required: bool = True) -> dict:
 
 
 def trash(paths: list) -> list:
-    """Move as pastas para a Lixeira do servidor (Finder, recuperável).
+    """Move as pastas para a Lixeira do servidor (recuperável): Finder no
+    macOS, ``gio trash`` (Lixeira do freedesktop) no Linux.
 
     → ``[(nome, erro)]`` das que falharam."""
     failed = []
     for p in paths:
-        path = str(Path(p).resolve()).replace("\\", "\\\\").replace('"', '\\"')
-        res = subprocess.run(
-            ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{path}"'],
-            capture_output=True, text=True)
+        if sys.platform == "darwin":
+            path = str(Path(p).resolve()).replace("\\", "\\\\").replace('"', '\\"')
+            cmd = ["osascript", "-e", f'tell application "Finder" to delete POSIX file "{path}"']
+        elif shutil.which("gio"):
+            cmd = ["gio", "trash", str(Path(p).resolve())]
+        else:
+            failed.append((Path(p).name, "sem 'gio' para mover à Lixeira (apt install libglib2.0-bin)"))
+            continue
+        res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode != 0:
             failed.append((Path(p).name, res.stderr.strip()))
     return failed

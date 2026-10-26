@@ -1268,7 +1268,7 @@ class App(tk.Tk):
         if not drives:
             messagebox.showerror(
                 "Expurgar",
-                "Nenhum HD externo gravável encontrado em /Volumes.\n\n"
+                "Nenhum HD externo gravável encontrado no servidor.\n\n"
                 "Conecte o HD (ex.: SUBRIM) e tente de novo.")
             return None
         # Com vários, prefere os que já têm o warehouse espelhado.

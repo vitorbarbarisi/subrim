@@ -10,7 +10,8 @@
   POST /mgr/procs                      → {"procs": [...]}
 
 Caminhos viajam relativos à raiz do repo (ver subrim_remote). Só valem
-caminhos dentro do repo ou de ``/Volumes`` (os HDs externos de expurgo), e só
+caminhos dentro do repo ou dos pontos de montagem de HD externo (``/Volumes``
+no macOS; ``/mnt``, ``/media/<usuário>`` no Linux/WSL — os de expurgo), e só
 módulos/scripts do próprio repo podem ser chamados.
 """
 
@@ -33,7 +34,10 @@ import subrim_remote as sr
 REPO = Path(__file__).absolute().parent
 # Com o repo atrás de um symlink, há módulos que resolvem o caminho e outros não.
 ROOTS = tuple(dict.fromkeys((REPO, REPO.resolve())))
-VOLUMES = Path("/Volumes")
+# Pontos de montagem de HD externo (expurgo/restauro): /Volumes ou /mnt, /media…
+def _mounts():
+    import manager_core
+    return tuple(manager_core.mount_roots())
 
 # Módulos cujas funções públicas o client pode chamar.
 CALLABLE_MODULES = {"manager_core", "collection_builder", "periods_base"}
@@ -46,7 +50,7 @@ def to_path(s: str) -> Path:
     norm = posixpath.normpath(s)
     p = Path(norm) if posixpath.isabs(norm) else REPO / norm
     p = Path(os.path.normpath(p))
-    for root in (*ROOTS, VOLUMES):
+    for root in (*ROOTS, *_mounts()):
         if p == root or root in p.parents:
             return p
     raise PermissionError(f"caminho fora do repositório: {s}")

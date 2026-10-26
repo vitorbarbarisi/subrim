@@ -73,6 +73,9 @@ def get_chinese_font_path() -> str:
         '/System/Library/Fonts/PingFang.ttc',
         '/System/Library/Fonts/Hiragino Sans GB.ttc',
         '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',  # Ubuntu (fonts-noto-cjk)
+        '/mnt/c/Windows/Fonts/msjh.ttc',  # WSL: Microsoft JhengHei (tradicional)
+        '/mnt/c/Windows/Fonts/msyh.ttc',  # WSL: Microsoft YaHei
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
     ]
     
@@ -92,6 +95,7 @@ def get_latin_font_path() -> str:
         '/System/Library/Fonts/HelveticaNeue.ttc',
         '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
         '/Library/Fonts/Arial Unicode.ttf',
+        '/mnt/c/Windows/Fonts/arial.ttf',  # WSL: Arial do Windows
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
     ]

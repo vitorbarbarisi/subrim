@@ -751,6 +751,9 @@ def get_best_chinese_font() -> str:
         '/System/Library/Fonts/PingFang.ttc',           # macOS modern (if available)
         '/System/Library/Fonts/Hiragino Sans GB.ttc',   # macOS fallback
         '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',  # Linux
+        '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',  # Ubuntu (fonts-noto-cjk)
+        '/mnt/c/Windows/Fonts/msjh.ttc',  # WSL: Microsoft JhengHei (tradicional)
+        '/mnt/c/Windows/Fonts/msyh.ttc',  # WSL: Microsoft YaHei
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',  # Linux fallback
         'arial',  # FFmpeg's built-in fallback
     ]
@@ -773,6 +776,7 @@ def get_best_latin_font() -> str:
         '/System/Library/Fonts/HelveticaNeue.ttc',      # macOS modern
         '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',   # Universal Unicode (verified available)
         '/Library/Fonts/Arial Unicode.ttf',             # Alternative path
+        '/mnt/c/Windows/Fonts/arial.ttf',  # WSL: Arial do Windows
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',  # Linux
         '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',  # Linux alternative
         'arial',  # FFmpeg built-in fallback

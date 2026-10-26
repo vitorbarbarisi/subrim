@@ -5,7 +5,7 @@ repositório na máquina servidor, e este módulo leva até lá cada operação.
 
 - ``RemotePath`` imita o pedaço da API do ``pathlib.Path`` que o manager usa.
   O caminho é relativo à raiz do repo no servidor (ou absoluto, para os HDs em
-  ``/Volumes``); cada ``exists``/``glob``/``read_text``… é uma chamada HTTP.
+  os HDs externos); cada ``exists``/``glob``/``read_text``… é uma chamada HTTP.
   Não tem ``__fspath__`` de propósito: um ``open()`` local num RemotePath falha
   na hora em vez de ler (ou criar) arquivo nesta máquina.
 - ``RemoteModule("collection_builder").search(...)`` roda a função no servidor.
