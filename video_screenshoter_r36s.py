@@ -74,8 +74,7 @@ def get_chinese_font_path() -> str:
         '/System/Library/Fonts/Hiragino Sans GB.ttc',
         '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
         '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',  # Ubuntu (fonts-noto-cjk)
-        '/mnt/c/Windows/Fonts/msjh.ttc',  # WSL: Microsoft JhengHei (tradicional)
-        '/mnt/c/Windows/Fonts/msyh.ttc',  # WSL: Microsoft YaHei
+        '/mnt/c/Windows/Fonts/msyh.ttc',  # WSL: Microsoft YaHei (a JhengHei não tem ō/ǎ… do pinyin)
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
     ]
     
