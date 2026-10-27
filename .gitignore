@@ -59,3 +59,8 @@ deepseek_debug.log
 # Ícones da extensão Chrome (gerados do subrim_icon.png com sips, mas versionados)
 !chrome_extension/icons/*.png
 .subrim_client.json
+
+# Ambientes virtuais (o Python 3.10 do WSL não cria o .gitignore interno)
+venv/
+*_env/
+whisper_env*/
