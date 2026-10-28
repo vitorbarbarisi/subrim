@@ -12,10 +12,12 @@ import json
 import os
 import queue
 import re
+import secrets
 import subprocess
 import tempfile
 import threading
 import time
+import webbrowser
 from datetime import datetime
 from pathlib import Path
 
@@ -32,6 +34,7 @@ from subrim_remote import CLIENT, PY, SCRAPER_PY, WHISPER_PY, RemoteError, Remot
 from manager_core import PHASES, wh_readable_name as _wh_readable_name
 import youtube_monitor as ytm   # idem: só sanitize_name/is_valid_prefix
 from app_identity import set_app_name
+import get_drive_token as drive_auth   # só o callback do OAuth, que roda aqui
 
 APP_NAME = "Subrim Manager"
 
@@ -59,6 +62,7 @@ TEXT_WAREHOUSE = WAREHOUSE / "text"  # bases gerados pelo text_pipeline.py
 core = RemoteModule("manager_core")
 cb = RemoteModule("collection_builder")
 periods_base = RemoteModule("periods_base")
+drive_token = RemoteModule("get_drive_token")   # auth_url / exchange_code
 
 # Nota (0-10) das frases — os mesmos valores do collection_builder, que não é
 # importado aqui (puxa OpenCV).
@@ -266,6 +270,49 @@ class App(tk.Tk):
             if CLIENT.base:
                 self._log_line(f"🔌 {self._conn_tip}", "warning")
 
+    def _refresh_drive_token(self):
+        """Refaz o OAuth do Google Drive: o login acontece no navegador desta
+        máquina, mas o token é trocado e gravado no google_drive_config.json do
+        servidor. O redirect do Google cai num servidorzinho em localhost aqui,
+        e o código segue para o servidor, que faz a troca com o mesmo redirect_uri."""
+        if not CLIENT.connected:
+            messagebox.showerror("Google Drive", "Sem conexão com o servidor.")
+            return
+        state = secrets.token_urlsafe(16)
+        server, redirect_uri = drive_auth.start_callback_server(state)
+        try:
+            url = drive_token.auth_url(redirect_uri, state)
+        except RemoteError as e:
+            server.server_close()
+            messagebox.showerror("Google Drive", f"Não foi possível iniciar o login:\n{e}")
+            return
+        self._drive_token_btn.config(state=tk.DISABLED)
+        self._status_var.set("Aguardando login do Google no navegador…")
+        self._log_line("🔑 Login do Google Drive aberto no navegador", "cmd")
+        self._log_line(f"   Se não abrir, acesse: {url}", "info")
+        webbrowser.open(url)
+
+        def _work():
+            try:
+                code = drive_auth.wait_for_code(server)
+                self.after(0, self._status_var.set, "Trocando o código pelo token no servidor…")
+                nome = drive_token.exchange_code(code, redirect_uri)
+                self.after(0, self._drive_token_done, None, nome)
+            except Exception as e:  # noqa: BLE001
+                self.after(0, self._drive_token_done, e, None)
+        threading.Thread(target=_work, daemon=True).start()
+
+    def _drive_token_done(self, err, nome):
+        self._drive_token_btn.config(state=tk.NORMAL)
+        if err is None:
+            msg = f"Token do Drive atualizado ({nome} no servidor)"
+            self._status_var.set(msg)
+            self._log_line(f"✅ {msg}", "success")
+        else:
+            self._status_var.set("Falha ao atualizar o token do Drive")
+            self._log_line(f"❌ Token do Drive: {err}", "error")
+            messagebox.showerror("Google Drive", f"Falha ao atualizar o token:\n{err}")
+
     def _refresh_all(self):
         """Recarrega as telas que vêm do servidor (ao conectar)."""
         for fn in (self._refresh_llm_labels, self._apply_mode, self._refresh_sources,
@@ -420,6 +467,9 @@ class App(tk.Tk):
         self._batch_var = tk.StringVar()
         ttk.Entry(ctrl, textvariable=self._batch_var, width=14).pack(side=tk.LEFT, padx=2)
         ttk.Button(ctrl, text="▶ Rodar Batch", command=self._run_batch).pack(side=tk.LEFT, padx=2)
+        self._drive_token_btn = ttk.Button(ctrl, text="🔑 Atualizar token do Drive",
+                                           command=self._refresh_drive_token)
+        self._drive_token_btn.pack(side=tk.LEFT, padx=2)
 
         self._count_var = tk.StringVar()
         ttk.Label(ctrl, textvariable=self._count_var, foreground="#888").pack(side=tk.RIGHT, padx=6)

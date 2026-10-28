@@ -40,7 +40,8 @@ def _mounts():
     return tuple(manager_core.mount_roots())
 
 # Módulos cujas funções públicas o client pode chamar.
-CALLABLE_MODULES = {"manager_core", "collection_builder", "periods_base"}
+CALLABLE_MODULES = {"manager_core", "collection_builder", "periods_base",
+                    "get_drive_token"}
 
 
 # ── Caminhos ──────────────────────────────────────────────────────────────────
