@@ -12,6 +12,17 @@ import time
 import subprocess
 from pathlib import Path
 
+# Sessão do Globoplay. No servidor (WSL) não há Chrome logado: vale o arquivo
+# exportado do navegador (cookies_globo.txt, formato Netscape, na raiz do repo).
+# Sem ele, lê do Chrome desta máquina, como antes.
+GLOBO_COOKIES = Path(__file__).resolve().parent / "cookies_globo.txt"
+
+
+def cookie_args():
+    if GLOBO_COOKIES.is_file():
+        return ['--cookies', str(GLOBO_COOKIES)]
+    return ['--cookies-from-browser', 'chrome']
+
 
 def load_episodes(json_file_path):
     """Carrega os episódios do arquivo JSON."""
@@ -57,7 +68,7 @@ def download_video(url, directory, retries=3, delay=8):
     prefix = Path(directory).name
     command = [
         'yt-dlp',
-        '--cookies-from-browser', 'chrome',
+        *cookie_args(),
         '--write-subs',
         '--sub-langs', 'pt,pt-BR,pt-PT,all',
         '--convert-subs', 'srt',
@@ -178,8 +189,12 @@ def main():
     print(f"\nProcessamento concluído! {len(ok)} ok / {len(fail)} falha(s) de {total}.")
     if fail:
         print("Episódios que falharam: " + ", ".join(fail))
-        print("💡 401 da Globo costuma ser sessão expirada — abra o globoplay.globo.com "
-              "logado no Chrome e rode de novo.")
+        if GLOBO_COOKIES.is_file():
+            print(f"💡 401 da Globo costuma ser sessão expirada — exporte de novo o "
+                  f"{GLOBO_COOKIES.name} de um navegador logado no globoplay.globo.com.")
+        else:
+            print("💡 401 da Globo costuma ser sessão expirada — abra o globoplay.globo.com "
+                  "logado no Chrome e rode de novo.")
         sys.exit(1)
 
 

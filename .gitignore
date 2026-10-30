@@ -64,3 +64,4 @@ deepseek_debug.log
 venv/
 *_env/
 whisper_env*/
+cookies_globo.txt
