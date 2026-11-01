@@ -72,6 +72,8 @@ def get_chinese_font_path() -> str:
         '/Library/Fonts/Arial Unicode.ttf',
         '/System/Library/Fonts/PingFang.ttc',
         '/System/Library/Fonts/Hiragino Sans GB.ttc',
+        # Servidor Linux: cópias das fontes do macOS, para a legenda sair igual (fora do git).
+        os.path.expanduser('~/.local/share/fonts/subrim/STHeiti Medium.ttc'),
         '/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc',
         '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc',  # Ubuntu (fonts-noto-cjk)
         '/mnt/c/Windows/Fonts/msyh.ttc',  # WSL: Microsoft YaHei (a JhengHei não tem ō/ǎ… do pinyin)
@@ -94,6 +96,7 @@ def get_latin_font_path() -> str:
         '/System/Library/Fonts/HelveticaNeue.ttc',
         '/System/Library/Fonts/Supplemental/Arial Unicode.ttf',
         '/Library/Fonts/Arial Unicode.ttf',
+        os.path.expanduser('~/.local/share/fonts/subrim/Arial.ttf'),
         '/mnt/c/Windows/Fonts/arial.ttf',  # WSL: Arial do Windows
         '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf',
         '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf',
