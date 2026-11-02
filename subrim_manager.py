@@ -887,8 +887,9 @@ class App(tk.Tk):
             ttk.Radiobutton(fbar, text=rot, value=val,
                             variable=self._wh_freq_filter,
                             command=self._wh_freq_refresh_view).pack(side=tk.LEFT, padx=(6, 0))
-        ttk.Button(fbar, text="Copiar tudo...",
-                   command=self._wh_freq_copy_all).pack(side=tk.LEFT, padx=(12, 0))
+        self._wh_freq_copy_btn = ttk.Button(fbar, text="Copiar tudo ▾",
+                                            command=self._wh_freq_copy_all_menu)
+        self._wh_freq_copy_btn.pack(side=tk.LEFT, padx=(12, 0))
         self._wh_freq_shown = tk.StringVar(value="")
         ttk.Label(fbar, textvariable=self._wh_freq_shown,
                   foreground="#888", font=("", 9)).pack(side=tk.RIGHT)
@@ -933,6 +934,14 @@ class App(tk.Tk):
         self._wh_freq_menu = tk.Menu(self, tearoff=0)
         self._wh_freq_menu.add_command(label="Copiar",
                                        command=self._wh_freq_copy_selection)
+
+        # Formatos do "Copiar tudo": o rótulo mostra o molde literal da saída.
+        self._wh_freq_copy_menu = tk.Menu(self, tearoff=0)
+        for rot, fmt in (("□□\\n", "linhas"),
+                         ("□□,□□", "virgula"),
+                         ("□□ (pinyin: tradução)\\n", "detalhes")):
+            self._wh_freq_copy_menu.add_command(
+                label=rot, command=lambda f=fmt: self._wh_freq_copy_all(f))
 
         ttk.Label(right, text="Azul = pinyin/tradução vindos da word-api",
                   foreground="#888", font=("", 9)).pack(anchor=tk.W, pady=(3, 0))
@@ -1643,22 +1652,38 @@ class App(tk.Tk):
         self._wh_freq_copy_words(
             [iid for iid in self._wh_freq_tree.get_children() if iid in sel])
 
-    def _wh_freq_copy_all(self):
-        """Copia todas as palavras visíveis (já filtradas), uma por linha."""
-        self._wh_freq_copy_words(self._wh_freq_tree.get_children())
+    def _wh_freq_copy_all_menu(self):
+        """Abre os formatos do "Copiar tudo" logo abaixo do botão."""
+        btn = self._wh_freq_copy_btn
+        try:
+            self._wh_freq_copy_menu.tk_popup(btn.winfo_rootx(),
+                                             btn.winfo_rooty() + btn.winfo_height())
+        finally:
+            self._wh_freq_copy_menu.grab_release()
 
-    def _wh_freq_copy_words(self, iids):
+    def _wh_freq_copy_all(self, fmt="linhas"):
+        """Copia todas as palavras visíveis (já filtradas) no formato escolhido."""
+        self._wh_freq_copy_words(self._wh_freq_tree.get_children(), fmt)
+
+    def _wh_freq_copy_words(self, iids, fmt="linhas"):
         # str() porque o Tk converte valores que parecem número de volta para
         # int — palavras como "71" existem no corpus e faziam o join estourar
         # TypeError.
         words = []
         for iid in iids:
             values = self._wh_freq_tree.item(iid)["values"]
-            if values:
-                words.append(str(values[0]))
+            if not values:
+                continue
+            word = str(values[0])
+            if fmt == "detalhes":
+                # Pinyin e tradução podem faltar: não deixa pedaço vazio na linha.
+                extras = ": ".join(s for s in (str(values[1]), str(values[2])) if s)
+                if extras:
+                    word = f"{word} ({extras})"
+            words.append(word)
         if words:
             self.clipboard_clear()
-            self.clipboard_append("\n".join(words))
+            self.clipboard_append(("," if fmt == "virgula" else "\n").join(words))
             self._log_q.put((f"📋 {len(words)} palavra(s) copiada(s).", "info"))
 
     def _wh_freq_context_menu(self, event):
