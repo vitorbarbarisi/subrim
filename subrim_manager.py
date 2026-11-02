@@ -4977,8 +4977,10 @@ class NewScrapingDialog(tk.Toplevel):
         ttk.Entry(f, textvariable=self._url, width=56).pack(fill=tk.X, pady=(0, 8))
 
         ttk.Label(f, text="Nome base (ex: onibus, amor, clone):").pack(anchor=tk.W)
-        self._name = tk.StringVar()
-        ttk.Entry(f, textvariable=self._name, width=28).pack(anchor=tk.W, pady=(0, 8))
+        # Não chamar de self._name: é o nome interno do widget no Tkinter, e
+        # sobrescrevê-lo faz o destroy() estourar — aqui e ao fechar o manager.
+        self._name_var = tk.StringVar()
+        ttk.Entry(f, textvariable=self._name_var, width=28).pack(anchor=tk.W, pady=(0, 8))
 
         opts = ttk.Frame(f)
         opts.pack(fill=tk.X, pady=2)
@@ -4996,7 +4998,7 @@ class NewScrapingDialog(tk.Toplevel):
 
     def _start(self):
         url  = self._url.get().strip()
-        name = self._name.get().strip()
+        name = self._name_var.get().strip()
         if not url or not name:
             messagebox.showwarning("Campos obrigatórios", "Preencha URL e Nome base.", parent=self)
             return
