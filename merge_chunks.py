@@ -20,6 +20,7 @@ import os
 import shutil
 import re
 import json
+import mimetypes
 from pathlib import Path
 from typing import List, Tuple, Dict, Optional
 import glob
@@ -54,14 +55,15 @@ def _drive_access_token(cfg: dict) -> str:
     return token
 
 
-def _write_drive_marker(file_path: Path, asset_name: str, info: dict) -> None:
+def _write_drive_marker(file_path: Path, asset_name: str, info: dict,
+                        marker_suffix: str = "drive") -> None:
     """Grava um marcador local indicando que o upload ao Drive foi concluído.
 
     O subrim_manager usa este arquivo para exibir a fase 'Envio para o Drive'.
     """
     import datetime
 
-    marker = file_path.parent / f"{asset_name}_drive.json"
+    marker = file_path.parent / f"{asset_name}_{marker_suffix}.json"
     file_id = info.get("id", "")
     payload = {
         "file_id": file_id,
@@ -139,7 +141,7 @@ def _drive_prefix(asset_name: str) -> str:
     return re.sub(r"\d+$", "", asset_name) or asset_name
 
 
-def upload_to_drive(file_path: Path, asset_name: str) -> bool:
+def upload_to_drive(file_path: Path, asset_name: str, marker_suffix: str = "drive") -> bool:
     """Envia o vídeo final ao Google Drive via upload resumável.
 
     O arquivo é gravado em ``videos/<prefixo>`` (ver ``_drive_prefix``: prefixo
@@ -150,6 +152,10 @@ def upload_to_drive(file_path: Path, asset_name: str) -> bool:
     Usa as credenciais de ``google_drive_config.json`` (refresh_token). Falhas
     são logadas explicitamente e retornam ``False`` sem interromper o merge —
     o arquivo local já foi gerado e não deve ser perdido.
+
+    ``marker_suffix`` nomeia o marcador local (``<asset>_<suffix>.json``): a
+    dublagem (dub_audio.py) usa ``dub_drive`` para não sobrescrever o marcador
+    do vídeo, que o subrim_manager lê.
     """
     if not DRIVE_CONFIG.exists():
         print(f"⚠️  {DRIVE_CONFIG.name} não encontrado — upload para o Drive ignorado")
@@ -195,7 +201,8 @@ def upload_to_drive(file_path: Path, asset_name: str) -> bool:
             headers={
                 "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json; charset=UTF-8",
-                "X-Upload-Content-Type": "video/mp4",
+                "X-Upload-Content-Type": (mimetypes.guess_type(file_path.name)[0]
+                                          or "application/octet-stream"),
                 "X-Upload-Content-Length": str(file_size),
             },
             data=json.dumps(metadata),
@@ -236,7 +243,7 @@ def upload_to_drive(file_path: Path, asset_name: str) -> bool:
                 if resp.status_code in (200, 201):
                     info = resp.json()
                     print(f"   ✅ Upload concluído — id={info.get('id')} nome={info.get('name')}")
-                    _write_drive_marker(file_path, asset_name, info)
+                    _write_drive_marker(file_path, asset_name, info, marker_suffix)
                     return True
                 if resp.status_code != 308:
                     print(f"❌ Falha no upload [status {resp.status_code}]: {resp.text}")
