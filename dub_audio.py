@@ -19,9 +19,10 @@ Etapas:
      fala → voz masculina ou feminina (sem diarização; o edge-tts só tem uma
      voz masculina zh-TW). ``--single-voice`` pula isso.
   2. TTS por fala com cache em assets/<asset>/dub_zht/ (resumível).
-  3. Encaixe: a fala precisa caber até o início da próxima. Se não cabe,
-     regenera com rate maior (até +MAX_RATE%); se ainda não cabe, corta com
-     fade-out.
+  3. Encaixe: a fala precisa caber até o início da próxima. A janela inclui
+     até LEAD s de silêncio antes do begin (a fala pode começar um pouco
+     antes, se a anterior já acabou). Se não cabe, regenera com rate maior
+     (até +MAX_RATE%); se ainda não cabe, corta com fade-out.
   4. Mixagem em numpy sobre uma faixa silenciosa; ffmpeg codifica o MP3.
 """
 
@@ -45,7 +46,8 @@ F0_THRESHOLD = 165.0      # Hz: abaixo → masculino
 SR = 16000                # taxa do wav de análise
 OUT_SR = 24000            # taxa da faixa final (a do edge-tts)
 GAP = 0.08                # folga (s) antes da próxima fala
-MAX_RATE = 40             # aceleração máxima do edge-tts (%)
+MAX_RATE = 60             # aceleração máxima do edge-tts (%)
+LEAD = 0.4                # antecipação máx. (s) no silêncio antes da fala
 FADE_MS = 150
 CONCURRENCY = 4
 SKIP_SUFFIXES = ("_chromecast", "_merged", "_processed", "_chunk")
@@ -213,14 +215,24 @@ async def synthesize(lines: list[dict], cache: Path, args) -> None:
 
     # 1ª passada: velocidade normal.
     paths = await asyncio.gather(*(one(ln, 0) for ln in lines))
-    redo = []
     for ln, p in zip(lines, paths):
-        ln["rate"], ln["audio"] = 0, None
-        if p is None:
+        ln["rate"], ln["audio"] = 0, (load_tts(p) if p is not None else None)
+
+    # Antecipação: silêncio livre antes do begin, contando com a fala anterior
+    # na velocidade normal no seu próprio begin (limite conservador: acelerada
+    # ou cortada ela só fica mais curta, então nunca há sobreposição).
+    prev_end = 0.0
+    for ln in lines:
+        ln["lead"] = min(LEAD, max(0.0, ln["begin"] - prev_end - (GAP if prev_end else 0.0)))
+        dur0 = len(ln["audio"]) / OUT_SR if ln["audio"] is not None else 0.0
+        prev_end = ln["begin"] + min(dur0, ln["slot"])
+
+    redo = []
+    for ln in lines:
+        if ln["audio"] is None:
             continue
-        seg = load_tts(p)
-        ln["audio"] = seg
-        need = len(seg) / OUT_SR / ln["slot"] if ln["slot"] > 0 else 99
+        window = ln["slot"] + ln["lead"]
+        need = len(ln["audio"]) / OUT_SR / window if window > 0 else 99
         if need > 1.0:
             ln["rate"] = min(MAX_RATE, int(math.ceil((need - 1) * 100)) + 5)
             redo.append(ln)
@@ -236,12 +248,37 @@ async def synthesize(lines: list[dict], cache: Path, args) -> None:
 
 # ------------------------------------------------------------------------ drive
 
+def trash_previous(marker: Path) -> None:
+    """Manda para a lixeira do Drive o MP3 enviado antes (reenvio com --force),
+    para não ficarem dois arquivos com o mesmo nome. Lixeira, não exclusão."""
+    import json
+    import requests
+    from merge_chunks import DRIVE_CONFIG, _drive_access_token
+    try:
+        file_id = json.loads(marker.read_text(encoding="utf-8")).get("file_id")
+        if not file_id:
+            return
+        token = _drive_access_token(json.loads(DRIVE_CONFIG.read_text(encoding="utf-8")))
+        r = requests.patch(f"https://www.googleapis.com/drive/v3/files/{file_id}",
+                           headers={"Authorization": f"Bearer {token}"},
+                           params={"supportsAllDrives": "true"},
+                           json={"trashed": True}, timeout=60)
+        if r.status_code == 200:
+            print(f"   🗑️  Versão anterior enviada à lixeira do Drive (id={file_id})")
+        elif r.status_code != 404:
+            print(f"⚠️  Não consegui mover a versão anterior para a lixeira [{r.status_code}]")
+    except Exception as e:  # noqa: BLE001 - best-effort
+        print(f"⚠️  Não consegui mover a versão anterior para a lixeira: {e}")
+
+
 def upload(out: Path, asset: str, force: bool) -> None:
     marker = out.parent / f"{asset}_dub_drive.json"
     if marker.exists() and not force:
         print(f"☁️  Dublagem já enviada ao Drive ({marker.name})")
         return
     from merge_chunks import upload_to_drive
+    if marker.exists():
+        trash_previous(marker)
     if not upload_to_drive(out, asset, marker_suffix="dub_drive"):
         print("⚠️  Envio da dublagem ao Drive falhou — o MP3 local está pronto")
 
@@ -307,7 +344,7 @@ def main() -> int:
     asyncio.run(synthesize(lines, cache, args))
 
     mix = np.zeros(int(total * OUT_SR) + 1, dtype=np.float32)
-    sped = cut = missing = 0
+    sped = cut = missing = early = 0
     for ln in lines:
         seg = ln["audio"]
         if seg is None:
@@ -315,13 +352,17 @@ def main() -> int:
             continue
         if ln["rate"]:
             sped += 1
-        slot = max(1, int(ln["slot"] * OUT_SR))
-        if len(seg) > slot:
+        slot = int(ln["slot"] * OUT_SR)
+        lead = min(int(ln["lead"] * OUT_SR), max(0, len(seg) - slot))
+        if lead:
+            early += 1
+        window = max(1, slot + lead)
+        if len(seg) > window:
             cut += 1
-            seg = seg[:slot].copy()
+            seg = seg[:window].copy()
             nf = min(len(seg), int(FADE_MS / 1000 * OUT_SR))
             seg[len(seg) - nf:] *= np.linspace(1.0, 0.0, nf, dtype=np.float32)
-        a = int(ln["begin"] * OUT_SR)
+        a = int(ln["begin"] * OUT_SR) - lead
         seg = seg[:max(0, len(mix) - a)]
         mix[a:a + len(seg)] += seg
     pcm16 = (np.clip(mix, -1.0, 1.0) * 32767).astype(np.int16)
@@ -339,7 +380,7 @@ def main() -> int:
     nm = sum(1 for ln in lines if ln["gender"] == "M")
     print(f"\n✅ {out} ({out.stat().st_size / 1e6:.1f} MB, {total / 60:.1f} min)")
     print(f"   falas: {len(lines)} | masculinas: {nm} | femininas: {len(lines) - nm}")
-    print(f"   aceleradas: {sped} | cortadas: {cut} ({cut / len(lines):.1%}) | sem áudio: {missing}")
+    print(f"   antecipadas: {early} | aceleradas: {sped} | cortadas: {cut} ({cut / len(lines):.1%}) | sem áudio: {missing}")
 
     if drive_on:
         upload(out, args.asset, args.force)
