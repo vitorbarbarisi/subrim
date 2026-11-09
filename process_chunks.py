@@ -291,19 +291,37 @@ def _cut_burn_with_pauses(source: Path, start: float, dur: float, subtitles: dic
                     pass
 
 
+def _valid_video(path: Path) -> bool:
+    """True se o mp4 existe e o ffprobe consegue ler a duração.
+
+    Um ffmpeg morto no meio (restart do servidor, kill) deixa só o cabeçalho
+    (~48 bytes, sem moov atom). Checar só ``exists()`` daria esse chunk como
+    pronto para sempre, e o merge falharia com "moov atom not found".
+    """
+    if not path.exists() or path.stat().st_size < 1024:
+        return False
+    r = subprocess.run(['ffprobe', '-v', 'error', '-show_entries', 'format=duration',
+                        '-of', 'default=nw=1:nk=1', str(path)], capture_output=True, text=True)
+    return r.returncode == 0 and bool(r.stdout.strip())
+
+
 def _fused_chunk_worker(task: tuple) -> Tuple[str, bool, str]:
     """Worker de processo: corta+queima um chunk a partir do manifesto.
 
     Se ``rate`` > 0, aplica o modo 'queimar com pausas' (freeze no fim de cada fala).
     """
     source_str, start, dur, base_str, out_str, total, index, width, height, rate = task
-    source, base, out = Path(source_str), Path(base_str), Path(out_str)
+    source, base, final = Path(source_str), Path(base_str), Path(out_str)
+    # Grava num arquivo temporário e só renomeia no fim: uma interrupção nunca
+    # deixa um _processed.mp4 truncado com cara de pronto.
+    out = final.with_name(final.stem + "_partial.mp4")
+    out.unlink(missing_ok=True)
     rate = float(rate or 0)
     buf = io.StringIO()
     ok = False
     with redirect_stdout(buf):
         mode = f"corte+queima+pausas({rate:.2f}s/car)" if rate > 0 else "corte+queima"
-        print(f"   🔪🎬 Chunk {index:03d}/{total:03d} ({mode}): {out.name}")
+        print(f"   🔪🎬 Chunk {index:03d}/{total:03d} ({mode}): {final.name}")
         subtitles = parse_base_file(base) if base.exists() else {}
         if not base.exists():
             print(f"   ⚠️  Base não encontrado: {base.name} — corte sem legenda")
@@ -319,7 +337,11 @@ def _fused_chunk_worker(task: tuple) -> Tuple[str, bool, str]:
         if not ok:
             print("   ↩️  Fallback: corte sem legenda (para não deixar buraco no merge)")
             ok = _cut_only(source, float(start), float(dur), out)
-    return (out.name, ok, buf.getvalue())
+        if ok:
+            os.replace(out, final)
+        else:
+            out.unlink(missing_ok=True)
+    return (final.name, ok, buf.getvalue())
 
 
 def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
@@ -376,6 +398,11 @@ def run_fused_from_manifest(source_dir: Path, manifest_path: Path) -> int:
     if _multiline_enabled():
         print("📏 Múltiplas linhas ativas: legenda que se sobreporia numa linha quebra em várias")
 
+    broken = [e for e in entries if (source_dir / e["processed"]).exists()
+              and not _valid_video(source_dir / e["processed"])]
+    for e in broken:
+        print(f"⚠️  {e['processed']} corrompido (processamento interrompido?) — será refeito")
+        (source_dir / e["processed"]).unlink()
     pending = [e for e in entries if not (source_dir / e["processed"]).exists()]
     done_already = len(entries) - len(pending)
     print(f"📊 Total de chunks: {len(entries)}")
