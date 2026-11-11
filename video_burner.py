@@ -185,7 +185,7 @@ class VideoBurner:
         
         try:
             # Special handling for scripts that benefit from real-time output
-            if script in ["processor.py", "adjust_base_times.py", "sanitize_base.py", "split_video.py", "process_chunks.py", "merge_chunks.py"]:
+            if script in ["processor.py", "adjust_base_times.py", "sanitize_base.py", "split_video.py", "process_chunks.py", "merge_chunks.py", "dub_audio.py"]:
                 return self.run_script_realtime(cmd, env)
             
             result = subprocess.run(
@@ -249,6 +249,30 @@ class VideoBurner:
             self.log(f"✗ Erro ao executar {cmd[2]}: {e}", "ERROR")
             return False
     
+    def dub_mix(self, dir_name: str) -> bool:
+        """Opção "Dublagem: queimar com dubmix" (DUB_MIX=1): mistura 50% de
+        dublagem zh-TW no áudio do _merged.mp4. Roda antes do envio ao Drive.
+        Idempotente (o merged ganha uma tag; o TTS fica em cache)."""
+        if os.environ.get("DUB_MIX") != "1":
+            return True
+        self.log(f"Dublagem: dubmix no merged de {dir_name}")
+        if not self.run_script("dub_audio.py", dir_name, ["--mix", "--no-upload"]):
+            self.log(f"Falha no dubmix de {dir_name}", "ERROR")
+            return False
+        return True
+
+    def dub_audio(self, dir_name: str) -> bool:
+        """Opção "Dublagem: gerar audio separado" (DUB_AUDIO=1): gera
+        <asset>_dub_zht.mp3 e, com DRIVE_UPLOAD ligado, o envia ao Drive junto
+        do merged (marcador próprio <asset>_dub_drive.json)."""
+        if os.environ.get("DUB_AUDIO") != "1":
+            return True
+        self.log(f"Dublagem: áudio separado de {dir_name}")
+        if not self.run_script("dub_audio.py", dir_name):
+            self.log(f"Falha na dublagem de {dir_name}", "ERROR")
+            return False
+        return True
+
     def process_directory(self, directory: Path, force: bool = False) -> bool:
         """Process a single directory through the complete pipeline"""
         dir_name = directory.name
@@ -264,13 +288,20 @@ class VideoBurner:
 
         # Retomada: se o merge já existe, NÃO pular o diretório. Com o envio ao
         # Drive ligado, verifica se o upload foi feito e, se não, retenta.
-        if not force and self.is_processed(directory) and not drive_on:
-            self.log(f"✓ {dir_name} já processado (envio ao Drive desativado)")
-            return True
         if not force and self.is_processed(directory):
+            # Dublagem antes do envio: o merged que sobe já sai com o dubmix.
+            if not self.dub_mix(dir_name):
+                return False
+            if not drive_on:
+                if not self.dub_audio(dir_name):
+                    return False
+                self.log(f"✓ {dir_name} já processado (envio ao Drive desativado)")
+                return True
             self.log(f"Diretório {dir_name}: merge já existe — verificando envio ao Drive")
             if not self.run_script("merge_chunks.py", dir_name, ["--ensure-upload"]):
                 self.log(f"Falha ao garantir o envio ao Drive para {dir_name}", "ERROR")
+                return False
+            if not self.dub_audio(dir_name):
                 return False
             self.log(f"✓ {dir_name} já processado e enviado ao Drive")
             return True
@@ -334,7 +365,12 @@ class VideoBurner:
             self.log(f"✗ {dir_name} processamento incompleto - _merged.mp4 não encontrado", "ERROR")
             return False
 
+        if not self.dub_mix(dir_name):
+            return False
+
         if not drive_on:
+            if not self.dub_audio(dir_name):
+                return False
             self.log(f"✓ {dir_name} processado com sucesso (envio ao Drive desativado)")
             return True
 
@@ -342,6 +378,8 @@ class VideoBurner:
         self.log(f"Fase 3: Envio ao Google Drive para {dir_name}")
         if not self.run_script("merge_chunks.py", dir_name, ["--ensure-upload"]):
             self.log(f"Falha no envio ao Drive para {dir_name}", "ERROR")
+            return False
+        if not self.dub_audio(dir_name):
             return False
 
         self.log(f"✓ {dir_name} processado e enviado ao Drive com sucesso!")

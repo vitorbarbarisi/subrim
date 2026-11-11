@@ -574,6 +574,20 @@ class App(tk.Tk):
                         variable=self._drive_upload_on,
                         command=self._on_drive_toggle).pack(anchor=tk.W, pady=(2, 2))
 
+        # Dublagem zh-TW a partir do zht do base (dub_audio.py; também no batch).
+        # Dubmix: o _merged.mp4 sai com 50% original + 50% dublagem (é ele que
+        # vai ao Drive). Áudio separado: <asset>_dub_zht.mp3, enviado ao Drive
+        # junto do merged quando "Enviar para o drive" está ligado. O dubmix não
+        # combina com pausas (o vídeo congela e a dublagem sairia do lugar).
+        ttk.Label(detail, text="Dublagem", foreground="#888").pack(anchor=tk.W, pady=(6, 0))
+        self._dub_mix_on = tk.BooleanVar(value=False)
+        self._dub_mix_chk = ttk.Checkbutton(detail, text="Dublagem: queimar com dubmix",
+                                            variable=self._dub_mix_on)
+        self._dub_mix_chk.pack(anchor=tk.W, pady=(2, 2))
+        self._dub_audio_on = tk.BooleanVar(value=False)
+        ttk.Checkbutton(detail, text="Dublagem: gerar audio separado",
+                        variable=self._dub_audio_on).pack(anchor=tk.W, pady=(2, 2))
+
         # LLM dos pares/traduções desta queima (também no batch e no text
         # pipeline): DeepSeek (API) ou modelo local no Ollama. Ver llm_provider.py.
         ttk.Label(detail, text="LLM", foreground="#888").pack(anchor=tk.W, pady=(6, 0))
@@ -4050,8 +4064,12 @@ class App(tk.Tk):
 
     # ── Queimar com pausas ──────────────────────────────────────────────────────
     def _on_pause_toggle(self):
-        self._burn_pause_entry.config(
-            state=tk.NORMAL if self._burn_pause_on.get() else tk.DISABLED)
+        pausas = self._burn_pause_on.get()
+        self._burn_pause_entry.config(state=tk.NORMAL if pausas else tk.DISABLED)
+        # Com pausas o merged fica mais longo que o original: sem dubmix.
+        if pausas:
+            self._dub_mix_on.set(False)
+        self._dub_mix_chk.config(state=tk.DISABLED if pausas else tk.NORMAL)
 
     def _pause_rate_value(self) -> float:
         """Tempo (s) por caractere se 'com pausas' estiver ligado; senão 0."""
@@ -4191,6 +4209,8 @@ class App(tk.Tk):
         multiline = self._burn_multiline_on.get()
         extract_audio = self._extract_audio_on.get()
         drive_upload = self._drive_upload_on.get()
+        dub_mix = self._dub_mix_on.get()
+        dub_audio = self._dub_audio_on.get()
         jid = job.id
 
         def _run():
@@ -4204,6 +4224,9 @@ class App(tk.Tk):
                 "BURN_MULTILINE": "1" if multiline else "0",
                 "EXTRACT_AUDIO": "1" if extract_audio else "0",
                 "DRIVE_UPLOAD": "1" if drive_upload else "0",
+                # Dubmix nunca com pausas (o batch força pause_rate=0).
+                "DUB_MIX": "1" if dub_mix and pause_rate <= 0 else "0",
+                "DUB_AUDIO": "1" if dub_audio else "0",
                 "SUBRIM_LLM_PROVIDER": llm,
                 "DEEPSEEK_DEBUG": "1" if debug_ds else None,
             }

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Gera uma faixa de dublagem em mandarim de Taiwan (MP3) a partir do *_base.txt.
 
-Uso: python3 dub_audio.py <asset> [--single-voice] [--force] [--no-upload]
+Uso: python3 dub_audio.py <asset> [--single-voice] [--force] [--no-upload] [--mix]
 
 Pensado para séries originais em português (Próxima, Esplendor...): o
 processor.py já traduziu cada fala para chinês tradicional e gravou a coluna
@@ -24,12 +24,21 @@ Etapas:
      antes, se a anterior já acabou). Se não cabe, regenera com rate maior
      (até +MAX_RATE%); se ainda não cabe, corta com fade-out.
   4. Mixagem em numpy sobre uma faixa silenciosa; ffmpeg codifica o MP3.
+
+``--mix`` (opção "Dublagem: queimar com dubmix" do manager): depois do MP3,
+troca o áudio do _merged.mp4 por 50% original + 50% dublagem. O merged acumula
+~+0,03 s por chunk, então cada trecho do MP3 vai para o offset real do chunk no
+merged (chunk_manifest.json + duração de cada _processed.mp4). O merged ganha a
+tag ``comment=subrim_dubmix`` e nunca é misturado duas vezes. Se ele já estava
+no Drive (e DRIVE_UPLOAD não é 0), a versão antiga vai para a lixeira e o
+marcador é apagado, para o ``merge_chunks --ensure-upload`` reenviar.
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import math
 import os
 import re
@@ -287,6 +296,100 @@ def upload(out: Path, asset: str, force: bool) -> None:
         print("⚠️  Envio da dublagem ao Drive falhou — o MP3 local está pronto")
 
 
+# ------------------------------------------------------------------ dubmix
+
+MIX_SR = 48000
+MIX_TAG = "subrim_dubmix"
+
+
+def merged_has_dubmix(merged: Path) -> bool:
+    r = subprocess.run(["ffprobe", "-v", "error", "-show_entries", "format_tags=comment",
+                        "-of", "default=nw=1:nk=1", str(merged)], capture_output=True, text=True)
+    return MIX_TAG in r.stdout
+
+
+def _aligned_dub(dub: Path, sub: Path, merged_dur: float) -> np.ndarray:
+    """MP3 da dublagem (linha do tempo do original) reposicionado na linha do
+    tempo do merged, chunk a chunk."""
+    src = load_pcm(dub, MIX_SR)
+    out = np.zeros(int(merged_dur * MIX_SR) + MIX_SR, dtype=np.float32)
+    manifest = sub / "chunk_manifest.json"
+    if not manifest.exists():
+        print("   ⚠️  Sem chunk_manifest.json: dublagem sem correção da deriva dos chunks")
+        n = min(len(src), len(out))
+        out[:n] = src[:n]
+        return out
+    chunks = json.loads(manifest.read_text(encoding="utf-8"))["chunks"]
+    durs = []
+    for c in chunks:
+        p = sub / c["processed"]
+        d = probe_duration(p) if p.exists() else 0.0
+        durs.append(d if d > 0 else None)
+    known = [(d, c["dur"]) for d, c in zip(durs, chunks) if d]
+    # _processed ausente (clean-up): usa a deriva média dos que existem.
+    scale = (sum(d for d, _ in known) / sum(c for _, c in known)) if known else \
+        merged_dur / max(1e-6, sum(c["dur"] for c in chunks))
+    off = 0.0
+    for c, d in zip(chunks, durs):
+        a, n = int(c["start"] * MIX_SR), int(c["dur"] * MIX_SR)
+        piece = src[a:a + n]
+        b = int(off * MIX_SR)
+        piece = piece[:max(0, len(out) - b)]
+        out[b:b + len(piece)] = piece
+        off += d if d else c["dur"] * scale
+    print(f"   ↔️  Alinhada a {len(chunks)} chunk(s): merged {merged_dur:.2f}s, soma {off:.2f}s")
+    return out
+
+
+def mix_into_merged(asset: str, dub: Path) -> bool:
+    """Troca o áudio do _merged.mp4 por 50% original + 50% dublagem."""
+    from merge_chunks import find_merged_file
+    merged = find_merged_file(asset)
+    if merged is None:
+        print(f"❌ Dubmix: _merged.mp4 de {asset} não encontrado")
+        return False
+    if merged_has_dubmix(merged):
+        print(f"✓ Dubmix: {merged.name} já tem a dublagem misturada")
+        return True
+    print(f"🎚️  Dubmix: misturando 50% original + 50% dublagem em {merged.name}")
+    aligned = _aligned_dub(dub, merged.parent, probe_duration(merged))
+    wav = merged.with_name(f"{asset}_dub_aligned.wav")
+    tmp = merged.with_name(merged.stem + ".dubmix_tmp.mp4")
+    pcm16 = (np.clip(aligned, -1.0, 1.0) * 32767).astype(np.int16)
+    try:
+        subprocess.run(["ffmpeg", "-v", "error", "-f", "s16le", "-ar", str(MIX_SR), "-ac", "1",
+                        "-i", "-", "-y", str(wav)], input=pcm16.tobytes(), check=True,
+                       capture_output=True)
+        r = subprocess.run(
+            ["ffmpeg", "-v", "error", "-i", str(merged), "-i", str(wav), "-filter_complex",
+             "[0:a]volume=0.5[o];[1:a]volume=0.5,aformat=channel_layouts=stereo[d];"
+             "[o][d]amix=inputs=2:normalize=0:duration=first[a]",
+             "-map", "0:v", "-map", "[a]", "-c:v", "copy", "-c:a", "aac", "-b:a", "160k",
+             "-metadata", f"comment={MIX_TAG}", "-movflags", "+faststart", "-y", str(tmp)],
+            capture_output=True)
+        if r.returncode != 0 or probe_duration(tmp) <= 0:
+            print(f"❌ Dubmix falhou: {r.stderr.decode(errors='ignore')[-300:]}")
+            tmp.unlink(missing_ok=True)
+            return False
+        os.replace(tmp, merged)
+    except subprocess.CalledProcessError as e:
+        print(f"❌ Dubmix falhou: {e}")
+        tmp.unlink(missing_ok=True)
+        return False
+    finally:
+        wav.unlink(missing_ok=True)
+    print(f"✅ Dubmix: {merged} ({merged.stat().st_size / 1e6:.0f} MB)")
+
+    # O merged que estava no Drive não tem a dublagem: lixeira + marcador fora,
+    # para o merge_chunks --ensure-upload enviar esta versão.
+    marker = merged.parent / f"{asset}_drive.json"
+    if marker.exists() and os.environ.get("DRIVE_UPLOAD", "1") != "0":
+        trash_previous(marker)
+        marker.unlink()
+        print("   ☁️  O merged será reenviado ao Drive com a dublagem")
+    return True
+
+
 # ------------------------------------------------------------------------- main
 
 def main() -> int:
@@ -296,7 +399,9 @@ def main() -> int:
     ap.add_argument("--female-voice", default=FEMALE_VOICE)
     ap.add_argument("--male-voice", default=MALE_VOICE)
     ap.add_argument("--force", action="store_true", help="refaz o MP3 e reenvia ao Drive (o cache de TTS é mantido)")
-    ap.add_argument("--no-upload", action="store_true", help="não envia ao Drive")
+    ap.add_argument("--no-upload", action="store_true", help="não envia o MP3 ao Drive")
+    ap.add_argument("--mix", action="store_true",
+                    help="mistura a dublagem (50%%) no áudio do _merged.mp4")
     args = ap.parse_args()
 
     asset_dir = Path("assets") / args.asset
@@ -308,9 +413,17 @@ def main() -> int:
 
     if out.exists() and out.stat().st_size > 0 and not args.force:
         print(f"✓ Dublagem já existe: {out}")
-        if drive_on:
-            upload(out, args.asset, False)
-        return 0
+    elif build(args, asset_dir, out) != 0:
+        return 1
+    if drive_on:
+        upload(out, args.asset, args.force)
+    if args.mix and not mix_into_merged(args.asset, out):
+        return 1
+    return 0
+
+
+def build(args, asset_dir: Path, out: Path) -> int:
+    """Gera o MP3 da dublagem. 0 = ok (mesmo com algumas falas sem áudio), 1 = falha."""
 
     base = find_base(asset_dir)
     if base is None:
@@ -385,10 +498,9 @@ def main() -> int:
     print(f"\n✅ {out} ({out.stat().st_size / 1e6:.1f} MB, {total / 60:.1f} min)")
     print(f"   falas: {len(lines)} | masculinas: {nm} | femininas: {len(lines) - nm}")
     print(f"   antecipadas: {early} | aceleradas: {sped} | cortadas: {cut} ({cut / len(lines):.1%}) | sem áudio: {missing}")
-
-    if drive_on:
-        upload(out, args.asset, args.force)
-    return 0 if missing == 0 else 2
+    if missing:
+        print(f"⚠️  {missing} fala(s) ficaram sem áudio (falha do edge-tts) — rode de novo para completar")
+    return 0 if missing < len(lines) else 1
 
 
 if __name__ == "__main__":

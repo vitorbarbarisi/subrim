@@ -390,7 +390,8 @@ def detect_status(path: Path, drive_required: bool = True) -> dict:
     proc_chunks = list(sub.glob("*_processed.mp4"))        if sub.exists() else []
     merged      = (list(sub.glob("*_merged.mp4")) if sub.exists() else []) + \
                   list(path.glob("*_merged.mp4"))
-    uploaded    = bool(list(sub.glob("*_drive.json"))) if sub.exists() else False
+    # Só o marcador do vídeo: <asset>_dub_drive.json (MP3 da dublagem) não conta.
+    uploaded    = (sub / f"{path.name}_drive.json").exists() if sub.exists() else False
 
     n_total  = len(raw_chunks)
     n_done   = len(proc_chunks)
