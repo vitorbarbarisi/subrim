@@ -93,6 +93,10 @@ def parse_base(path: Path) -> list[dict]:
             begin, end = _secs(parts[1]), _secs(parts[2])
         except ValueError:
             continue
+        # Marcações de música (♪música dramática♪) e letras de canção vêm entre
+        # notas: não são fala. Sem esse filtro a dublagem narraria a marcação.
+        if re.search(r"[♪♫♬]", parts[3]):
+            continue
         text = clean_text(parts[3])
         if not text or text.upper() == "N/A" or not re.search(r"[一-鿿]", text):
             continue
