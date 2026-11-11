@@ -2,9 +2,12 @@
 """
 YouTube Downloader robusto usando yt-dlp.
 
-O principal motivo de falhas no download do YouTube é a detecção de bot —
-resolvido usando cookies reais do browser Chrome/Firefox/Safari. Além disso,
-o script aplica retries, throttle e seleção de qualidade com fallback.
+Roda no servidor (o Manager dispara via subrim_server). O principal motivo de
+falhas no download do YouTube é a detecção de bot — resolvido com cookies reais:
+o cookies.txt da raiz do repo (o mesmo do youtube_monitor) ou, sem ele, os
+cookies do browser desta máquina. Tenta primeiro a qualidade máxima (melhor
+vídeo + melhor áudio, sem teto de resolução) e, se o download falhar, cai para
+o stream progressivo mp4.
 
 Saída segue o padrão do pipeline: os arquivos são gravados em
   assets/<nome>/
@@ -21,49 +24,56 @@ Exemplos:
 """
 
 import argparse
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 
-REPO   = Path(__file__).resolve().parent
-ASSETS = REPO / "assets"
+REPO    = Path(__file__).resolve().parent
+ASSETS  = REPO / "assets"
+COOKIES = REPO / "cookies.txt"   # exportado do navegador logado no YouTube
 
-# Cadeia de fallback de qualidade: preferimos mp4 1080p, aceitamos qualquer coisa.
-FORMAT_BEST = (
-    "bestvideo[ext=mp4][height<=1080]+bestaudio[ext=m4a]"
-    "/bestvideo[height<=1080]+bestaudio"
-    "/best[ext=mp4]"
-    "/best"
-)
+# Tentativas de formato, em ordem. A primeira é a qualidade máxima (qualquer
+# codec/resolução, mesclada em mp4). O yt-dlp não troca de formato quando o
+# download em si falha (403/SABR), então a segunda é outra execução: o
+# progressivo, que costuma passar quando os streams separados são barrados.
+FORMAT_ATTEMPTS = [
+    ("qualidade máxima", "bestvideo*+bestaudio/best"),
+    ("progressivo mp4",  "best[ext=mp4]/best"),
+]
 
 # Idiomas de legenda em ordem de preferência.
 SUB_LANGS = "pt-BR,pt,pt-PT,en,en-US,en-GB"
 
 
 def _check_yt_dlp() -> str:
-    """Retorna o caminho do yt-dlp, preferindo o mais novo (com plugin de PO token).
-
-    O plugin bgutil de PO token (necessário para o YouTube em 2025+) exige um
-    yt-dlp recente. O do Homebrew costuma ser mais novo que um pip antigo, então
-    é preferido quando existe.
-    """
-    for candidate in ("/opt/homebrew/bin/yt-dlp", "yt-dlp"):
+    """Retorna o caminho do yt-dlp: o da venv do Python em uso (no servidor ele
+    não está no PATH global), depois o do PATH e, no Mac, o do Homebrew."""
+    venv_bin = Path(sys.executable).with_name("yt-dlp")
+    candidates = [str(venv_bin), shutil.which("yt-dlp"), "/opt/homebrew/bin/yt-dlp"]
+    for candidate in filter(None, candidates):
         try:
             r = subprocess.run([candidate, "--version"], capture_output=True, text=True)
             if r.returncode == 0:
                 print(f"✅ yt-dlp {r.stdout.strip()}  ({candidate})")
                 return candidate
-        except FileNotFoundError:
+        except (FileNotFoundError, PermissionError):
             continue
-    print("❌ yt-dlp não encontrado. Instale com: brew install yt-dlp")
+    print("❌ yt-dlp não encontrado. Instale na venv: pip install -U yt-dlp")
     sys.exit(1)
+
+
+def _cookie_flags(browser: str) -> list:
+    if COOKIES.is_file():
+        return ["--cookies", str(COOKIES)]
+    return ["--cookies-from-browser", browser]
 
 
 def _base_flags(browser: str, out_dir: Path, prefix: str) -> list:
     """Flags comuns a todos os modos de download."""
     return [
-        # --- Autenticação via cookies reais do browser ---
-        "--cookies-from-browser", browser,
+        # --- Autenticação: cookies.txt do servidor (ou do browser local) ---
+        *_cookie_flags(browser),
 
         # --- Robustez ---
         "--retries", "10",
@@ -81,53 +91,52 @@ def _base_flags(browser: str, out_dir: Path, prefix: str) -> list:
     ]
 
 
+SUB_FLAGS = [
+    "--write-subs",
+    "--write-auto-subs",
+    "--sub-langs", SUB_LANGS,
+    "--sub-format", "srt/vtt/best",
+    "--convert-subs", "srt",
+]
+
+
+def _download_best(yt: str, url: str, out_dir: Path, prefix: str, browser: str,
+                   extra: list, label: str) -> bool:
+    """Tenta cada formato de FORMAT_ATTEMPTS até um baixar."""
+    for i, (nome, fmt) in enumerate(FORMAT_ATTEMPTS, 1):
+        cmd = [yt] + _base_flags(browser, out_dir, prefix) + [
+            "--format", fmt,
+            "--merge-output-format", "mp4",
+            *extra,
+            url,
+        ]
+        if _run(cmd, f"{label} — {nome}", tips=i == len(FORMAT_ATTEMPTS)):
+            return True
+        if i < len(FORMAT_ATTEMPTS):
+            print(f"⚠️ Falhou em {nome}; tentando {FORMAT_ATTEMPTS[i][0]}…", flush=True)
+    return False
+
+
 def download_video(yt: str, url: str, out_dir: Path, prefix: str,
                    browser: str = "chrome") -> bool:
     """Baixa vídeo + legendas."""
-    cmd = [yt] + _base_flags(browser, out_dir, prefix) + [
-        "--format", FORMAT_BEST,
-        "--merge-output-format", "mp4",
-
-        # --- Legendas ---
-        "--write-subs",
-        "--write-auto-subs",
-        "--sub-langs", SUB_LANGS,
-        "--sub-format", "srt/vtt/best",
-        "--convert-subs", "srt",
-
-        url,
-    ]
-    return _run(cmd, "Vídeo + legendas")
+    return _download_best(yt, url, out_dir, prefix, browser, SUB_FLAGS, "Vídeo + legendas")
 
 
 def download_subs_only(yt: str, url: str, out_dir: Path, prefix: str,
                        browser: str = "chrome") -> bool:
     """Baixa apenas as legendas (sem vídeo)."""
-    cmd = [yt] + _base_flags(browser, out_dir, prefix) + [
-        "--skip-download",
-        "--write-subs",
-        "--write-auto-subs",
-        "--sub-langs", SUB_LANGS,
-        "--sub-format", "srt/vtt/best",
-        "--convert-subs", "srt",
-
-        url,
-    ]
+    cmd = [yt] + _base_flags(browser, out_dir, prefix) + ["--skip-download", *SUB_FLAGS, url]
     return _run(cmd, "Só legendas")
 
 
 def download_video_only(yt: str, url: str, out_dir: Path, prefix: str,
                         browser: str = "chrome") -> bool:
     """Baixa apenas o vídeo (sem legendas)."""
-    cmd = [yt] + _base_flags(browser, out_dir, prefix) + [
-        "--format", FORMAT_BEST,
-        "--merge-output-format", "mp4",
-        url,
-    ]
-    return _run(cmd, "Só vídeo")
+    return _download_best(yt, url, out_dir, prefix, browser, [], "Só vídeo")
 
 
-def _run(cmd: list, label: str) -> bool:
+def _run(cmd: list, label: str, tips: bool = True) -> bool:
     print(f"\n{'='*60}")
     print(f"📥 {label}")
     print(f"{'='*60}")
@@ -148,7 +157,8 @@ def _run(cmd: list, label: str) -> bool:
         print(f"\n✅ {label} concluído.")
         return True
     print(f"\n❌ yt-dlp encerrou com código {rc}.")
-    _print_tips()
+    if tips:
+        _print_tips()
     return False
 
 
@@ -159,11 +169,11 @@ def _print_tips():
     print("    um IP diferente do visto na extração, todo download dá 403.")
     print("    → Baixe fora da rede corporativa (ex.: hotspot) ou exclua")
     print("      *.googlevideo.com da interceptação do Netskope.")
-    print("  • Confirme que está logado no YouTube no Chrome/Firefox.")
-    print("  • Tente --browser firefox se o Chrome não funcionar.")
+    print(f"  • Sessão expirada: exporte de novo o {COOKIES.name} de um navegador")
+    print("    logado no YouTube e copie para a raiz do repo no servidor.")
     print("  • Para PO token: container 'bgutil-provider' deve estar rodando")
-    print("    (docker ps) e o yt-dlp precisa ser recente (brew).")
-    print("  • Atualize o yt-dlp: brew upgrade yt-dlp")
+    print("    (docker ps) e o yt-dlp precisa ser recente.")
+    print("  • Atualize o yt-dlp: pip install -U yt-dlp (na venv)")
 
 
 def _list_results(out_dir: Path):
@@ -178,7 +188,7 @@ def _list_results(out_dir: Path):
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Baixa vídeos do YouTube de forma confiável via yt-dlp com cookies do browser.",
+        description="Baixa vídeos do YouTube de forma confiável via yt-dlp, na qualidade máxima.",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -194,7 +204,7 @@ def main() -> int:
     parser.add_argument(
         "--browser", default="chrome",
         choices=["chrome", "firefox", "safari", "chromium", "edge", "brave", "opera"],
-        help="Browser do qual ler os cookies (padrão: chrome).",
+        help="Browser do qual ler os cookies quando não há cookies.txt (padrão: chrome).",
     )
 
     mode = parser.add_mutually_exclusive_group()
@@ -220,7 +230,7 @@ def main() -> int:
 
     print(f"📁 Destino: {out_dir}")
     print(f"🌐 URL:     {args.url}")
-    print(f"🍪 Browser: {args.browser}")
+    print(f"🍪 Cookies: {COOKIES if COOKIES.is_file() else 'browser ' + args.browser}")
 
     if args.subs_only:
         ok = download_subs_only(yt, args.url, out_dir, args.name, args.browser)

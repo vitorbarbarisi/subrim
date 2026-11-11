@@ -1779,17 +1779,13 @@ class App(tk.Tk):
         self._yt_name = tk.StringVar()
         ttk.Entry(yt, textvariable=self._yt_name, width=18).grid(row=1, column=1, sticky=tk.EW, pady=3)
 
-        ttk.Label(yt, text="Browser:").grid(row=2, column=0, sticky=tk.W, pady=3)
-        self._yt_browser = tk.StringVar(value="chrome")
-        browser_cb = ttk.Combobox(yt, textvariable=self._yt_browser, width=10, state="readonly",
-                                  values=["chrome", "firefox", "safari", "chromium", "edge", "brave"])
-        browser_cb.grid(row=2, column=1, sticky=tk.W, pady=3)
-
         self._yt_subs = tk.BooleanVar()
         self._yt_vid  = tk.BooleanVar()
-        ttk.Checkbutton(yt, text="Só legendas", variable=self._yt_subs).grid(row=3, column=0, sticky=tk.W, pady=2)
-        ttk.Checkbutton(yt, text="Só vídeo",    variable=self._yt_vid ).grid(row=3, column=1, sticky=tk.W, pady=2)
-        ttk.Button(yt, text="▶ Baixar", command=self._run_yt).grid(row=3, column=2, sticky=tk.E, pady=(6, 0))
+        ttk.Checkbutton(yt, text="Só legendas", variable=self._yt_subs).grid(row=2, column=0, sticky=tk.W, pady=2)
+        ttk.Checkbutton(yt, text="Só vídeo",    variable=self._yt_vid ).grid(row=2, column=1, sticky=tk.W, pady=2)
+        ttk.Button(yt, text="▶ Baixar", command=self._run_yt).grid(row=2, column=2, sticky=tk.E, pady=(6, 0))
+        ttk.Label(yt, text="Baixa no servidor (cookies.txt), tentando a qualidade máxima primeiro.",
+                  foreground="#888", font=("", 9)).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
         yt.columnconfigure(1, weight=1)
 
         # Globoplay Scraper
@@ -3892,9 +3888,7 @@ class App(tk.Tk):
         if not name:
             messagebox.showwarning("Aviso", "Informe o Nome do asset (ex.: clone45)")
             return
-        cmd = [PY, str(REPO / "youtube_downloader.py"), url,
-               "--name", name,
-               "--browser", self._yt_browser.get()]
+        cmd = [PY, str(REPO / "youtube_downloader.py"), url, "--name", name]
         if self._yt_subs.get():
             cmd.append("--subs-only")
         elif self._yt_vid.get():
