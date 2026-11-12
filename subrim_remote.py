@@ -21,6 +21,7 @@ conjuntos, tuplas, bytes e imagens). Só stdlib — o client não instala nada.
 from __future__ import annotations
 
 import base64
+import http.client
 import io
 import json
 import posixpath
@@ -341,6 +342,32 @@ class Client:
             self._wake.set()   # o monitor confere já, sem esperar o intervalo
             raise Disconnected(f"Sem resposta do servidor ({self.base}): {e}") from None
 
+    def _messages(self, r):
+        """Linhas NDJSON de um stream aberto por ``_open``.
+
+        Uma queda no MEIO da leitura (Mac que dormiu, Wi-Fi que trocou, silêncio
+        além do STREAM_TIMEOUT) sai do socket como ``TimeoutError``,
+        ``ConnectionResetError`` ou ``IncompleteRead`` — nenhum deles é
+        ``RemoteError``. Sem a conversão aqui, o ``RemoteProc`` não reconectava:
+        a exceção matava a thread do ``_follow`` e o job ficava "rodando" no
+        Manager para sempre, mesmo depois de terminar no servidor.
+        """
+        it = iter(r)
+        while True:
+            try:
+                raw = next(it)
+            except StopIteration:
+                return
+            except (OSError, http.client.HTTPException) as e:
+                self._wake.set()
+                raise Disconnected(f"Conexão com o servidor caiu no meio do stream: {e}") from None
+            if not raw.strip():
+                continue
+            try:
+                yield json.loads(raw.decode("utf-8"))
+            except ValueError:   # linha cortada pela queda
+                raise Disconnected("Stream do servidor chegou truncado.") from None
+
     def _post_json(self, path: str, payload, timeout: float = CONNECT_TIMEOUT):
         with self._open(path, payload, timeout) as r:
             return json.loads(r.read().decode("utf-8"))
@@ -359,10 +386,7 @@ class Client:
         payload = {"fn": fn, "args": [enc(a) for a in args],
                    "kwargs": {k: enc(v) for k, v in kwargs.items()}}
         with self._open("/mgr/call", payload, STREAM_TIMEOUT) as r:
-            for raw in r:
-                if not raw.strip():
-                    continue
-                msg = json.loads(raw.decode("utf-8"))
+            for msg in self._messages(r):
                 if "cb" in msg:
                     callbacks[msg["cb"]](*decode(msg["args"], RemotePath))
                 elif "ok" in msg:
@@ -401,10 +425,7 @@ class Client:
     def proc_stream(self, pid: int, offset: int = 0):
         """Gera ``("line", texto)`` e, no fim, ``("exit", código)``."""
         with self._open(f"/mgr/proc/{pid}/stream", {"from": offset}, STREAM_TIMEOUT) as r:
-            for raw in r:
-                if not raw.strip():
-                    continue
-                msg = json.loads(raw.decode("utf-8"))
+            for msg in self._messages(r):
                 if "line" in msg:
                     yield "line", msg["line"]
                 elif "exit" in msg:
