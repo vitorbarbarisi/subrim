@@ -13,6 +13,7 @@ import os
 import queue
 import re
 import secrets
+import shutil
 import subprocess
 import tempfile
 import threading
@@ -31,7 +32,7 @@ from tkinter import ttk
 import subrim_remote as sr
 from subrim_remote import CLIENT, PY, SCRAPER_PY, WHISPER_PY, RemoteError, RemoteModule, RemotePath
 # Só utilitários puros (sem I/O): rodam aqui mesmo, sem ida ao servidor.
-from manager_core import PHASES, wh_readable_name as _wh_readable_name
+from manager_core import PHASES, scraper_python as _local_scraper_python, wh_readable_name as _wh_readable_name
 import youtube_monitor as ytm   # idem: só sanitize_name/is_valid_prefix
 from app_identity import set_app_name
 import get_drive_token as drive_auth   # só o callback do OAuth, que roda aqui
@@ -1801,12 +1802,14 @@ class App(tk.Tk):
         ttk.Entry(gp, textvariable=self._gp_name, width=22).grid(row=1, column=1, sticky=tk.W, pady=3)
 
         self._gp_headless = tk.BooleanVar()
-        ttk.Checkbutton(gp, text="Headless", variable=self._gp_headless).grid(row=2, column=0, sticky=tk.W)
-        ttk.Label(gp, text="Tempo espera (s):").grid(row=2, column=1, sticky=tk.W, padx=(8, 0))
-        self._gp_time = tk.StringVar(value="60")
+        ttk.Checkbutton(gp, text="Headless (no servidor)", variable=self._gp_headless).grid(row=2, column=0, sticky=tk.W)
+        ttk.Label(gp, text="Limite (s):").grid(row=2, column=1, sticky=tk.W, padx=(8, 0))
+        self._gp_time = tk.StringVar(value="1800")
         ttk.Entry(gp, textvariable=self._gp_time, width=6).grid(row=2, column=2, sticky=tk.W)
+        ttk.Label(gp, text="Sem headless, o Chrome abre neste computador para você carregar os episódios.",
+                  foreground="#888", font=("", 9)).grid(row=3, column=0, columnspan=3, sticky=tk.W, pady=(4, 0))
 
-        ttk.Button(gp, text="▶ Iniciar Scraping", command=self._run_gp).grid(row=3, column=2, sticky=tk.E, pady=(8, 0))
+        ttk.Button(gp, text="▶ Iniciar Scraping", command=self._run_gp).grid(row=4, column=2, sticky=tk.E, pady=(8, 0))
         gp.columnconfigure(1, weight=1)
 
         # YouTube Monitor: editor do youtube_channels.json. Cada mudança é gravada
@@ -3894,13 +3897,58 @@ class App(tk.Tk):
         if not url or not name:
             messagebox.showwarning("Aviso", "Preencha URL e Nome base")
             return
+        self._start_scraping(url, name, self._gp_time.get(), self._gp_headless.get())
+
+    def _start_scraping(self, url: str, name: str, limite: str, headless: bool):
+        """Headless roda no servidor; o modo visual roda aqui, porque é neste
+        computador que o usuário rola a página no Chrome."""
         SOURCE.mkdir(exist_ok=True)
-        cmd = [SCRAPER_PY, str(REPO / "scrape_globoplay_episodes.py"),
-               "--url", url, "--output", str(SOURCE / name),
-               "--interaction-time", self._gp_time.get()]
-        if self._gp_headless.get():
-            cmd.append("--headless")
-        self._launch(cmd, label=f"Scraping: {name}")
+        if headless:
+            self._launch([SCRAPER_PY, str(REPO / "scrape_globoplay_episodes.py"),
+                          "--url", url, "--output", str(SOURCE / name),
+                          "--interaction-time", limite, "--headless"],
+                         label=f"Scraping: {name}")
+        else:
+            self._scrape_local(url, name, limite)
+
+    def _scrape_local(self, url: str, name: str, limite: str):
+        """Roda o scraper visual neste computador e envia o resultado ao servidor."""
+        label = f"Scraping: {name}"
+        tmp = Path(tempfile.mkdtemp(prefix="subrim_scrape_"))
+        cmd = [_local_scraper_python(), str(Path(__file__).with_name("scrape_globoplay_episodes.py")),
+               "--url", url, "--output", str(tmp / name), "--interaction-time", limite]
+        job = self._new_job(label)
+        job.on_done = lambda: self._send_scrape(job, tmp, name)
+        self._log_line(f"$ {' '.join(cmd)}", "cmd", job)
+        self._log_line("(rodando neste computador: no Chrome, clique em Mostrar mais até acabar e depois em Concluir)", "info", job)
+        self._update_job_controls()
+        try:
+            p = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+                                 encoding="utf-8", env={**os.environ, "PYTHONUNBUFFERED": "1",
+                                                        "PYTHONIOENCODING": "utf-8"})
+        except OSError as e:
+            self._log_line(f"❌ Não foi possível iniciar o scraper: {e}", "error", job)
+            self._on_job_done(job, -1)
+            return
+        self._follow(job, p)
+
+    def _send_scrape(self, job: "Job", tmp: Path, name: str):
+        """Grava o JSON e o CSV no servidor. Lista vazia não sobrescreve o que já há lá."""
+        try:
+            if job.returncode != 0:
+                return
+            texto = (tmp / f"{name}.json").read_text(encoding="utf-8")
+            total = len(json.loads(texto).get("episodes", []))
+            if not total:
+                self._log_line("❌ Nenhum episódio coletado: nada foi enviado ao servidor", "error", job)
+                return
+            (SOURCE / f"{name}.json").write_text(texto)
+            (SOURCE / f"{name}.csv").write_text((tmp / f"{name}.csv").read_text(encoding="utf-8"))
+            self._log_line(f"✅ {total} episódios enviados ao servidor: {SOURCE / name}.json", "success", job)
+        except (OSError, ValueError, RemoteError) as e:
+            self._log_line(f"❌ Falha ao enviar ao servidor: {e}", "error", job)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
     # ── YouTube Monitor (youtube_channels.json) ──────────────────────────────────
     def _ytm_refresh(self):
@@ -4256,10 +4304,11 @@ class App(tk.Tk):
                 self._log_q.put((jid, line, tag))
             p.wait()
             self._attached_procs.discard(p.pid)
-            try:
-                CLIENT.proc_forget(p.pid)
-            except RemoteError:
-                pass
+            if isinstance(p, sr.RemoteProc):   # o scraper visual roda localmente
+                try:
+                    CLIENT.proc_forget(p.pid)
+                except RemoteError:
+                    pass
             sep = "─" * 70
             tag = "success" if p.returncode == 0 else "error"
             self._log_q.put((jid, sep, "info"))
@@ -4973,7 +5022,7 @@ class NewScrapingDialog(tk.Toplevel):
         super().__init__(app)
         self.app = app
         self.title("Novo Scraping")
-        self.geometry("500x260")
+        self.geometry("500x285")
         self.resizable(False, False)
         self.grab_set()
 
@@ -4995,11 +5044,13 @@ class NewScrapingDialog(tk.Toplevel):
         opts = ttk.Frame(f)
         opts.pack(fill=tk.X, pady=2)
         self._headless = tk.BooleanVar()
-        ttk.Checkbutton(opts, text="Headless (scroll automático)", variable=self._headless).pack(side=tk.LEFT)
-        ttk.Label(opts, text="  Espera:").pack(side=tk.LEFT)
-        self._time = tk.StringVar(value="60")
+        ttk.Checkbutton(opts, text="Headless (no servidor)", variable=self._headless).pack(side=tk.LEFT)
+        ttk.Label(opts, text="  Limite:").pack(side=tk.LEFT)
+        self._time = tk.StringVar(value="1800")
         ttk.Entry(opts, textvariable=self._time, width=6).pack(side=tk.LEFT, padx=2)
         ttk.Label(opts, text="s").pack(side=tk.LEFT)
+        ttk.Label(f, text="Sem headless, o Chrome abre neste computador para você carregar os episódios.",
+                  foreground="#888", font=("", 9)).pack(anchor=tk.W, pady=(2, 0))
 
         btns = ttk.Frame(f)
         btns.pack(fill=tk.X, pady=(12, 0))
@@ -5012,13 +5063,7 @@ class NewScrapingDialog(tk.Toplevel):
         if not url or not name:
             messagebox.showwarning("Campos obrigatórios", "Preencha URL e Nome base.", parent=self)
             return
-        SOURCE.mkdir(exist_ok=True)
-        cmd = [SCRAPER_PY, str(REPO / "scrape_globoplay_episodes.py"),
-               "--url", url, "--output", str(SOURCE / name),
-               "--interaction-time", self._time.get()]
-        if self._headless.get():
-            cmd.append("--headless")
-        self.app._launch(cmd, label=f"Scraping: {name}")
+        self.app._start_scraping(url, name, self._time.get(), self._headless.get())
         self.destroy()
 
 

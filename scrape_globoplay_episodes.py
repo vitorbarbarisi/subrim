@@ -7,6 +7,8 @@ Este script simula o scroll infinito para carregar todos os episódios dinamicam
 import time
 import json
 import csv
+import signal
+import sys
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
@@ -18,6 +20,42 @@ import logging
 # Configurar logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+
+# Botão na própria página: o usuário rola o quanto quiser e avisa quando acabou.
+# Recriado a cada chamada porque a página pode refazer o DOM. Devolve a contagem
+# de episódios carregados e se o botão já foi clicado.
+CONCLUIR_JS = """
+const total = new Set([...document.querySelectorAll("a[href*='/v/'][href*='?s=0s']")]
+                      .map(a => a.href)).size;
+let b = document.getElementById('subrim-concluir');
+if (!b) {
+    b = document.createElement('button');
+    b.id = 'subrim-concluir';
+    b.style.cssText = 'position:fixed;right:24px;bottom:24px;z-index:2147483647;padding:12px 18px;' +
+                      'font-size:15px;font-weight:600;color:#fff;background:#1a7f37;border:0;' +
+                      'border-radius:8px;cursor:pointer';
+    b.onclick = () => { window.__subrimConcluir = true; };
+    document.body.appendChild(b);
+}
+const fim = !!window.__subrimConcluir;
+b.textContent = fim ? 'Coletando…' : `✓ Concluir (${total} episódios)`;
+return [total, fim];
+"""
+
+CONTAR_JS = """
+return new Set([...document.querySelectorAll("a[href*='/v/'][href*='?s=0s']")]
+               .map(a => a.href)).size;
+"""
+
+# Devolve se o botão "Mostrar mais" da página existia (e foi clicado).
+MOSTRAR_MAIS_JS = """
+const b = [...document.querySelectorAll('button,[role=button],a')]
+          .find(e => e.innerText.trim() === 'Mostrar mais');
+if (!b) return false;
+b.scrollIntoView({block: 'center'});
+b.click();
+return true;
+"""
 
 class GloboPlayScraper:
     def __init__(self, url="https://globoplay.globo.com/v/13385190/?s=0s", headless=False):
@@ -144,6 +182,29 @@ class GloboPlayScraper:
         logger.info(f"Scroll concluído após {scrolls} scrolls. Altura final: {last_height}px")
         return scrolls
 
+
+    def click_show_more(self, time_limit, pause=0.5, stall_timeout=15):
+        """Clica em "Mostrar mais" até o botão sumir, a lista parar de crescer
+        ou ``time_limit`` (segundos) estourar."""
+        start_time = time.time()
+        total = self.driver.execute_script(CONTAR_JS)
+        print(f"📊 Episódios detectados: {total}")
+
+        while self.driver.execute_script(MOSTRAR_MAIS_JS):
+            stall_start = time.time()
+            while True:
+                time.sleep(pause)
+                current = self.driver.execute_script(CONTAR_JS)
+                if current != total:
+                    total = current
+                    print(f"📊 Episódios detectados: {total}")
+                    break
+                if time.time() - stall_start >= stall_timeout:
+                    logger.warning(f"⚠️  'Mostrar mais' não carregou novos episódios em {stall_timeout}s: a lista pode estar incompleta")
+                    return
+            if time.time() - start_time >= time_limit:
+                logger.warning(f"⚠️  Limite de {time_limit}s atingido: a lista pode estar incompleta")
+                return
 
     def extract_episodes(self):
         """Extrai informações completas dos episódios da página"""
@@ -568,61 +629,41 @@ class GloboPlayScraper:
             # Espera página carregar
             self.wait_for_page_load()
 
-            # No modo visual, aguarda interação do usuário por tempo limitado
+            # No modo visual, o usuário rola a página e clica em Concluir
             if not self.headless:
                 print("\n" + "="*60)
                 print("🔄 MODO INTERATIVO ATIVADO")
                 print("📜 INSTRUÇÕES:")
-                print("   1. Use a roda do mouse ou setas para fazer scroll")
-                print("   2. Continue fazendo scroll até carregar todos os episódios desejados")
-                print("   3. Aguarde - os dados serão extraídos automaticamente")
-                print("⏹️  NÃO PRECISA FECHAR A JANELA - ela será fechada automaticamente!")
+                print("   1. Clique em 'Mostrar mais' na página até carregar todos os episódios")
+                print("   2. Clique em '✓ Concluir', no canto inferior direito da página")
+                print("⚠️  NÃO feche a janela: os episódios são lidos dela depois do Concluir")
+                print(f"⏱️  Limite: {interaction_time} segundos")
                 print("="*60 + "\n")
 
-                # Timer configurável para interação do usuário
-                # interaction_time já é passado como parâmetro do método
                 start_time = time.time()
-
                 episodes_collected = 0
-                last_check = time.time()
-
-                print(f"⏱️  Você tem {interaction_time} segundos para fazer scroll...")
-                print("💡 Dica: Faça scroll na página para carregar mais episódios...")
 
                 try:
                     while time.time() - start_time < interaction_time:
-                        # Verifica se a janela ainda está aberta
-                        self.driver.current_url  # Isso lança uma exceção se a janela for fechada
-
-                        # A cada 3 segundos, verifica se há novos episódios
-                        current_time = time.time()
-                        if current_time - last_check >= 3:
-                            try:
-                                # Conta episódios atuais sem salvar (apenas para feedback)
-                                current_episodes = len(self.driver.find_elements(By.CSS_SELECTOR, "a[href*='/v/'][href*='?s=0s']"))
-                                if current_episodes != episodes_collected:
-                                    episodes_collected = current_episodes
-                                    elapsed = int(current_time - start_time)
-                                    remaining = interaction_time - elapsed
-                                    print(f"📊 Episódios detectados: {episodes_collected} ({remaining}s restantes)")
-                                    logger.info(f"Episódios detectados: {episodes_collected}")
-                                last_check = current_time
-                            except Exception as count_error:
-                                logger.debug(f"Erro ao contar episódios: {count_error}")
-
-                        time.sleep(1)  # Verifica a cada segundo
-
-                    # Tempo esgotado - extração automática
-                    logger.info("⏰ Tempo de interação esgotado - iniciando extração automática")
-                    print(f"🎯 Tempo esgotado! Coletando {episodes_collected} episódios detectados...")
+                        total, concluido = self.driver.execute_script(CONCLUIR_JS)
+                        if total != episodes_collected:
+                            episodes_collected = total
+                            remaining = int(interaction_time - (time.time() - start_time))
+                            print(f"📊 Episódios detectados: {episodes_collected} ({remaining}s restantes)")
+                        if concluido:
+                            print(f"🎯 Concluído! Coletando {episodes_collected} episódios detectados...")
+                            break
+                        time.sleep(1)
+                    else:
+                        print(f"🎯 Tempo esgotado! Coletando {episodes_collected} episódios detectados...")
 
                 except Exception as e:
-                    # Janela foi fechada antes do tempo acabar
-                    logger.info("✅ Janela do navegador fechada pelo usuário (antes do timer)")
-                    print(f"🎯 Janela fechada! Coletando {episodes_collected} episódios detectados...")
-                    # Continua para extração mesmo sem dados coletados
+                    logger.warning(f"⚠️  Janela do navegador fechada antes do Concluir: nada foi coletado ({type(e).__name__})")
 
-            # Extrai episódios (seja após scroll automático ou manual)
+            else:
+                self.click_show_more(interaction_time)
+
+            # Extrai episódios (carregados pelo headless ou pelo usuário)
             logger.info("🔍 Iniciando extração de episódios...")
             self.extract_episodes()
             logger.info(f"📊 Após extração: {len(self.episodes)} episódios encontrados")
@@ -666,9 +707,12 @@ def main():
     parser.add_argument("--headless", action="store_true",
                        help="Executar em modo headless (sem interface gráfica)")
     parser.add_argument("--interaction-time", type=int, default=60,
-                       help="Tempo em segundos para interação do usuário no modo visual (padrão: 60)")
+                       help="Limite em segundos para carregar os episódios, pelo usuário ou pelo headless (padrão: 60)")
 
     args = parser.parse_args()
+
+    # "Parar" no Manager: sai pelo finally do run(), que fecha o Chrome.
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
 
     # Determina modo de execução
     headless = args.headless
@@ -676,8 +720,8 @@ def main():
         print("🚀 Executando em modo HEADLESS (sem interface gráfica)")
     else:
         print("🚀 Executando em modo VISUAL (com interface gráfica)")
-        print("💡 IMPORTANTE: Faça scroll MANUALMENTE na página para carregar mais episódios!")
-        print("   Feche a janela quando terminar de fazer scroll.")
+        print("💡 IMPORTANTE: Clique em 'Mostrar mais' na página para carregar mais episódios!")
+        print("   Clique em '✓ Concluir' na página quando terminar.")
 
     print(f"📍 URL: {args.url}")
     print(f"📁 Output: {args.output}")
