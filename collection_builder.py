@@ -724,30 +724,61 @@ def _grab_at(cap, fps: float, timestamp_seconds: float, total_frames: int = 0):
     return None
 
 
+def _grab_with_ffmpeg(video_path: str, timestamp_seconds: float, out_path: Path,
+                      duration: float = 0.0) -> bool:
+    """Extrai o frame com o ``ffmpeg`` do sistema (fallback do OpenCV).
+
+    Existe por causa dos vídeos AV1 do warehouse: o FFmpeg embutido no wheel do
+    OpenCV só tenta o decodificador AV1 por hardware, que não existe no WSL, e
+    devolve ``read() == False`` para todo frame. O ``ffmpeg`` do sistema traz o
+    ``libdav1d`` (software) e lê o mesmo arquivo sem problema.
+
+    Mesma correção de margem e mesmo cuidado com o fim do vídeo que
+    ``_grab_at``: o alvo é limitado a pouco antes do fim e, se ainda assim não
+    sair imagem, tenta 1s antes.
+    """
+    ts = _corrected_timestamp(timestamp_seconds)
+    if duration > 0:
+        ts = min(ts, max(0.0, duration - 0.1))
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    for attempt in (ts, max(0.0, ts - 1.0)):
+        cmd = ["ffmpeg", "-v", "error", "-ss", f"{attempt:.3f}", "-i", str(video_path),
+               "-frames:v", "1", "-y", str(out_path)]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        except Exception:  # noqa: BLE001 - ffmpeg ausente/PATH quebrado/timeout
+            return False
+        if r.returncode == 0 and out_path.exists() and out_path.stat().st_size > 0:
+            return True
+    return False
+
+
 def extract_frame(video_path: str, timestamp_seconds: float, out_path: Path) -> bool:
-    """Extrai o frame do vídeo na minutagem indicada e salva como PNG (sem legenda)."""
+    """Extrai o frame do vídeo na minutagem indicada e salva como PNG (sem legenda).
+
+    Tenta primeiro o OpenCV (rápido, processo único); se ele não abrir ou não
+    decodificar o vídeo — caso dos AV1 —, cai no ``ffmpeg`` do sistema.
+    """
     cap = cv2.VideoCapture(video_path)
+    duration = 0.0
     try:
-        if not cap.isOpened():
-            print(f"❌ Não foi possível abrir o vídeo: {video_path}", flush=True)
-            return False
-
-        fps = cap.get(cv2.CAP_PROP_FPS)
-        if not fps:
-            print(f"❌ FPS inválido para o vídeo: {video_path}", flush=True)
-            return False
-
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
-        frame = _grab_at(cap, fps, timestamp_seconds, total_frames)
-        if frame is None:
-            print(f"❌ Falha ao capturar frame em ~{timestamp_seconds:.3f}s de {video_path}", flush=True)
-            return False
-
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        cv2.imwrite(str(out_path), frame)
-        return True
+        fps = cap.get(cv2.CAP_PROP_FPS) if cap.isOpened() else 0
+        if fps:
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0)
+            duration = total_frames / fps if total_frames else 0.0
+            frame = _grab_at(cap, fps, timestamp_seconds, total_frames)
+            if frame is not None:
+                out_path.parent.mkdir(parents=True, exist_ok=True)
+                cv2.imwrite(str(out_path), frame)
+                return True
     finally:
         cap.release()
+
+    if _grab_with_ffmpeg(video_path, timestamp_seconds, out_path, duration):
+        return True
+    print(f"❌ Falha ao capturar frame em ~{timestamp_seconds:.3f}s de {video_path} "
+          f"(OpenCV e ffmpeg)", flush=True)
+    return False
 
 
 def extract_audio_segment(video: Path, start: float, end: float, out_path: Path) -> bool:
