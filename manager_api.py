@@ -217,7 +217,8 @@ _procs_lock = threading.Lock()
 # Variáveis que o client pode definir no ambiente do processo (estilo da queima,
 # LLM, debug). O resto vem do ambiente do servidor (.env, PATH, chaves).
 ENV_KEYS = {"BURN_PAUSE_RATE", "BURN_BOX_OPAQUE", "BURN_TOP_TRANSLATION", "BURN_MULTILINE",
-            "EXTRACT_AUDIO", "DRIVE_UPLOAD", "SUBRIM_LLM_PROVIDER", "DEEPSEEK_DEBUG"}
+            "EXTRACT_AUDIO", "DRIVE_UPLOAD", "DUB_MIX", "DUB_AUDIO",
+            "SUBRIM_LLM_PROVIDER", "DEEPSEEK_DEBUG"}
 
 
 def _argv(raw: list) -> list:
