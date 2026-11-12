@@ -126,10 +126,20 @@ def _drive_find_or_create_folder(token: str, name: str, parent_id: str) -> str:
     return folder_id
 
 
+# Vídeo avulso do YouTube: ``<palavra-chave>_<id de 11 caracteres>``
+# (ex.: ``manual_YMd6Af9c3Mo``, ``teclas_76ZwjPwvWXs``). O id pode conter "_" e
+# "-", por isso o corte é pelo fim. Nomes como ``grande_encontro`` não casam.
+YOUTUBE_ASSET_RE = re.compile(r"^(?P<prefix>.+?)_(?P<id>[A-Za-z0-9_-]{11})$")
+
+
 def _drive_prefix(asset_name: str) -> str:
-    """Pasta de destino em videos/: o prefixo do canal do youtube_monitor quando
-    o asset começa com ``<prefixo>_`` (o maior que casar), senão o nome do asset
-    sem dígitos finais (``clone40`` → ``clone``)."""
+    """Pasta de destino em videos/, na ordem:
+
+    1. o prefixo do canal do youtube_monitor quando o asset começa com
+       ``<prefixo>_`` (o maior que casar);
+    2. a palavra-chave de um vídeo avulso do YouTube (``manual_<id>`` → ``manual``);
+    3. o nome do asset sem dígitos finais (``clone40`` → ``clone``).
+    """
     try:
         from youtube_monitor import channel_prefixes
         prefixes = channel_prefixes()
@@ -138,6 +148,9 @@ def _drive_prefix(asset_name: str) -> str:
     for p in sorted(prefixes, key=len, reverse=True):
         if asset_name.startswith(p + "_"):
             return p
+    m = YOUTUBE_ASSET_RE.match(asset_name)
+    if m and len(asset_name) - len(m.group("prefix")) == 12:
+        return m.group("prefix")
     return re.sub(r"\d+$", "", asset_name) or asset_name
 
 
