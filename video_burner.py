@@ -122,7 +122,7 @@ class VideoBurner:
         """Extrai o áudio do vídeo original para ``<asset>/<asset>.mp3``.
 
         Opção "Extrair audio no assets/final" (EXTRACT_AUDIO=1): o clean-up leva
-        esse mp3 para assets/final/ junto do merged. Idempotente, e uma falha só
+        esse mp3 para assets/final/. Idempotente, e uma falha só
         avisa — o áudio é um extra, não motivo para parar o pipeline.
         """
         name = directory.name

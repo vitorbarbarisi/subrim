@@ -567,8 +567,8 @@ class App(tk.Tk):
         self._extract_audio_on = tk.BooleanVar(value=False)
         ttk.Checkbutton(detail, text="Extrair audio no assets/final",
                         variable=self._extract_audio_on).pack(anchor=tk.W, pady=(2, 2))
-        # Envio ao Google Drive ao fim do pipeline (default: ligado). Desligado,
-        # o Clean-up também deixa de exigir o upload. Vale também no batch.
+        # Envio ao Google Drive ao fim do pipeline (default: ligado). O Clean-up
+        # continua exigindo o upload. Vale também no batch.
         self._drive_upload_on = tk.BooleanVar(value=True)
         ttk.Checkbutton(detail, text="Enviar para o drive",
                         variable=self._drive_upload_on,
@@ -3459,15 +3459,11 @@ class App(tk.Tk):
         self._on_asset_select(None)
 
     def _can_cleanup(self, a: dict) -> bool:
-        """Com o envio ao Drive desligado, basta o merge; senão exige o upload."""
-        return bool(a.get("uploaded")
-                    or (not self._drive_upload_on.get() and a.get("merged")))
+        """Exige o upload: depois do clean-up o vídeo queimado só existe no Drive."""
+        return bool(a.get("uploaded"))
 
     def _cleanup_cmd(self, a: dict) -> list:
-        cmd = [PY, str(REPO / "cleanup_asset.py"), a["name"]]
-        if not a.get("uploaded"):
-            cmd.append("--skip-drive")
-        return cmd
+        return [PY, str(REPO / "cleanup_asset.py"), a["name"]]
 
     def _run_selected(self):
         if self._selected_many:
@@ -3522,13 +3518,12 @@ class App(tk.Tk):
         if messagebox.askyesno(
                 "Confirmar clean-up",
                 f"Arquivar '{name}'?\n\n"
-                + ("Após validar o upload no Drive, " if self._selected.get("uploaded")
-                   else "Sem verificação no Drive (envio desativado), ")
-                + "o vídeo merged (e o áudio .mp3, "
-                "se houver) é copiado para assets/final/, o vídeo original e o base.txt vão para o "
+                "Após validar o upload no Drive, o áudio .mp3 (se houver) é copiado para "
+                "assets/final/, o vídeo original e o base.txt vão para o "
                 "warehouse e as pastas\n"
                 f"  • assets/{name}/\n  • assets/{name}_sub/\n"
-                "serão REMOVIDAS do disco. Esta ação é irreversível."):
+                "serão REMOVIDAS do disco. O vídeo queimado fica só no Drive. "
+                "Esta ação é irreversível."):
             self._launch(
                 self._cleanup_cmd(self._selected),
                 label=f"Clean-up: {name}",
@@ -3541,13 +3536,11 @@ class App(tk.Tk):
         if not ok:
             return
         msg = (f"Arquivar {len(ok)} asset(s)?\n\n"
-               + "\n".join(f"  • {a['name']}"
-                           + ("" if a.get("uploaded") else "  (sem Drive)") for a in ok)
-               + "\n\nApós validar o upload no Drive (exceto os marcados sem Drive), "
-               "o vídeo merged de cada um "
-               "(e o áudio .mp3, se houver) é copiado para assets/final/, o vídeo original e o base.txt vão para "
+               + "\n".join(f"  • {a['name']}" for a in ok)
+               + "\n\nApós validar o upload no Drive, o áudio .mp3 de cada um (se houver) "
+               "é copiado para assets/final/, o vídeo original e o base.txt vão para "
                "o warehouse e as pastas do asset (e _sub) serão REMOVIDAS do disco. "
-               "Esta ação é irreversível.")
+               "O vídeo queimado fica só no Drive. Esta ação é irreversível.")
         if skip:
             msg += ("\n\nSerão PULADOS (sem upload registrado no Drive):\n"
                     + "\n".join(f"  • {n}" for n in skip))

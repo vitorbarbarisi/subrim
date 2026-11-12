@@ -8,9 +8,9 @@ já finalizado (merge + upload ao Drive concluídos) ele:
   1. Verifica se o upload para o Google Drive ocorreu DE VERDADE (consulta a API
      usando o file_id gravado no marcador <asset>_drive.json). Se o arquivo não
      existir/estiver na lixeira, interrompe com erro e NADA mais é feito.
-  2. Copia o vídeo merged (o produto final queimado) para assets/final/<asset>.mp4
-     e, se houver, o áudio <asset>.mp3 extraído pelo pipeline, conferindo o
-     tamanho. Se falhar, interrompe antes de mover ou apagar algo.
+  2. Copia, se houver, o áudio <asset>.mp3 extraído pelo pipeline para
+     assets/final/, conferindo o tamanho. Se falhar, interrompe antes de mover ou
+     apagar algo. O vídeo merged não é copiado: a cópia dele fica só no Drive.
   3. Renomeia o arquivo base (ex.: 'capítulo ... _secs_base.txt') para o padrão
      do asset: '<asset>_base.txt' (ex.: clone40_base.txt).
   4. Envia o vídeo original (<asset>.mp4) e o arquivo base para o warehouse/.
@@ -39,7 +39,7 @@ import json
 REPO = Path(__file__).resolve().parent
 ASSETS = REPO / "assets"
 WAREHOUSE = REPO / "warehouse"
-# Cópia local do vídeo final (merged) de cada asset arquivado.
+# Cópia local do áudio extraído de cada asset arquivado.
 FINAL = ASSETS / "final"
 
 
@@ -133,27 +133,21 @@ def verify_drive_upload(asset: str, sub_dir: Path) -> bool:
     return True
 
 
-# ─── Etapa 2: copiar o vídeo final para assets/final ────────────────────────────
-def copy_merged_to_final(asset: str, asset_dir: Path, sub_dir: Path) -> bool:
-    """Copia o merged para ``assets/final/<asset>.mp4`` e, se existir, o áudio
-    ``<asset>.mp3`` extraído pelo pipeline (opção "Extrair audio").
+# ─── Etapa 2: copiar o áudio para assets/final ──────────────────────────────────
+def copy_audio_to_final(asset: str, asset_dir: Path) -> bool:
+    """Copia para ``assets/final/`` o áudio ``<asset>.mp3`` extraído pelo pipeline
+    (opção "Extrair audio"), se existir.
 
     Roda antes de qualquer coisa ser movida ou apagada: se falhar, o clean-up
     para com o asset intacto. Um destino já presente com o mesmo tamanho conta
     como feito (retomada de um clean-up que falhou mais adiante).
     """
-    print("\n📋 ETAPA 2: Cópia do vídeo final (e áudio) para assets/final")
-
-    merged = find_merged(asset, asset_dir, sub_dir)
-    if merged is None:
-        print("❌ Vídeo merged não encontrado. Abortando — nada será removido.")
-        return False
-    if not _copy_verified(merged, FINAL / f"{asset}.mp4"):
-        return False
+    print("\n📋 ETAPA 2: Cópia do áudio para assets/final")
 
     audio = asset_dir / f"{asset}.mp3"
     if audio.exists():
         return _copy_verified(audio, FINAL / audio.name)
+    print("   (sem áudio extraído)")
     return True
 
 
@@ -279,7 +273,6 @@ def send_to_warehouse_and_cleanup(asset: str, asset_dir: Path, sub_dir: Path,
     print(f"\n🎉 Clean-up de '{asset}' concluído com sucesso!")
     print(f"   • warehouse/{dest_video.name}")
     print(f"   • warehouse/{dest_base.name}")
-    print(f"   • assets/final/{asset}.mp4")
     if (FINAL / f"{asset}.mp3").exists():
         print(f"   • assets/final/{asset}.mp3")
     print("   • pastas do asset removidas do disco.")
@@ -319,8 +312,6 @@ Exemplo:
         """,
     )
     parser.add_argument("asset", help="Nome do asset (sem _sub)")
-    parser.add_argument("--skip-drive", action="store_true",
-                        help="Não exige o upload ao Drive (envio desativado no pipeline).")
     args = parser.parse_args()
     asset = args.asset
 
@@ -341,16 +332,13 @@ Exemplo:
         print("   Sem ela não há merged nem marcador de upload. Abortando.")
         return 1
 
-    # Etapa 1 — bloqueante: sem upload confirmado, nada é feito (exceto com
-    # --skip-drive, quando o envio ao Drive foi desativado no pipeline).
-    if args.skip_drive:
-        print("📋 ETAPA 1: Verificação do upload no Google Drive")
-        print("⏭  Pulada (--skip-drive: envio ao Drive desativado)")
-    elif not verify_drive_upload(asset, sub_dir):
+    # Etapa 1 — bloqueante: sem upload confirmado, nada é feito. O Drive é o único
+    # lugar que guarda o vídeo queimado depois do clean-up.
+    if not verify_drive_upload(asset, sub_dir):
         return 1
 
-    # Etapa 2 — cópia do merged para assets/final (bloqueante).
-    if not copy_merged_to_final(asset, asset_dir, sub_dir):
+    # Etapa 2 — cópia do áudio para assets/final (bloqueante).
+    if not copy_audio_to_final(asset, asset_dir):
         return 1
 
     # Etapa 3 — renomear base.
