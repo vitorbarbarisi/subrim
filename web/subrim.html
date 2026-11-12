@@ -1,0 +1,637 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#1c1c1e">
+<title>subrim</title>
+<link rel="manifest" href="/web/manifest.json">
+<link rel="icon" href="/web/icon.png">
+<style>
+:root {
+  --bg: #f4f4f2; --surface: #ffffff; --surface2: #ebebe8; --text: #1c1c1e; --muted: #6b6b70;
+  --border: rgba(0,0,0,.12); --accent: #2f6fdb; --accent-bg: #e3edfc; --ok: #2e7d32; --ok-bg: #e5f3e6;
+  --warn: #9a6200; --warn-bg: #fbf0d9; --err: #c62828; --err-bg: #fbe5e5; --log: #f7f7f5; --on-accent: #ffffff;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #161618; --surface: #1f1f22; --surface2: #2a2a2e; --text: #ececee; --muted: #9a9aa2;
+    --border: rgba(255,255,255,.12); --accent: #7aa7f5; --accent-bg: #1d2c47; --ok: #7bc67f; --ok-bg: #1d3220;
+    --warn: #e7b453; --warn-bg: #3a2d12; --err: #ef8a8a; --err-bg: #3d1c1c; --log: #121214; --on-accent: #0e1d36;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 16px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; -webkit-tap-highlight-color: transparent; }
+button, input, select { font: inherit; color: inherit; }
+button { background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  min-height: 44px; padding: 0 14px; cursor: pointer; }
+button:active { background: var(--surface2); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
+button.danger { color: var(--err); }
+button:disabled { opacity: .45; }
+input[type=text], input[type=url], input[type=number], select {
+  background: var(--surface); border: 1px solid var(--border); border-radius: 10px;
+  min-height: 44px; padding: 0 12px; width: 100%; }
+label.chk { display: flex; align-items: center; gap: 10px; min-height: 40px; }
+label.chk input { width: 20px; height: 20px; accent-color: var(--accent); }
+
+header { position: sticky; top: 0; z-index: 20; display: flex; align-items: center; gap: 6px;
+  height: 56px; padding: 0 8px; padding-top: env(safe-area-inset-top);
+  background: var(--surface); border-bottom: 1px solid var(--border); }
+header h1 { font-size: 18px; font-weight: 600; margin: 0; flex: 1; }
+.iconbtn { border: 0; background: transparent; width: 44px; padding: 0; font-size: 22px; }
+.dot { width: 10px; height: 10px; border-radius: 50%; background: var(--muted); margin-right: 10px; }
+.dot.ok { background: var(--ok); } .dot.err { background: var(--err); }
+
+#drawer { position: fixed; z-index: 40; top: 0; bottom: 0; left: 0; width: 260px; max-width: 80vw;
+  background: var(--surface); border-right: 1px solid var(--border);
+  transform: translateX(-100%); transition: transform .2s ease; padding-top: env(safe-area-inset-top); }
+#drawer.open { transform: none; }
+#scrim { position: fixed; inset: 0; z-index: 30; background: rgba(0,0,0,.4); display: none; }
+#scrim.open { display: block; }
+#drawer .brand { display: flex; align-items: center; gap: 10px; height: 56px; padding: 0 16px;
+  font-weight: 600; border-bottom: 1px solid var(--border); }
+#drawer .brand img { width: 28px; height: 28px; border-radius: 6px; }
+#drawer nav a { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 0 18px;
+  color: var(--text); text-decoration: none; }
+#drawer nav a.on { background: var(--accent-bg); color: var(--accent); font-weight: 600; }
+#drawer .foot { position: absolute; bottom: 12px; left: 18px; right: 18px; font-size: 13px; color: var(--muted); }
+@media (min-width: 900px) {
+  #drawer { transform: none; }
+  #drawer.collapsed { transform: translateX(-100%); }
+  #scrim { display: none !important; }
+  body.wide main, body.wide header { margin-left: 260px; }
+}
+
+main { max-width: 900px; margin: 0 auto; padding: 12px 12px calc(24px + env(safe-area-inset-bottom)); }
+.empty { color: var(--muted); text-align: center; padding: 48px 16px; }
+.list { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; overflow: hidden; }
+.item { display: flex; align-items: center; gap: 10px; padding: 12px 14px; min-height: 56px;
+  border-bottom: 1px solid var(--border); color: var(--text); text-decoration: none; cursor: pointer; }
+.item:last-child { border-bottom: 0; }
+.item:active { background: var(--surface2); }
+.item .grow { flex: 1; min-width: 0; }
+.item .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.item .s { font-size: 13px; color: var(--muted); }
+.pill { font-size: 13px; padding: 3px 8px; border-radius: 8px; white-space: nowrap;
+  background: var(--surface2); color: var(--muted); }
+.pill.ok { background: var(--ok-bg); color: var(--ok); }
+.pill.warn { background: var(--warn-bg); color: var(--warn); }
+.pill.acc { background: var(--accent-bg); color: var(--accent); }
+.pill.err { background: var(--err-bg); color: var(--err); }
+.bar { height: 4px; background: var(--surface2); border-radius: 2px; margin-top: 6px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--accent); }
+.bar.ok > i { background: var(--ok); }
+
+.tabs { display: flex; gap: 4px; background: var(--surface2); padding: 4px; border-radius: 12px; margin-bottom: 12px; }
+.tabs button { flex: 1; border: 0; background: transparent; min-height: 40px; }
+.tabs button.on { background: var(--surface); font-weight: 600; }
+.toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 10px; flex-wrap: wrap; }
+.toolbar input[type=text] { flex: 1; min-width: 140px; width: auto; }
+.card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 14px; margin-bottom: 12px; }
+.card h2 { font-size: 17px; margin: 0 0 4px; overflow-wrap: anywhere; }
+.card h3 { font-size: 13px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 14px 0 2px; font-weight: 600; }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); column-gap: 16px; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+.actions button { flex: 1 1 120px; }
+.row { display: flex; gap: 8px; align-items: center; }
+.muted { color: var(--muted); font-size: 14px; }
+.err-msg { color: var(--err); font-size: 14px; margin-top: 8px; }
+pre.log { background: var(--log); border: 1px solid var(--border); border-radius: 12px; padding: 10px;
+  font: 12px/1.45 ui-monospace, Menlo, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere;
+  height: calc(100dvh - 250px); min-height: 240px; overflow-y: auto; margin: 0; }
+pre.log .e { color: var(--err); } pre.log .w { color: var(--warn); } pre.log .o { color: var(--ok); }
+#toast { position: fixed; left: 50%; bottom: calc(20px + env(safe-area-inset-bottom)); transform: translateX(-50%);
+  background: var(--text); color: var(--bg); padding: 10px 16px; border-radius: 10px; font-size: 14px;
+  display: none; z-index: 50; max-width: 90vw; }
+.seg { display: flex; gap: 6px; flex-wrap: wrap; }
+.seg label { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
+.seg input { accent-color: var(--accent); }
+</style>
+</head>
+<body>
+<div id="scrim"></div>
+<aside id="drawer">
+  <div class="brand"><img src="/web/icon.png" alt="">subrim</div>
+  <nav>
+    <a href="#palavras" data-sec="palavras">📖 Palavras</a>
+    <a href="#jogos" data-sec="jogos">🎮 Jogos</a>
+    <a href="#manager" data-sec="manager">🛠️ Manager</a>
+  </nav>
+  <div class="foot" id="host">—</div>
+</aside>
+<header>
+  <button class="iconbtn" id="menu" aria-label="Menu">☰</button>
+  <h1 id="title">subrim</h1>
+  <span class="dot" id="dot" title="servidor"></span>
+</header>
+<main id="main"></main>
+<div id="toast"></div>
+
+<script>
+"use strict";
+var $ = function (s, r) { return (r || document).querySelector(s); };
+function h(tag, attrs, kids) {
+  var el = document.createElement(tag);
+  for (var k in (attrs || {})) {
+    var v = attrs[k];
+    if (v == null || v === false) continue;
+    if (k === "class") el.className = v;
+    else if (k.slice(0, 2) === "on") el.addEventListener(k.slice(2), v);
+    else if (k === "html") el.innerHTML = v;
+    else if (v === true) el.setAttribute(k, "");
+    else el.setAttribute(k, v);
+  }
+  [].concat(kids == null ? [] : kids).forEach(function (c) {
+    if (c == null || c === false) return;
+    el.appendChild(typeof c === "object" ? c : document.createTextNode(String(c)));
+  });
+  return el;
+}
+function store(k, v) {
+  try {
+    if (v === undefined) { var r = localStorage.getItem("subrim.web." + k); return r == null ? null : JSON.parse(r); }
+    localStorage.setItem("subrim.web." + k, JSON.stringify(v));
+  } catch (e) { return null; }
+}
+function toast(msg) {
+  var t = $("#toast"); t.textContent = msg; t.style.display = "block";
+  clearTimeout(toast._t); toast._t = setTimeout(function () { t.style.display = "none"; }, 3500);
+}
+function fmtDate(sec) {
+  var d = new Date(sec * 1000);
+  return d.toLocaleDateString("pt-BR", { day: "2-digit", month: "2-digit", year: "2-digit" }) + " " +
+         d.toLocaleTimeString("pt-BR", { hour: "2-digit", minute: "2-digit" });
+}
+function fmtSize(b) { return b > 1048576 ? (b / 1048576).toFixed(1).replace(".", ",") + " MB" : Math.round(b / 1024) + " KB"; }
+function fmtDur(s) {
+  if (s == null) return "";
+  s = Math.round(s); var m = Math.floor(s / 60);
+  return m >= 60 ? Math.floor(m / 60) + "h" + String(m % 60).padStart(2, "0") : m + "min";
+}
+
+// ── Servidor ─────────────────────────────────────────────────────────────────
+async function getJSON(url) {
+  var r = await fetch(url, { cache: "no-store" });
+  var j = await r.json().catch(function () { return {}; });
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+async function postJSON(url, body) {
+  var r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body || {}) });
+  var j = await r.json().catch(function () { return {}; });
+  if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
+  return j;
+}
+// Lê um NDJSON linha a linha; onMsg recebe cada objeto.
+async function ndjson(url, body, onMsg, signal) {
+  var r = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" },
+                            body: JSON.stringify(body || {}), signal: signal });
+  if (!r.ok) {
+    var j = await r.json().catch(function () { return {}; });
+    throw new Error(j.error || ("HTTP " + r.status));
+  }
+  var reader = r.body.getReader(), dec = new TextDecoder(), buf = "";
+  for (;;) {
+    var x = await reader.read();
+    if (x.done) break;
+    buf += dec.decode(x.value, { stream: true });
+    var i;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      var line = buf.slice(0, i); buf = buf.slice(i + 1);
+      if (line.trim()) onMsg(JSON.parse(line));
+    }
+  }
+  if (buf.trim()) onMsg(JSON.parse(buf));
+}
+// Desfaz as marcações do subrim_remote (__p__, __tup__…) no que importa aqui.
+function dec(o) {
+  if (Array.isArray(o)) return o.map(dec);
+  if (o && typeof o === "object") {
+    var ks = Object.keys(o);
+    if (ks.length === 1) {
+      if (ks[0] === "__p__") return o.__p__;
+      if (ks[0] === "__tup__" || ks[0] === "__set__") return o[ks[0]].map(dec);
+    }
+    var out = {}; ks.forEach(function (k) { out[k] = dec(o[k]); }); return out;
+  }
+  return o;
+}
+async function mgrCall(fn, args, kwargs) {
+  var res, err;
+  await ndjson("/mgr/call", { fn: fn, args: args || [], kwargs: kwargs || {} }, function (m) {
+    if ("ok" in m) res = dec(m.ok);
+    if ("err" in m) err = m.err;
+  });
+  if (err) throw new Error(typeof err === "string" ? err : (err.message || JSON.stringify(err)));
+  return res;
+}
+async function ping() {
+  try {
+    var p = await getJSON("/mgr/ping");
+    $("#dot").className = "dot ok"; $("#host").textContent = "servidor: " + p.host;
+  } catch (e) { $("#dot").className = "dot err"; $("#host").textContent = "servidor inacessível"; }
+}
+
+// ── Navegação ────────────────────────────────────────────────────────────────
+var wide = matchMedia("(min-width: 900px)");
+function setDrawer(open) {
+  if (wide.matches) {
+    $("#drawer").classList.toggle("collapsed", !open);
+    document.body.classList.toggle("wide", open);
+    store("drawer", open);
+  } else {
+    $("#drawer").classList.toggle("open", open);
+    $("#scrim").classList.toggle("open", open);
+  }
+}
+function drawerOpen() {
+  return wide.matches ? !$("#drawer").classList.contains("collapsed") : $("#drawer").classList.contains("open");
+}
+$("#menu").onclick = function () { setDrawer(!drawerOpen()); };
+$("#scrim").onclick = function () { setDrawer(false); };
+wide.addEventListener("change", function () {
+  $("#drawer").classList.remove("open"); $("#scrim").classList.remove("open");
+  setDrawer(wide.matches ? store("drawer") !== false : false);
+});
+
+var timers = [];          // limpos a cada troca de tela
+var aborts = [];
+function clearScreen() {
+  timers.forEach(clearInterval); timers = [];
+  aborts.forEach(function (a) { a.abort(); }); aborts = [];
+}
+var SECTIONS = { palavras: "Palavras", jogos: "Jogos", manager: "Manager" };
+function route() {
+  var hash = location.hash.replace(/^#/, "") || store("last") || "jogos";
+  var parts = hash.split("/"), sec = parts[0];
+  if (!SECTIONS[sec]) sec = "jogos";
+  store("last", hash);
+  clearScreen();
+  document.querySelectorAll("#drawer nav a").forEach(function (a) { a.classList.toggle("on", a.dataset.sec === sec); });
+  $("#title").textContent = SECTIONS[sec];
+  if (!wide.matches) setDrawer(false);
+  var main = $("#main"); main.textContent = "";
+  ({ palavras: viewPalavras, jogos: viewJogos, manager: viewManager })[sec](main, parts.slice(1));
+  window.scrollTo(0, 0);
+}
+window.addEventListener("hashchange", route);
+
+// ── Palavras ─────────────────────────────────────────────────────────────────
+function viewPalavras(main) {
+  main.appendChild(h("div", { class: "empty" }, ["📖", h("br"), "Em breve."]));
+}
+
+// ── Jogos ────────────────────────────────────────────────────────────────────
+function prettyGame(name) {
+  var m = name.match(/^(.*)_ditado_(\d+)\.html$/);
+  return m ? { title: m[1].replace(/_(r36s|original)$/, ""), part: "ditado " + m[2] } : { title: name, part: "" };
+}
+async function viewJogos(main) {
+  var list = h("div", { class: "list" }, h("div", { class: "empty" }, "Carregando…"));
+  main.appendChild(list);
+  try {
+    var games = (await getJSON("/web/games")).games;
+    list.textContent = "";
+    if (!games.length) {
+      list.appendChild(h("div", { class: "empty" }, "Nenhum jogo ainda. Gere um ditado ao salvar uma coleção no Manager desktop."));
+      return;
+    }
+    games.forEach(function (g) {
+      var p = prettyGame(g.name);
+      var cls = g.pct >= 100 ? "pill ok" : g.pct > 0 ? "pill warn" : "pill";
+      list.appendChild(h("a", { class: "item", href: "/web/game/" + encodeURIComponent(g.name) }, [
+        h("div", { class: "grow" }, [
+          h("div", { class: "t" }, p.title),
+          h("div", { class: "s" }, [p.part, fmtDate(g.created), g.done + "/" + g.total, fmtSize(g.size)].filter(Boolean).join(" · ")),
+          h("div", { class: "bar" + (g.pct >= 100 ? " ok" : "") }, h("i", { style: "width:" + g.pct + "%" }))
+        ]),
+        h("span", { class: cls }, "(" + g.pct + "%)")
+      ]));
+    });
+  } catch (e) {
+    list.textContent = "";
+    list.appendChild(h("div", { class: "empty" }, "Não deu para listar os jogos: " + e.message));
+  }
+}
+// Voltar de um jogo (bfcache) relista com a completude nova.
+window.addEventListener("pageshow", function (e) { if (e.persisted) route(); });
+
+// ── Manager ──────────────────────────────────────────────────────────────────
+var MTABS = { assets: "Assets", jobs: "Jobs", youtube: "YouTube" };
+function viewManager(main, parts) {
+  var tab = MTABS[parts[0]] ? parts[0] : "assets";
+  var tabs = h("div", { class: "tabs" });
+  Object.keys(MTABS).forEach(function (k) {
+    tabs.appendChild(h("button", { class: k === tab ? "on" : "", onclick: function () { location.hash = "manager/" + k; } },
+      k === "jobs" ? h("span", { id: "jobs-tab" }, "Jobs") : MTABS[k]));
+  });
+  main.appendChild(tabs);
+  var body = h("div"); main.appendChild(body);
+  jobsBadge();
+  timers.push(setInterval(jobsBadge, 5000));
+  if (tab === "assets") viewAssets(body, parts.slice(1));
+  else if (tab === "jobs") viewJobs(body, parts.slice(1));
+  else viewYoutube(body);
+}
+async function jobsBadge() {
+  try {
+    var n = (await postJSON("/mgr/procs")).procs.filter(function (p) { return p.running; }).length;
+    var el = $("#jobs-tab"); if (el) el.textContent = n ? "Jobs (" + n + ")" : "Jobs";
+  } catch (e) { /* ping mostra o erro */ }
+}
+
+var PHASES = {
+  empty: ["Vazio", "pill"], ready: ["Aguardando", "pill warn"], phase1: ["Legendas ✓", "pill acc"],
+  phase2: ["Dividido", "pill acc"], phase3: ["Processando", "pill acc"], merged: ["Falta Drive ☁", "pill warn"],
+  complete: ["Completo ✓", "pill ok"]
+};
+var OPT_DEFAULT = { pause: false, rate: "0.3", extract: false, drive: true, dubmix: false, dubaudio: false,
+                    llm: "deepseek", opaque: true, top: false, multi: false };
+function opts() { return Object.assign({}, OPT_DEFAULT, store("opts") || {}); }
+function burnEnv(o, noPause) {
+  var rate = parseFloat(String(o.rate).replace(",", "."));
+  rate = !noPause && o.pause && rate > 0 ? rate : 0;
+  return {
+    BURN_PAUSE_RATE: rate > 0 ? String(rate) : null,
+    BURN_BOX_OPAQUE: o.opaque ? "1" : "0",
+    BURN_TOP_TRANSLATION: o.top ? "1" : "0",
+    BURN_MULTILINE: o.multi ? "1" : "0",
+    EXTRACT_AUDIO: o.extract ? "1" : "0",
+    DRIVE_UPLOAD: o.drive ? "1" : "0",
+    DUB_MIX: o.dubmix && rate <= 0 ? "1" : "0",
+    DUB_AUDIO: o.dubaudio ? "1" : "0",
+    SUBRIM_LLM_PROVIDER: o.llm,
+    DEEPSEEK_DEBUG: null
+  };
+}
+async function startProc(argv, label, env) {
+  var r = await postJSON("/mgr/proc", { argv: argv, env: env || burnEnv(opts()), label: label });
+  toast("Iniciado: " + label);
+  location.hash = "manager/jobs/" + r.id;
+}
+
+var assetsCache = null;
+async function viewAssets(body, parts) {
+  if (parts[0]) return viewAsset(body, decodeURIComponent(parts.join("/")));
+  var q = store("aq") || "", inc = store("ainc") === true;
+  var input = h("input", { type: "text", placeholder: "Filtrar assets", value: q });
+  var chk = h("input", { type: "checkbox", checked: inc });
+  var refresh = h("button", { "aria-label": "Atualizar", onclick: function () { load(); } }, "↻");
+  body.appendChild(h("div", { class: "toolbar" }, [input, h("label", { class: "chk" }, [chk, "Só incompletos"]), refresh]));
+  var list = h("div", { class: "list" }, h("div", { class: "empty" }, "Carregando…"));
+  body.appendChild(list);
+
+  function render() {
+    var term = input.value.trim().toLowerCase();
+    store("aq", input.value); store("ainc", chk.checked);
+    var rows = (assetsCache || []).filter(function (a) {
+      return (!term || a.name.toLowerCase().indexOf(term) >= 0) && (!chk.checked || !a.complete);
+    });
+    list.textContent = "";
+    if (!rows.length) { list.appendChild(h("div", { class: "empty" }, assetsCache ? "Nenhum asset." : "Carregando…")); return; }
+    rows.forEach(function (a) {
+      var ph = PHASES[a.phase] || [a.phase, "pill"];
+      var sub = [];
+      if (a.chunks_total || a.chunks_done) sub.push(a.chunks_done + "/" + Math.max(a.chunks_total, a.chunks_done) + " chunks");
+      else if (a.chunk_total) sub.push(a.chunk_total + " chunks");
+      if (a.duration) sub.push(fmtDur(a.duration));
+      if (!a.has_video) sub.push("sem vídeo");
+      list.appendChild(h("a", { class: "item", href: "#manager/assets/" + encodeURIComponent(a.name) }, [
+        h("div", { class: "grow" }, [
+          h("div", { class: "t" }, a.name),
+          h("div", { class: "s" }, sub.join(" · ") || "—"),
+          a.phase === "phase3" ? h("div", { class: "bar" }, h("i", { style: "width:" + a.progress + "%" })) : null
+        ]),
+        h("span", { class: ph[1] }, a.phase === "phase3" ? a.progress + "%" : ph[0])
+      ]));
+    });
+  }
+  input.addEventListener("input", render);
+  chk.addEventListener("change", render);
+  render();
+
+  var pend = null;
+  async function load() {
+    try {
+      var r = await mgrCall("manager_core.list_assets_full", [opts().drive]);
+      assetsCache = r.assets; render();
+      clearTimeout(pend);
+      if (r.extras_pending) pend = setTimeout(load, 3000);
+    } catch (e) {
+      list.textContent = ""; list.appendChild(h("div", { class: "empty" }, "Erro: " + e.message));
+    }
+  }
+  load();
+  timers.push(setInterval(load, 15000));
+}
+
+function viewAsset(body, name) {
+  var o = opts();
+  var card = h("div", { class: "card" });
+  body.appendChild(h("div", { class: "toolbar" }, h("button", { onclick: function () { location.hash = "manager/assets"; } }, "← Assets")));
+  body.appendChild(card);
+  var a = (assetsCache || []).find(function (x) { return x.name === name; });
+
+  function save() { store("opts", o); }
+  function check(key, text, after) {
+    var i = h("input", { type: "checkbox", checked: !!o[key] });
+    i.addEventListener("change", function () { o[key] = i.checked; if (after) after(); save(); });
+    return h("label", { class: "chk" }, [i, text]);
+  }
+  var dubmixLbl, rateIn;
+  function syncPause() {
+    var dm = dubmixLbl.querySelector("input");
+    if (o.pause) { o.dubmix = false; dm.checked = false; }
+    dm.disabled = o.pause; rateIn.disabled = !o.pause;
+  }
+  rateIn = h("input", { type: "text", inputmode: "decimal", value: o.rate, style: "width:80px" });
+  rateIn.addEventListener("input", function () { o.rate = rateIn.value; save(); });
+  dubmixLbl = check("dubmix", "Queimar com dubmix");
+  var llm = h("div", { class: "seg" });
+  [["deepseek", "DeepSeek"], ["local", "Local (Ollama)"]].forEach(function (p) {
+    var r = h("input", { type: "radio", name: "llm", value: p[0], checked: o.llm === p[0] });
+    r.addEventListener("change", function () { o.llm = p[0]; save(); });
+    llm.appendChild(h("label", null, [r, p[1]]));
+  });
+  var errEl = h("div", { class: "err-msg" });
+  function run(argv, label) {
+    errEl.textContent = "";
+    startProc(argv, label, burnEnv(o)).catch(function (e) { errEl.textContent = e.message; });
+  }
+  var ph = a ? (PHASES[a.phase] || [a.phase, "pill"]) : null;
+  card.append(
+    h("h2", null, name),
+    a ? h("div", { class: "row" }, [h("span", { class: ph[1] }, ph[0]),
+      h("span", { class: "muted" }, [a.duration ? fmtDur(a.duration) : "", a.has_srt ? "legenda ✓" : "sem legenda",
+        a.uploaded ? "no Drive ✓" : ""].filter(Boolean).join(" · "))]) : h("div", { class: "muted" }, "—"),
+    h("div", { class: "grid2" }, [
+      h("div", null, [
+        h("h3", null, "Modo"),
+        h("div", { class: "row" }, [check("pause", "Queimar com pausas", syncPause), rateIn, h("span", { class: "muted" }, "s/car.")]),
+        check("extract", "Extrair áudio em assets/final"),
+        check("drive", "Enviar para o Drive"),
+        h("h3", null, "Dublagem"),
+        dubmixLbl,
+        check("dubaudio", "Gerar áudio separado")
+      ]),
+      h("div", null, [
+        h("h3", null, "LLM"), llm,
+        h("h3", null, "Estilo"),
+        check("opaque", "Fundo opaco"),
+        check("top", "Tradução no topo"),
+        check("multi", "Multilinha")
+      ])
+    ]),
+    h("div", { class: "actions" }, [
+      h("button", { class: "primary", disabled: a && !a.has_video,
+        onclick: function () { run(["{python}", "video_burner.py", name, "--exact"], "Pipeline: " + name); } },
+        a && a.phase !== "ready" && a.phase !== "empty" ? "Retomar" : "Iniciar"),
+      h("button", { disabled: a && !a.has_video, onclick: function () {
+        if (confirm("Reprocessar '" + name + "' do zero?\nIsso sobrescreve os arquivos existentes."))
+          run(["{python}", "video_burner.py", name, "--exact", "--force"], "Pipeline (force): " + name);
+      } }, "Forçar"),
+      h("button", { onclick: function () {
+        if (confirm("Transcrever o(s) vídeo(s) de '" + name + "' para .zht.srt?"))
+          run(["{whisper_python}", "transcribe_asset.py", name], "Transcrever: " + name);
+      } }, "Transcrever"),
+      h("button", { disabled: !(a && a.uploaded), onclick: function () {
+        if (confirm("Clean-up de '" + name + "'? O vídeo queimado fica só no Drive."))
+          run(["{python}", "cleanup_asset.py", name], "Clean-up: " + name);
+      } }, "Clean-up")
+    ]),
+    errEl
+  );
+  syncPause();
+  if (!a) mgrCall("manager_core.list_assets_full", [o.drive]).then(function (r) {
+    assetsCache = r.assets;
+    if (assetsCache.some(function (x) { return x.name === name; })) route();
+  }).catch(function () {});
+}
+
+async function viewJobs(body, parts) {
+  if (parts[0]) return viewJob(body, parseInt(parts[0], 10));
+  var stopAll = h("button", { class: "danger", onclick: async function () {
+    if (!confirm("Parar todos os jobs em execução?")) return;
+    var ps = (await postJSON("/mgr/procs")).procs.filter(function (p) { return p.running; });
+    await Promise.all(ps.map(function (p) { return postJSON("/mgr/proc/" + p.id + "/stop"); }));
+    toast(ps.length + " job(s) parado(s)"); load();
+  } }, "Parar todos");
+  var clear = h("button", { onclick: async function () {
+    var ps = (await postJSON("/mgr/procs")).procs.filter(function (p) { return !p.running; });
+    await Promise.all(ps.map(function (p) { return postJSON("/mgr/proc/" + p.id + "/forget"); }));
+    load();
+  } }, "Limpar finalizados");
+  body.appendChild(h("div", { class: "toolbar" }, [stopAll, clear]));
+  var list = h("div", { class: "list" }, h("div", { class: "empty" }, "Carregando…"));
+  body.appendChild(list);
+  async function load() {
+    try {
+      var ps = (await postJSON("/mgr/procs")).procs.sort(function (a, b) { return b.id - a.id; });
+      list.textContent = "";
+      if (!ps.length) { list.appendChild(h("div", { class: "empty" }, "Nenhum job no servidor.")); return; }
+      ps.forEach(function (p) {
+        var st = p.running ? ["rodando", "pill acc"] : p.returncode === 0 ? ["ok", "pill ok"] : ["saiu " + p.returncode, "pill err"];
+        list.appendChild(h("a", { class: "item", href: "#manager/jobs/" + p.id }, [
+          h("div", { class: "grow" }, [h("div", { class: "t" }, p.label),
+            h("div", { class: "s" }, "#" + p.id + " · " + fmtDate(p.started) + " · " + p.lines + " linhas")]),
+          h("span", { class: st[1] }, st[0])
+        ]));
+      });
+    } catch (e) { list.textContent = ""; list.appendChild(h("div", { class: "empty" }, "Erro: " + e.message)); }
+  }
+  load();
+  timers.push(setInterval(load, 3000));
+}
+
+function viewJob(body, id) {
+  var title = h("div", { class: "grow t" }, "#" + id);
+  var status = h("span", { class: "pill acc" }, "…");
+  var stop = h("button", { class: "danger", onclick: async function () {
+    if (!confirm("Parar o job #" + id + "?")) return;
+    try { await postJSON("/mgr/proc/" + id + "/stop"); toast("Parando #" + id); } catch (e) { toast(e.message); }
+  } }, "Parar");
+  body.appendChild(h("div", { class: "toolbar" }, [
+    h("button", { onclick: function () { location.hash = "manager/jobs"; } }, "← Jobs"), title, status, stop]));
+  var pre = h("pre", { class: "log" });
+  body.appendChild(pre);
+  var follow = true;
+  pre.addEventListener("scroll", function () { follow = pre.scrollTop + pre.clientHeight >= pre.scrollHeight - 30; });
+  postJSON("/mgr/procs").then(function (r) {
+    var p = r.procs.find(function (x) { return x.id === id; });
+    if (p) title.textContent = p.label;
+  }).catch(function () {});
+
+  var offset = 0, ended = false, ctl = new AbortController();
+  aborts.push(ctl);
+  function add(line) {
+    var cls = /❌|error|erro|traceback|exception/i.test(line) ? "e" : /⚠|warn|aviso/i.test(line) ? "w" : /✅|✓|concluí|done/i.test(line) ? "o" : null;
+    pre.appendChild(cls ? h("span", { class: cls }, line + "\n") : document.createTextNode(line + "\n"));
+    while (pre.childNodes.length > 4000) pre.removeChild(pre.firstChild);
+  }
+  async function stream() {
+    while (!ended && !ctl.signal.aborted) {
+      try {
+        status.textContent = "rodando"; status.className = "pill acc";
+        await ndjson("/mgr/proc/" + id + "/stream", { from: offset }, function (m) {
+          if ("line" in m) { if (!/^… \(\d+ linha/.test(m.line)) offset++; add(m.line); }
+          if ("exit" in m) {
+            ended = true;
+            status.textContent = m.exit === 0 ? "ok" : "saiu " + m.exit;
+            status.className = m.exit === 0 ? "pill ok" : "pill err";
+            stop.disabled = true;
+          }
+        }, ctl.signal);
+        if (follow) pre.scrollTop = pre.scrollHeight;
+      } catch (e) {
+        if (ctl.signal.aborted) return;
+        if (/desconhecido|não encontrado|not found/i.test(e.message)) {
+          status.textContent = "sumiu"; status.className = "pill err"; stop.disabled = true; return;
+        }
+        status.textContent = "reconectando"; status.className = "pill warn";
+        await new Promise(function (r) { setTimeout(r, 2000); });
+      }
+    }
+  }
+  var scroller = setInterval(function () { if (follow) pre.scrollTop = pre.scrollHeight; }, 300);
+  timers.push(scroller);
+  stream();
+}
+
+function viewYoutube(body) {
+  var url = h("input", { type: "url", placeholder: "https://www.youtube.com/watch?v=…", inputmode: "url" });
+  var name = h("input", { type: "text", placeholder: "Nome do asset (ex.: clone45)", autocapitalize: "off" });
+  var mode = h("div", { class: "seg" });
+  [["full", "Vídeo + legenda"], ["subs", "Só legenda"], ["video", "Só vídeo"]].forEach(function (m, i) {
+    mode.appendChild(h("label", null, [h("input", { type: "radio", name: "ytmode", value: m[0], checked: i === 0 }), m[1]]));
+  });
+  var errEl = h("div", { class: "err-msg" });
+  var go = h("button", { class: "primary", onclick: function () {
+    errEl.textContent = "";
+    var u = url.value.trim(), n = name.value.trim();
+    if (!u) { errEl.textContent = "Informe a URL do YouTube."; url.focus(); return; }
+    if (!n) { errEl.textContent = "Informe o nome do asset."; name.focus(); return; }
+    var argv = ["{python}", "youtube_downloader.py", u, "--name", n];
+    var m = $("input[name=ytmode]:checked", mode).value;
+    if (m === "subs") argv.push("--subs-only"); else if (m === "video") argv.push("--video-only");
+    go.disabled = true;
+    startProc(argv, "YouTube → " + n).catch(function (e) { errEl.textContent = e.message; go.disabled = false; });
+  } }, "Baixar no servidor");
+  [url, name].forEach(function (i) { i.addEventListener("input", function () { errEl.textContent = ""; }); });
+  body.appendChild(h("div", { class: "card" }, [
+    h("h3", { style: "margin-top:0" }, "URL"), url,
+    h("h3", null, "Nome"), name,
+    h("h3", null, "O que baixar"), mode,
+    h("div", { class: "actions" }, go), errEl
+  ]));
+}
+
+// ── Início ───────────────────────────────────────────────────────────────────
+setDrawer(wide.matches ? store("drawer") !== false : false);
+ping(); setInterval(ping, 15000);
+route();
+</script>
+</body>
+</html>

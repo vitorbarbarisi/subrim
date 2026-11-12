@@ -8,6 +8,8 @@ r36s_viewer
 dictation/*_ditado_*.html
 # Cache das decomposições da hanzi-api: derivado, e regenerável apagando o arquivo
 dictation/.hanzi_cache.json
+# Progresso dos jogos sem coleção no servidor (web_api.py)
+dictation/.progress/
 
 # Ignore warehouse media files
 warehouse/*

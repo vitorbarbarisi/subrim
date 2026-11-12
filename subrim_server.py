@@ -4,7 +4,8 @@
 Roda na máquina que guarda os vídeos/coleções e faz o processamento pesado
 (inclusive as chamadas à DeepSeek); o manager e a extensão se conectam a ele
 pelo IP da rede local. Os endpoints ``/mgr/*`` do manager estão em
-manager_api.py.
+manager_api.py; a página web "subrim" (``/``, ``/subrim`` e ``/web/*``: Jogos e o
+Manager de bolso, para celular/tablet) está em web_api.py.
 
 A extensão captura a legenda chinesa do YouTube e pede aqui os pares
 "palavra (pinyin): tradução" + a tradução PT de cada frase — os mesmos dados do
@@ -76,6 +77,7 @@ project_python.ensure("opencc")  # sem ele a legenda sai com simplificado
 import llm_provider
 import manager_api
 import processor
+import web_api
 import word_vocab
 import youtube_downloader
 
@@ -526,6 +528,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         if self.path.startswith("/mgr/") and manager_api.handle_get(self):
             return
+        if web_api.handle_get(self):
+            return
         if self.path.startswith("/jobs/"):
             video_id = self.path[len("/jobs/"):]
             job = _jobs.get(video_id)
@@ -555,6 +559,11 @@ class Handler(BaseHTTPRequestHandler):
             body = self._read_body()
             if body is not None:
                 manager_api.handle_post(self, body)
+            return
+        if self.path.startswith("/web/"):
+            body = self._read_body()
+            if body is not None:
+                web_api.handle_post(self, body)
             return
         if self.path not in ("/pairs", "/pairs/stream", "/transcribe", "/mastered", "/bases"):
             self._json(404, {"error": "not found"})
