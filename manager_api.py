@@ -22,6 +22,7 @@ import json
 import mimetypes
 import os
 import posixpath
+import signal
 import socket
 import subprocess
 import sys
@@ -161,8 +162,13 @@ class Proc:
         self.dropped = 0          # linhas descartadas do começo (MAX_LINES)
         self.returncode = None
         self.cond = threading.Condition()
+        # Sessão própria = grupo de processos próprio: o stop mata a árvore
+        # inteira (video_burner → split_video → ffmpeg). Sem isso o ffmpeg ficava
+        # órfão, porque ignora o pipe quebrado e termina o encode sozinho —
+        # foi assim que um job parado corrompeu o _chromecast.mp4 do job seguinte.
         self.popen = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
-                                      text=True, cwd=str(REPO), env=env)
+                                      text=True, cwd=str(REPO), env=env,
+                                      start_new_session=True)
         threading.Thread(target=self._read, daemon=True).start()
 
     def _read(self):
@@ -269,9 +275,27 @@ def get_proc(pid: str) -> Proc:
 
 
 def proc_stop(pid: str) -> dict:
+    """Para o job e TODOS os descendentes (o grupo criado em ``Proc``).
+
+    SIGTERM no grupo; quem ainda estiver vivo 5 s depois leva SIGKILL — o
+    ffmpeg costuma sair no TERM, mas um filho travado não pode sobrar escrevendo
+    nos arquivos do próximo job.
+    """
     p = get_proc(pid)
     if p.running():
-        p.popen.terminate()
+        pgid = p.popen.pid
+        try:
+            os.killpg(pgid, signal.SIGTERM)
+        except ProcessLookupError:
+            return {"ok": True}
+
+        def _kill_leftovers():
+            time.sleep(5)
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        threading.Thread(target=_kill_leftovers, daemon=True).start()
     return {"ok": True}
 
 

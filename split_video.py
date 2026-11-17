@@ -59,7 +59,11 @@ def convert_to_chromecast_format(input_video: Path, output_video: Path) -> bool:
     # final só existe quando 100% válido (moov atom escrito) — nunca meio-escrito.
     # Evita "moov atom not found" se a conversão for interrompida (deixa só o temp,
     # que NÃO engana o "exists()" da próxima execução) ou lida durante a finalização.
-    temp_video = output_video.with_name(f"{output_video.stem}_temp{output_video.suffix}")
+    #
+    # O PID no nome deixa o temp EXCLUSIVO desta execução: com um nome fixo, dois
+    # jobs do mesmo episódio (um parado cujo ffmpeg sobreviveu + o novo) gravavam
+    # no mesmo arquivo, e o +faststart de um reescrevia o começo do outro.
+    temp_video = output_video.with_name(f"{output_video.stem}_temp{os.getpid()}{output_video.suffix}")
 
     audio_args = ['-c:a', 'aac', '-b:a', '128k', '-ar', '48000']
     common_tail = ['-pix_fmt', 'yuv420p', '-movflags', '+faststart',
@@ -655,7 +659,7 @@ def cleanup_temp_files(dest_dir: Path, final_output: Path) -> None:
 
     # Lista de arquivos a remover (temporários)
     remove_patterns = [
-        "_chromecast_temp.mp4",  # Arquivos temporários de conversão
+        "_chromecast_temp",      # Temporários de conversão (_chromecast_temp<pid>.mp4)
         ".fdash-video_por=",     # Fragmentos DASH
     ]
 

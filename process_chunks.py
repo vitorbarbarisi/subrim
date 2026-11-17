@@ -85,6 +85,29 @@ def _process_chunk_worker(task: Tuple[str, int, int]) -> Tuple[str, bool, str]:
 
 
 # ─── Fusão corte+queima (4a): corta do chromecast e queima num único passe ──────
+def _ffmpeg_error(stderr: str, limit: int = 600) -> str:
+    """Resumo útil do stderr do ffmpeg: as linhas de ERRO, não o rabo do log.
+
+    O rabo (``stderr[-300:]``) é quase sempre só a estatística final do libx264
+    (``ref P L0``, ``kb/s``...), que esconde a causa. Aqui ficam as linhas com
+    cara de erro, sem repetição, mais a última linha (``Conversion failed!``).
+    """
+    lines = [l.strip() for l in (stderr or "").splitlines() if l.strip()]
+    keys = ("error", "invalid", "failed", "no such", "unable", "cannot", "corrupt",
+            "not found", "no space", "permission")
+    seen, picked = set(), []
+    for l in lines:
+        if any(k in l.lower() for k in keys):
+            core = l.split("]", 1)[-1].strip()   # ignora o "[h264 @ 0x...]" variável
+            if core not in seen:
+                seen.add(core)
+                picked.append(l)
+    if lines and (not picked or picked[-1] != lines[-1]):
+        picked.append(lines[-1])
+    out = " | ".join(picked)
+    return out if len(out) <= limit else out[:limit] + " …"
+
+
 def _cut_only(source: Path, start: float, dur: float, out: Path) -> bool:
     """Corta o segmento (sem legenda) — fallback quando não há/falha o drawtext.
 
@@ -97,7 +120,7 @@ def _cut_only(source: Path, start: float, dur: float, out: Path) -> bool:
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"   ❌ Corte falhou: {r.stderr[-300:]}")
+        print(f"   ❌ Corte falhou: {_ffmpeg_error(r.stderr)}")
         return False
     return out.exists() and out.stat().st_size > 0
 
@@ -126,7 +149,7 @@ def _cut_and_burn(source: Path, start: float, dur: float,
     ]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
-        print(f"   ❌ Corte+queima falhou: {r.stderr[-300:]}")
+        print(f"   ❌ Corte+queima falhou: {_ffmpeg_error(r.stderr)}")
         return False
     return out.exists() and out.stat().st_size > 0
 
@@ -267,7 +290,7 @@ def _cut_burn_with_pauses(source: Path, start: float, dur: float, subtitles: dic
                  '-frames:v', '1', '-y', str(png)],
                 capture_output=True, text=True)
             if ex.returncode != 0 or not png.exists():
-                print(f"   ❌ Falha ao extrair frame de freeze {k}: {ex.stderr[-200:]}")
+                print(f"   ❌ Falha ao extrair frame de freeze {k}: {_ffmpeg_error(ex.stderr)}")
                 return False
             pngs.append(png)
             inputs += ['-loop', '1', '-t', f"{xk:.3f}", '-i', str(png)]
@@ -279,7 +302,7 @@ def _cut_burn_with_pauses(source: Path, start: float, dur: float, subtitles: dic
                 '-c:a', 'aac', '-movflags', '+faststart', '-y', str(out)])
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
-            print(f"   ❌ Inserção de pausas falhou: {r.stderr[-300:]}")
+            print(f"   ❌ Inserção de pausas falhou: {_ffmpeg_error(r.stderr)}")
             return False
         return out.exists() and out.stat().st_size > 0
     finally:
