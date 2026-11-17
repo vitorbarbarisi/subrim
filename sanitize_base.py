@@ -57,6 +57,10 @@ ERROR_TRANSLATION_TEXTS = [
 
 # URL da word-api (respeita WORD_API_BASE_URL; ver word_vocab.base_url)
 WORD_API_BASE_URL = word_vocab.base_url()
+# Uma única conexão keep-alive para todas as chamadas: abrir um socket por
+# requisição deixa milhares de conexões em TIME_WAIT e, após ~4090 delas, o
+# word-api (docker) passa a responder "Connection reset" até o fim do episódio.
+_HTTP = requests.Session()
 
 
 def check_word_api_health() -> bool:
@@ -68,7 +72,7 @@ def check_word_api_health() -> bool:
     """
     try:
         print("🔍 Verificando status da word-api...", flush=True)
-        response = requests.get(f"{WORD_API_BASE_URL}/health", timeout=5)
+        response = _HTTP.get(f"{WORD_API_BASE_URL}/health", timeout=5)
         
         if response.status_code == 200:
             print("✅ Word-api está funcionando", flush=True)
@@ -99,7 +103,7 @@ def get_word_from_api(word: str, text: bool = False) -> dict:
     """
     url = f"{WORD_API_BASE_URL}/{word}" + ("?text=true" if text else "")
     try:
-        response = requests.get(url, timeout=5)
+        response = _HTTP.get(url, timeout=5)
 
         if response.status_code == 200:
             return response.json()
@@ -143,7 +147,7 @@ def post_word_to_api(word: str, pinyin: str, translation: str, confidence_level:
             "confidence_level": confidence_level
         }
 
-        response = requests.post(url, json=data, timeout=5)
+        response = _HTTP.post(url, json=data, timeout=5)
 
         if response.status_code in [200, 201]:
             print(f"   ✅ Palavra '{word}' adicionada à word-api")
@@ -174,7 +178,7 @@ def put_word_translation(word: str, translation: str) -> bool:
     """
     url = f"{WORD_API_BASE_URL}/{word}/translations"
     try:
-        response = requests.put(url, json={"translation": translation}, timeout=5)
+        response = _HTTP.put(url, json={"translation": translation}, timeout=5)
 
         if response.status_code in [200, 201]:
             print(f"   ➕ Tradução '{translation}' adicionada à palavra '{word}'")
