@@ -312,20 +312,48 @@ def _cb():
     return collection_builder
 
 
+_frases_inflight: dict[str, threading.Lock] = {}
+# Varreduras simultâneas (de palavras diferentes): poucas, para o carrossel
+# não roubar a CPU dos jobs nem do resto do servidor.
+_scan_slots = threading.BoundedSemaphore(2)
+
+
 def _matches(word: str) -> list[dict]:
+    """Frases da palavra. Pedidos simultâneos da mesma palavra (a lista e os
+    frames chegam juntos) esperam uma única varredura em vez de repeti-la."""
     if not word_vocab.is_real_word(word):
         raise ValueError("palavra inválida")
-    now = time.monotonic()
-    with _frases_lock:
+
+    def cached():
         hit = _frases_cache.get(word)
-        if hit and now - hit[0] < FRASES_TTL:
-            return hit[1]
-    cb = _cb()
-    found = [m for m in cb.search(word, log_cb=lambda _m: None) if cb.has_clean_sentence(m)]
-    found, _ = cb.dedupe_sentences(found)
+        return hit[1] if hit and time.monotonic() - hit[0] < FRASES_TTL else None
+
     with _frases_lock:
-        _frases_cache[word] = (now, found)
-    return found
+        found = cached()
+        if found is not None:
+            return found
+        flight = _frases_inflight.setdefault(word, threading.Lock())
+    with flight:
+        with _frases_lock:
+            found = cached()
+        if found is not None:
+            return found
+        try:
+            with _scan_slots:
+                cb = _cb()
+                found = [m for m in cb.search(word, log_cb=lambda _m: None)
+                         if cb.has_clean_sentence(m)]
+                found, _ = cb.dedupe_sentences(found)
+            with _frases_lock:
+                _frases_cache[word] = (time.monotonic(), found)
+                if len(_frases_cache) > 256:   # TTL vencido não fica para sempre
+                    for k in [k for k, v in _frases_cache.items()
+                              if time.monotonic() - v[0] >= FRASES_TTL]:
+                        del _frases_cache[k]
+        finally:
+            with _frases_lock:
+                _frases_inflight.pop(word, None)
+        return found
 
 
 def word_frases(word: str) -> dict:
@@ -349,7 +377,8 @@ def frame_jpeg(word: str, asset: str, line: int) -> bytes:
     m = next((m for m in _matches(word) if m["asset"] == asset and m["line_num"] == line), None)
     if m is None:
         raise LookupError(f"{word} não está em {asset}:{line}")
-    img = _cb().render_preview(m, "r36s")
+    with _scan_slots:   # render (ffmpeg/OpenCV) também é trabalho pesado
+        img = _cb().render_preview(m, "r36s")
     if img is None:
         raise LookupError(f"não deu para renderizar {asset}:{line}")
     buf = io.BytesIO()

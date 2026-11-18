@@ -206,8 +206,8 @@ function fmtDur(s) {
 }
 
 // ── Servidor ─────────────────────────────────────────────────────────────────
-async function getJSON(url) {
-  var r = await fetch(url, { cache: "no-store" });
+async function getJSON(url, signal) {
+  var r = await fetch(url, { cache: "no-store", signal: signal });
   var j = await r.json().catch(function () { return {}; });
   if (!r.ok) throw new Error(j.error || ("HTTP " + r.status));
   return j;
@@ -457,23 +457,36 @@ async function viewPalavras(main) {
   // Carrossel com os frames das frases que têm a palavra, com a legenda das
   // Coleções do manager (renderizada no servidor). Só o slide visível e os
   // vizinhos pedem a imagem: cada uma é um render no servidor.
-  var frasesToken = 0;
-  async function loadFrases(word) {
+  // Nunca bloqueia a página: ninguém espera por loadFrases, a busca só sai
+  // depois de a palavra ficar 300 ms na tela (passar palavras rápido não
+  // dispara uma varredura do warehouse por palavra) e a anterior é abortada.
+  var frasesToken = 0, frasesCtl = null, frasesTimer = null;
+  function loadFrases(word) {
     var token = ++frasesToken;
+    clearTimeout(frasesTimer);
+    if (frasesCtl) frasesCtl.abort();
+    frasesCtl = null;
     frasesPos.textContent = "";
     frasesBody.replaceChildren(h("div", { class: "msg" }, "Buscando frases…"));
+    frasesTimer = setTimeout(function () { fetchFrases(word, token); }, 300);
+  }
+  async function fetchFrases(word, token) {
+    if (token !== frasesToken || !main.isConnected) return;
+    var ctl = frasesCtl = new AbortController();
+    aborts.push(ctl);
     var frases;
     try {
-      frases = (await getJSON("/web/words/" + encodeURIComponent(word) + "/frases")).frases;
+      frases = (await getJSON("/web/words/" + encodeURIComponent(word) + "/frases", ctl.signal)).frases;
     } catch (e) {
-      if (token === frasesToken) frasesBody.replaceChildren(h("div", { class: "msg" }, "Não deu para buscar as frases: " + e.message));
+      if (token === frasesToken && e.name !== "AbortError")
+        frasesBody.replaceChildren(h("div", { class: "msg" }, "Não deu para buscar as frases: " + e.message));
       return;
     }
     if (token !== frasesToken || !main.isConnected) return;   // já trocou de palavra
     if (!frases.length) { frasesBody.replaceChildren(h("div", { class: "msg" }, "Nenhuma frase com " + word + ".")); return; }
     var base = "/web/words/" + encodeURIComponent(word) + "/frame/";
     var imgs = frases.map(function (f) {
-      return h("img", { alt: f.chinese + " — " + f.portuguese, decoding: "async",
+      return h("img", { alt: f.chinese + " — " + f.portuguese, decoding: "async", fetchpriority: "low",
         "data-src": base + encodeURIComponent(f.asset) + "/" + f.line + ".jpg" });
     });
     var strip = h("div", { class: "strip" }, imgs.map(function (img) { return h("div", { class: "slide" }, img); }));
