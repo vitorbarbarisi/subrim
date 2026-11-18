@@ -16,6 +16,12 @@
                                  → {word, correct_count, confidence_level}
                                    soma acertos de escrita, como o visim
                                    (a word-api sobe o nível aos 10 e aos 20)
+  GET  /web/words/<palavra>/frases
+                                 → {word, frases: [{asset, line, chinese, portuguese}]}
+                                   frases do warehouse com a palavra, sem
+                                   duplicadas (carrossel da aba Palavras)
+  GET  /web/words/<palavra>/frame/<asset>/<linha>.jpg
+                                 → o frame com a legenda das Coleções do manager
 
 O Manager da página usa os endpoints ``/mgr/*`` do manager_api, como o client
 desktop.
@@ -32,11 +38,14 @@ apagado) guarda o progresso em ``dictation/.progress/<bundle>.json``.
 
 from __future__ import annotations
 
+import io
 import json
 import re
 import threading
+import time
 import urllib.error
 import urllib.request
+from collections import OrderedDict
 from pathlib import Path
 from urllib.parse import parse_qs, quote, unquote
 
@@ -285,6 +294,74 @@ def register_correct(word: str, amount: int = 1) -> dict:
             "confidence_level": level}
 
 
+# ── Frases da palavra (carrossel de frames) ───────────────────────────────────
+# A busca varre todos os *_base.txt do warehouse: guarda o resultado por palavra.
+FRASES_TTL = 600
+FRAME_LRU_MAX = 64
+_frases_cache: dict[str, tuple[float, list[dict]]] = {}
+_frases_lock = threading.Lock()
+# {(palavra, asset, linha): jpeg}. Vale para um conjunto de dominadas: quando
+# o word_vocab o renova, a ajuda (pinyin/glossário) do frame muda e o LRU zera.
+_frames: "OrderedDict[tuple, bytes]" = OrderedDict()
+_frames_mastered = None
+_frames_lock = threading.Lock()
+
+
+def _cb():
+    import collection_builder   # cv2/Pillow: só carrega quando a aba pede frames
+    return collection_builder
+
+
+def _matches(word: str) -> list[dict]:
+    if not word_vocab.is_real_word(word):
+        raise ValueError("palavra inválida")
+    now = time.monotonic()
+    with _frases_lock:
+        hit = _frases_cache.get(word)
+        if hit and now - hit[0] < FRASES_TTL:
+            return hit[1]
+    cb = _cb()
+    found = [m for m in cb.search(word, log_cb=lambda _m: None) if cb.has_clean_sentence(m)]
+    found, _ = cb.dedupe_sentences(found)
+    with _frases_lock:
+        _frases_cache[word] = (now, found)
+    return found
+
+
+def word_frases(word: str) -> dict:
+    return {"word": word, "frases": [
+        {"asset": m["asset"], "line": m["line_num"], "chinese": m["chinese"],
+         "portuguese": m["portuguese"]} for m in _matches(word)]}
+
+
+def frame_jpeg(word: str, asset: str, line: int) -> bytes:
+    """Frame da frase com a legenda das Coleções do manager (render_preview r36s)."""
+    global _frames_mastered
+    key = (word, asset, line)
+    mastered = word_vocab.mastered_words()
+    with _frames_lock:
+        if mastered is not _frames_mastered:
+            _frames.clear()
+            _frames_mastered = mastered
+        if key in _frames:
+            _frames.move_to_end(key)
+            return _frames[key]
+    m = next((m for m in _matches(word) if m["asset"] == asset and m["line_num"] == line), None)
+    if m is None:
+        raise LookupError(f"{word} não está em {asset}:{line}")
+    img = _cb().render_preview(m, "r36s")
+    if img is None:
+        raise LookupError(f"não deu para renderizar {asset}:{line}")
+    buf = io.BytesIO()
+    img.convert("RGB").save(buf, "JPEG", quality=85)
+    data = buf.getvalue()
+    with _frames_lock:
+        _frames[key] = data
+        while len(_frames) > FRAME_LRU_MAX:
+            _frames.popitem(last=False)
+    return data
+
+
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 
 MANIFEST = {
@@ -320,6 +397,11 @@ def handle_get(h) -> bool:
             except ValueError:
                 level = 0
             h._json(200, {"words": level_words(level)})
+        elif mf := re.match(r"^/web/words/([^/]+)/frases$", path):
+            h._json(200, word_frases(unquote(mf.group(1))))
+        elif mj := re.match(r"^/web/words/([^/]+)/frame/([^/]+)/(\d+)\.jpg$", path):
+            _send(h, 200, frame_jpeg(unquote(mj.group(1)), unquote(mj.group(2)), int(mj.group(3))),
+                  "image/jpeg", "max-age=600")
         elif path == "/web/manifest.json":
             _send(h, 200, json.dumps(MANIFEST).encode(), "application/manifest+json")
         elif path == "/web/icon.png":

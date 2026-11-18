@@ -110,12 +110,11 @@ pre.log .e { color: var(--err); } pre.log .w { color: var(--warn); } pre.log .o 
   border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .seg input { accent-color: var(--accent); }
 
-.pal { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
-  min-height: calc(100dvh - 120px); padding: 0 4px; }
+.pal { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 12px 4px 0; }
 .pal .carousel { display: flex; align-items: center; justify-content: center; gap: 4px; width: 100%; }
 .pal .nav { border: 0; background: transparent; font-size: 40px; width: 52px; min-height: 64px;
   padding: 0; color: var(--muted); flex: none; }
-.pal .word { font-size: clamp(56px, 18vw, 120px); line-height: 1.15; text-align: center; min-width: 0;
+.pal .word { font-size: clamp(48px, 15vw, 100px); line-height: 1.15; text-align: center; min-width: 0;
   overflow-wrap: anywhere; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
   cursor: default; transition: color .15s; }
 .pal .word.flash { color: var(--accent); }
@@ -133,6 +132,16 @@ pre.log .e { color: var(--err); } pre.log .w { color: var(--warn); } pre.log .o 
   background: var(--accent); display: none; }
 .pal .snd.auto .sdot { display: block; }
 .pal .count { font-size: 13px; color: var(--muted); }
+.frases { width: 100%; max-width: 720px; margin-top: 6px; border-top: 1px solid var(--border); padding-top: 8px; }
+.frases .pos { text-align: right; font-size: 12px; color: var(--muted); min-height: 16px; margin-bottom: 6px; }
+.frases .msg { color: var(--muted); text-align: center; font-size: 14px; padding: 24px 8px; }
+.frases .strip { display: flex; gap: 8px; overflow-x: auto; scroll-snap-type: x mandatory;
+  overscroll-behavior-x: contain; scrollbar-width: none; padding-bottom: 4px; }
+.frases .strip::-webkit-scrollbar { display: none; }
+.frases .slide { flex: 0 0 88%; aspect-ratio: 4 / 3; scroll-snap-align: center; border-radius: 10px;
+  overflow: hidden; background: #000; }
+.frases .slide:only-child { flex-basis: 100%; }
+.frases .slide img { display: block; width: 100%; height: 100%; object-fit: contain; }
 </style>
 </head>
 <body>
@@ -409,6 +418,9 @@ async function viewPalavras(main) {
   var snd = h("button", { class: "iconbtn snd" + (auto ? " auto" : ""), "aria-label": "Tocar a palavra" },
     ["🔊", h("span", { class: "sdot" })]);
   var count = h("div", { class: "count" });
+  var frasesPos = h("div", { class: "pos" });
+  var frasesBody = h("div");
+  var frasesBox = h("div", { class: "frases" }, [frasesPos, frasesBody]);
   main.appendChild(h("div", { class: "pal" }, [
     h("div", { class: "carousel" }, [
       h("button", { class: "nav", "aria-label": "Anterior", onclick: function () { go(-1); } }, "‹"),
@@ -417,7 +429,8 @@ async function viewPalavras(main) {
     ]),
     dotsEl,
     h("div", { class: "entry" }, [input, snd]),
-    count
+    count,
+    frasesBox
   ]));
 
   function cur() { return words[i]; }
@@ -438,6 +451,47 @@ async function viewPalavras(main) {
     drawDots(); drawCount();
     store("pal.word", cur().word);
     input.focus({ preventScroll: true });
+    loadFrases(cur().word);
+  }
+
+  // Carrossel com os frames das frases que têm a palavra, com a legenda das
+  // Coleções do manager (renderizada no servidor). Só o slide visível e os
+  // vizinhos pedem a imagem: cada uma é um render no servidor.
+  var frasesToken = 0;
+  async function loadFrases(word) {
+    var token = ++frasesToken;
+    frasesPos.textContent = "";
+    frasesBody.replaceChildren(h("div", { class: "msg" }, "Buscando frases…"));
+    var frases;
+    try {
+      frases = (await getJSON("/web/words/" + encodeURIComponent(word) + "/frases")).frases;
+    } catch (e) {
+      if (token === frasesToken) frasesBody.replaceChildren(h("div", { class: "msg" }, "Não deu para buscar as frases: " + e.message));
+      return;
+    }
+    if (token !== frasesToken || !main.isConnected) return;   // já trocou de palavra
+    if (!frases.length) { frasesBody.replaceChildren(h("div", { class: "msg" }, "Nenhuma frase com " + word + ".")); return; }
+    var base = "/web/words/" + encodeURIComponent(word) + "/frame/";
+    var imgs = frases.map(function (f) {
+      return h("img", { alt: f.chinese + " — " + f.portuguese, decoding: "async",
+        "data-src": base + encodeURIComponent(f.asset) + "/" + f.line + ".jpg" });
+    });
+    var strip = h("div", { class: "strip" }, imgs.map(function (img) { return h("div", { class: "slide" }, img); }));
+    frasesBody.replaceChildren(strip);
+    var at = -1;
+    function onScroll() {
+      var w = strip.firstChild.offsetWidth + 8;
+      var k = Math.max(0, Math.min(imgs.length - 1, Math.round(strip.scrollLeft / w)));
+      if (k === at) return;
+      at = k;
+      frasesPos.textContent = imgs.length > 1 ? (k + 1) + " / " + imgs.length : "";
+      for (var j = k - 1; j <= k + 1; j++) {
+        var img = imgs[j];
+        if (img && !img.src) img.src = img.getAttribute("data-src");
+      }
+    }
+    strip.addEventListener("scroll", onScroll, { passive: true });
+    onScroll();
   }
   function go(d) { i = (i + d + words.length) % words.length; show(); }
 
