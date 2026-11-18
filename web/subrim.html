@@ -109,6 +109,30 @@ pre.log .e { color: var(--err); } pre.log .w { color: var(--warn); } pre.log .o 
 .seg label { display: flex; align-items: center; gap: 6px; min-height: 40px; padding: 0 12px;
   border: 1px solid var(--border); border-radius: 10px; background: var(--surface); }
 .seg input { accent-color: var(--accent); }
+
+.pal { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+  min-height: calc(100dvh - 120px); padding: 0 4px; }
+.pal .carousel { display: flex; align-items: center; justify-content: center; gap: 4px; width: 100%; }
+.pal .nav { border: 0; background: transparent; font-size: 40px; width: 52px; min-height: 64px;
+  padding: 0; color: var(--muted); flex: none; }
+.pal .word { font-size: clamp(56px, 18vw, 120px); line-height: 1.15; text-align: center; min-width: 0;
+  overflow-wrap: anywhere; user-select: none; -webkit-user-select: none; -webkit-touch-callout: none;
+  cursor: default; transition: color .15s; }
+.pal .word.flash { color: var(--accent); }
+.dots { display: flex; gap: 5px; }
+.dots i { width: 9px; height: 9px; border-radius: 50%; background: var(--surface2); box-shadow: inset 0 0 0 1px var(--border); }
+.dots i.r1 { background: #1D9E75; box-shadow: none; }
+.dots i.r2 { background: #185FA5; box-shadow: none; }
+@media (prefers-color-scheme: dark) { .dots i.r2 { background: #378ADD; } }
+.pal .entry { display: flex; align-items: center; gap: 6px; width: 100%; max-width: 340px; margin-top: 6px; }
+.pal .entry input { flex: 1; width: auto; text-align: center; font-size: 20px; }
+.pal .entry input.ok { border-color: var(--ok); background: var(--ok-bg); }
+.pal .snd { position: relative; width: 40px; font-size: 20px; flex: none;
+  user-select: none; -webkit-user-select: none; -webkit-touch-callout: none; }
+.pal .snd .sdot { position: absolute; top: 9px; right: 4px; width: 7px; height: 7px; border-radius: 50%;
+  background: var(--accent); display: none; }
+.pal .snd.auto .sdot { display: block; }
+.pal .count { font-size: 13px; color: var(--muted); }
 </style>
 </head>
 <body>
@@ -262,6 +286,7 @@ var aborts = [];
 function clearScreen() {
   timers.forEach(clearInterval); timers = [];
   aborts.forEach(function (a) { a.abort(); }); aborts = [];
+  try { speechSynthesis.cancel(); } catch (e) { /* sem TTS */ }
 }
 var SECTIONS = { palavras: "Palavras", jogos: "Jogos", manager: "Manager" };
 function route() {
@@ -280,8 +305,185 @@ function route() {
 window.addEventListener("hashchange", route);
 
 // ── Palavras ─────────────────────────────────────────────────────────────────
-function viewPalavras(main) {
-  main.appendChild(h("div", { class: "empty" }, ["📖", h("br"), "Em breve."]));
+// Bolinhas de acertos, como no visim (word_progress.dots): 10 por rodada;
+// rodada 1 até 9 acertos, rodada 2 de 10 a 19, cheia a partir de 20.
+var DOTS_PER_ROUND = 10, LEVEL2_AT = 10, LEVEL3_AT = 20;
+function dots(count) {
+  if (count >= LEVEL3_AT) return [2, DOTS_PER_ROUND];
+  if (count >= LEVEL2_AT) return [2, count - LEVEL2_AT];
+  return [1, Math.max(0, count)];
+}
+// Pressionada longa (~500 ms) chama onLong; o clique que vem depois dela é
+// engolido, então onShort só roda num toque curto.
+function longPress(el, onLong, onShort) {
+  var t = null, fired = false;
+  function cancel() { clearTimeout(t); t = null; }
+  el.addEventListener("pointerdown", function () {
+    fired = false; cancel();
+    t = setTimeout(function () { t = null; fired = true; if (navigator.vibrate) navigator.vibrate(15); onLong(); }, 500);
+  });
+  ["pointerup", "pointerleave", "pointercancel"].forEach(function (ev) { el.addEventListener(ev, cancel); });
+  el.addEventListener("contextmenu", function (e) { e.preventDefault(); });
+  el.addEventListener("click", function () { if (fired) { fired = false; return; } if (onShort) onShort(); });
+}
+// navigator.clipboard só existe em contexto seguro; a página roda em http://<ip>.
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext)
+    return navigator.clipboard.writeText(text).then(function () { return true; }, function () { return copyFallback(text); });
+  return Promise.resolve(copyFallback(text));
+}
+function copyFallback(text) {
+  var ta = h("textarea", { readonly: true, style: "position:absolute;left:-9999px;top:0;opacity:0" });
+  ta.value = text; document.body.appendChild(ta);
+  ta.select(); ta.setSelectionRange(0, text.length);
+  var ok = false;
+  try { ok = document.execCommand("copy"); } catch (e) { ok = false; }
+  ta.remove();
+  return ok;
+}
+function speak(word) {
+  if (!window.speechSynthesis || !window.SpeechSynthesisUtterance) { toast("Este navegador não fala"); return; }
+  speechSynthesis.cancel();
+  var u = new SpeechSynthesisUtterance(word);
+  u.lang = "zh-TW"; u.rate = 0.8;
+  var vs = speechSynthesis.getVoices();
+  var v = ["zh-TW", "zh_TW", "zh-HK", "zh_HK", "zh"].reduce(function (found, tag) {
+    return found || vs.find(function (x) { return x.lang.indexOf(tag) === 0; });
+  }, null);
+  if (v) u.voice = v;
+  speechSynthesis.speak(u);
+}
+
+// Acertos ainda não aceitos pela word-api: {palavra: n}. Cada acerto entra aqui
+// ANTES do POST, então nada se perde ao recarregar, trocar de tela ou cair a rede.
+function pendingGet() { return store("pal.pending") || {}; }
+function pendingAdd(word, n) {
+  var p = pendingGet(); p[word] = (p[word] || 0) + n;
+  if (p[word] <= 0) delete p[word];
+  store("pal.pending", p);
+}
+var flushing = null;
+function flushCorrect(onResult) {
+  if (flushing) return flushing;
+  flushing = (async function () {
+    var p = pendingGet();
+    for (var word in p) {
+      var n = p[word];
+      if (!(n > 0)) { pendingAdd(word, -n); continue; }
+      try {
+        var r = await postJSON("/web/words/" + encodeURIComponent(word) + "/correct", { amount: Math.min(n, 50) });
+        pendingAdd(word, -Math.min(n, 50));
+        if (onResult) onResult(r);
+      } catch (e) {
+        if (/não está na word-api|inválido/.test(e.message)) {
+          pendingAdd(word, -n); toast("Acerto descartado: " + word + " (" + e.message + ")");
+        } else break;                       // rede/word-api fora: tenta de novo depois
+      }
+    }
+  })().finally(function () { flushing = null; });
+  return flushing;
+}
+
+async function viewPalavras(main) {
+  var box = h("div", { class: "empty" }, "Carregando…");
+  main.appendChild(box);
+  var words;
+  try {
+    words = (await getJSON("/web/words?level=2")).words;
+  } catch (e) {
+    box.textContent = "Não deu para carregar as palavras: " + e.message;
+    return;
+  }
+  if (!box.isConnected) return;               // trocou de tela enquanto carregava
+  if (!words.length) { box.textContent = "Nenhuma palavra no nível 2."; return; }
+  box.remove();
+
+  var i = Math.max(0, words.findIndex(function (w) { return w.word === store("pal.word"); }));
+  var auto = store("pal.autosound") === true;
+  var busy = false;
+
+  var wordEl = h("div", { class: "word", lang: "zh-Hant" });
+  var dotsEl = h("div", { class: "dots", "aria-label": "acertos" });
+  var input = h("input", { type: "text", placeholder: "Digite a palavra", lang: "zh-Hant",
+    autocomplete: "off", autocapitalize: "off", autocorrect: "off", spellcheck: "false", enterkeyhint: "done" });
+  var snd = h("button", { class: "iconbtn snd" + (auto ? " auto" : ""), "aria-label": "Tocar a palavra" },
+    ["🔊", h("span", { class: "sdot" })]);
+  var count = h("div", { class: "count" });
+  main.appendChild(h("div", { class: "pal" }, [
+    h("div", { class: "carousel" }, [
+      h("button", { class: "nav", "aria-label": "Anterior", onclick: function () { go(-1); } }, "‹"),
+      wordEl,
+      h("button", { class: "nav", "aria-label": "Próxima", onclick: function () { go(1); } }, "›")
+    ]),
+    dotsEl,
+    h("div", { class: "entry" }, [input, snd]),
+    count
+  ]));
+
+  function cur() { return words[i]; }
+  function shown(w) { return w.correct_count + (pendingGet()[w.word] || 0); }
+  function drawDots() {
+    var d = dots(shown(cur()));
+    dotsEl.textContent = "";
+    for (var k = 0; k < DOTS_PER_ROUND; k++) dotsEl.appendChild(h("i", { class: k < d[1] ? "r" + d[0] : null }));
+    dotsEl.title = shown(cur()) + " acertos";
+  }
+  function drawCount() {
+    var n = Object.values(pendingGet()).reduce(function (a, b) { return a + b; }, 0);
+    count.textContent = (i + 1) + " / " + words.length + (n ? " · " + n + " pendente" + (n > 1 ? "s" : "") : "");
+  }
+  function show() {
+    wordEl.textContent = cur().word;
+    input.value = ""; input.classList.remove("ok"); busy = false;
+    drawDots(); drawCount();
+    store("pal.word", cur().word);
+    input.focus({ preventScroll: true });
+  }
+  function go(d) { i = (i + d + words.length) % words.length; show(); }
+
+  function onServer(r) {
+    var w = words.find(function (x) { return x.word === r.word; });
+    if (w && typeof r.correct_count === "number") w.correct_count = r.correct_count;
+    if (!main.isConnected) return;
+    if (w === cur()) drawDots();
+    drawCount();
+  }
+  function check() {
+    if (busy || input.value.trim() !== cur().word) return;
+    busy = true;
+    var w = cur().word;
+    pendingAdd(w, 1);
+    input.classList.add("ok");
+    drawDots(); drawCount();
+    if (auto) speak(w);
+    flushCorrect(onServer);
+    setTimeout(function () { if (main.isConnected && cur().word === w) go(1); }, 450);
+  }
+  input.addEventListener("input", function (e) { if (!e.isComposing) check(); });
+  input.addEventListener("compositionend", function () { setTimeout(check, 0); });
+  input.addEventListener("keydown", function (e) {
+    if (input.value) return;
+    if (e.key === "ArrowLeft") { e.preventDefault(); go(-1); }
+    else if (e.key === "ArrowRight") { e.preventDefault(); go(1); }
+  });
+
+  longPress(wordEl, function () {
+    var w = cur().word;
+    copyText(w).then(function (ok) {
+      toast(ok ? "Copiado: " + w : "Não deu para copiar");
+      wordEl.classList.add("flash");
+      setTimeout(function () { wordEl.classList.remove("flash"); }, 300);
+    });
+  });
+  longPress(snd, function () {
+    auto = !auto; store("pal.autosound", auto);
+    snd.classList.toggle("auto", auto);
+    toast("Som automático " + (auto ? "ligado" : "desligado"));
+  }, function () { speak(cur().word); input.focus({ preventScroll: true }); });
+
+  show();
+  flushCorrect(onServer);
+  timers.push(setInterval(function () { flushCorrect(onServer).then(drawCount); }, 15000));
 }
 
 // ── Jogos ────────────────────────────────────────────────────────────────────

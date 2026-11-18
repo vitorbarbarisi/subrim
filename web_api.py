@@ -9,6 +9,13 @@
   GET  /web/game/<nome>          → o bundle, com um shim que sincroniza o
                                    progresso com o servidor
   POST /web/game/<nome>/progress {done: {source: 1, ...}} → {done, total}
+  GET  /web/words?level=2        → {"words": [{word, correct_count}]} palavras da
+                                   word-api com esse confidence_level, na ordem
+                                   da API (aba Palavras)
+  POST /web/words/<palavra>/correct {amount: 1}
+                                 → {word, correct_count, confidence_level}
+                                   soma acertos de escrita, como o visim
+                                   (a word-api sobe o nível aos 10 e aos 20)
 
 O Manager da página usa os endpoints ``/mgr/*`` do manager_api, como o client
 desktop.
@@ -28,8 +35,12 @@ from __future__ import annotations
 import json
 import re
 import threading
+import urllib.error
+import urllib.request
 from pathlib import Path
-from urllib.parse import unquote
+from urllib.parse import parse_qs, quote, unquote
+
+import word_vocab
 
 REPO = Path(__file__).absolute().parent
 WEB = REPO / "web"
@@ -212,6 +223,68 @@ def game_html(name: str) -> bytes:
     return (html[:at] + shim + html[at:]).encode("utf-8")
 
 
+# ── Palavras (word-api) ───────────────────────────────────────────────────────
+
+class WordApiError(RuntimeError):
+    """A word-api não respondeu ou respondeu algo inesperado (→ HTTP 502)."""
+
+
+def _word_api(method: str, path: str, payload: dict | None = None):
+    """Chamada JSON à word-api; devolve (status, corpo decodificado ou None)."""
+    data = json.dumps(payload, ensure_ascii=False).encode("utf-8") if payload is not None else None
+    req = urllib.request.Request(word_vocab.base_url() + path, data=data, method=method)
+    req.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(req, timeout=word_vocab._timeout()) as resp:
+            body = resp.read()
+            return resp.status, (json.loads(body) if body else None)
+    except urllib.error.HTTPError as e:
+        return e.code, None
+    except (OSError, ValueError) as e:
+        raise WordApiError(f"word-api indisponível: {e}") from e
+
+
+def level_words(level: int) -> list[dict]:
+    """Palavras com esse confidence_level, na ordem em que a word-api devolve."""
+    if level not in (1, 2, 3):
+        raise ValueError("level deve ser 1, 2 ou 3")
+    status, payload = _word_api("GET", "/search?q=")
+    if status != 200 or not isinstance(payload, list):
+        raise WordApiError(f"word-api respondeu HTTP {status} no /search")
+    out, seen = [], set()
+    for item in payload:
+        if not isinstance(item, dict):
+            continue
+        word = (item.get("word") or "").strip()
+        if not word_vocab.is_real_word(word) or word in seen:
+            continue
+        try:
+            if int(item.get("confidence_level")) != level:
+                continue
+            count = max(0, int(item.get("correct_count") or 0))
+        except (TypeError, ValueError):
+            continue
+        seen.add(word)
+        out.append({"word": word, "correct_count": count})
+    return out
+
+
+def register_correct(word: str, amount: int = 1) -> dict:
+    """Soma ``amount`` acertos ao correct_count da palavra (como o visim)."""
+    if not word_vocab.is_real_word(word) or not 1 <= amount <= 50:
+        raise ValueError("palavra ou amount inválido")
+    status, payload = _word_api("POST", "/" + quote(word) + "/correct", {"amount": amount})
+    if status == 404:
+        raise LookupError(f"{word} não está na word-api")
+    if status != 200 or not isinstance(payload, dict):
+        raise WordApiError(f"word-api respondeu HTTP {status} no /correct")
+    level = payload.get("confidence_level")
+    if level == word_vocab.MASTERED_LEVEL:
+        word_vocab.mastered_words(force=True)
+    return {"word": word, "correct_count": payload.get("correct_count"),
+            "confidence_level": level}
+
+
 # ── HTTP ──────────────────────────────────────────────────────────────────────
 
 MANIFEST = {
@@ -240,6 +313,13 @@ def handle_get(h) -> bool:
     try:
         if path == "/web/games":
             h._json(200, {"games": list_games()})
+        elif path == "/web/words":
+            qs = parse_qs(h.path.partition("?")[2])
+            try:
+                level = int((qs.get("level") or ["2"])[0])
+            except ValueError:
+                level = 0
+            h._json(200, {"words": level_words(level)})
         elif path == "/web/manifest.json":
             _send(h, 200, json.dumps(MANIFEST).encode(), "application/manifest+json")
         elif path == "/web/icon.png":
@@ -251,6 +331,10 @@ def handle_get(h) -> bool:
             h._json(404, {"error": "not found"})
     except LookupError as e:
         h._json(404, {"error": str(e)})
+    except ValueError as e:
+        h._json(400, {"error": str(e)})
+    except WordApiError as e:
+        h._json(502, {"error": str(e)})
     except Exception as e:  # noqa: BLE001
         h._json(500, {"error": f"{type(e).__name__}: {e}"})
     return True
@@ -261,8 +345,15 @@ def handle_post(h, body: dict) -> bool:
     if not path.startswith("/web/"):
         return False
     m = re.match(r"^/web/game/(.+)/progress$", path)
+    mw = re.match(r"^/web/words/(.+)/correct$", path)
     try:
-        if m:
+        if mw:
+            try:
+                amount = int(body.get("amount", 1))
+            except (TypeError, ValueError):
+                amount = 0
+            h._json(200, register_correct(unquote(mw.group(1)), amount))
+        elif m:
             done = body.get("done")
             if not isinstance(done, dict):
                 h._json(400, {"error": "esperado {done: {source: 1}}"})
@@ -272,6 +363,10 @@ def handle_post(h, body: dict) -> bool:
             h._json(404, {"error": "not found"})
     except LookupError as e:
         h._json(404, {"error": str(e)})
+    except ValueError as e:
+        h._json(400, {"error": str(e)})
+    except WordApiError as e:
+        h._json(502, {"error": str(e)})
     except Exception as e:  # noqa: BLE001
         h._json(500, {"error": f"{type(e).__name__}: {e}"})
     return True
