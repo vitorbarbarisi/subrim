@@ -1068,7 +1068,9 @@ def asset_footprint(asset: str, root: Optional[Path] = None) -> List[Path]:
         root / AUDIO_PERIODS.name / asset,
     ]
     video = _find_video(root / f"{asset}_base.txt")
-    if video is not None:
+    # O glob de _find_video casa ``clone1*.mp4``: sem o ``clone1.mp4`` exato,
+    # pegaria o ``clone10.mp4``. Só aceita se o prefixo não continuar o nome.
+    if video is not None and not video.stem[len(asset):][:1].isalnum():
         candidates.append(video)
     out = []
     for p in candidates:
@@ -1171,6 +1173,28 @@ def restore_asset(asset: str, src_warehouse: Path, delete_src: bool = False,
     """Traz o episódio do HD externo (``src_warehouse``) de volta ao warehouse
     local. Com ``delete_src`` apaga a cópia do HD depois de conferida."""
     return _transfer(asset, src_warehouse, WAREHOUSE, delete_src, progress_cb)
+
+
+def delete_asset(asset: str, root: Optional[Path] = None,
+                 progress_cb: Optional[Callable[[int, int, str], None]] = None) -> dict:
+    """Apaga DEFINITIVAMENTE o episódio do warehouse (``root``; padrão o de
+    vídeo), sem cópia em lugar nenhum. Mesmo footprint do expurgo.
+
+    Devolve ``{"files": n, "bytes": total}``."""
+    root = WAREHOUSE if root is None else root
+    paths = asset_footprint(asset, root)
+    if not paths:
+        raise FileNotFoundError(f"nada de '{asset}' em {root}")
+    files = _footprint_files(paths)
+    nbytes = sum(f.stat().st_size for f in files)
+    for i, p in enumerate(paths, 1):
+        if p.is_dir():
+            shutil.rmtree(p)
+        else:
+            p.unlink()
+        if progress_cb:
+            progress_cb(i, len(paths), f"apagado {p.relative_to(root)}")
+    return {"files": len(files), "bytes": nbytes}
 
 
 def raw_asset_paths(name: str, root: Optional[Path] = None) -> List[Path]:

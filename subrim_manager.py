@@ -877,6 +877,7 @@ class App(tk.Tk):
             wt.bind(seq, self._wh_context_menu)
         self._wh_tree = wt
         self._wh_menu = tk.Menu(self, tearoff=0)
+        self._wh_menu.add_command(label="Excluir...", command=self._wh_delete_selected)
         self._wh_menu.add_command(label="Expurgar...", command=self._wh_purge_selected)
 
         # ── detalhes ──
@@ -1314,7 +1315,8 @@ class App(tk.Tk):
 
     # ── Expurgo: move o episódio do warehouse para o HD externo ────────────────
     def _wh_context_menu(self, event):
-        """Menu do botão direito na lista: 'Expurgar...' (só no modo Vídeo)."""
+        """Menu do botão direito na lista: 'Excluir...' e 'Expurgar...' (este só
+        no modo Vídeo)."""
         row = self._wh_tree.identify_row(event.y)
         if not row:
             return "break"   # cabeçalho ou área vazia: não abre menu
@@ -1324,17 +1326,93 @@ class App(tk.Tk):
             self._wh_tree.selection_set(row)
             self._wh_tree.focus(row)
         n = len(self._wh_selected_bases())
-        ok = (n > 0 and not self._is_text_mode()
-              and not self._wh_purging and not self._wh_archiving
-              and not self._wh_restoring)
+        livre = (n > 0 and not self._wh_purging and not self._wh_archiving
+                 and not self._wh_restoring)
         self._wh_menu.entryconfigure(
-            0, label="Expurgar..." if n <= 1 else f"Expurgar {n} itens...",
+            0, label="Excluir..." if n <= 1 else f"Excluir {n} itens...",
+            state=tk.NORMAL if livre else tk.DISABLED)
+        ok = livre and not self._is_text_mode()
+        self._wh_menu.entryconfigure(
+            1, label="Expurgar..." if n <= 1 else f"Expurgar {n} itens...",
             state=tk.NORMAL if ok else tk.DISABLED)
         try:
             self._wh_menu.tk_popup(event.x_root, event.y_root)
         finally:
             self._wh_menu.grab_release()
         return "break"
+
+    def _wh_wait_notes(self):
+        """Notas pendentes gravam no _base.txt que vai sair daqui: espera a
+        fila esvaziar e a janela de coalescência do escritor passar."""
+        for _ in range(50):
+            if self._nota_q.empty():
+                break
+            time.sleep(0.1)
+        time.sleep(0.5)
+
+    # ── Exclusão definitiva: apaga o episódio do warehouse, sem cópia ─────────
+    def _wh_delete_selected(self):
+        """Apaga do warehouse do modo atual tudo dos episódios selecionados
+        (base, períodos, vídeo, frames, áudio). Não passa pelo HD externo."""
+        if self._wh_purging or self._wh_archiving or self._wh_restoring:
+            return
+        assets = [bf.stem.removesuffix("_base") for bf in self._wh_selected_bases()]
+        if not assets:
+            return
+        cb = self._col_import()
+        if not cb:
+            return
+        root = self._wh_root()
+
+        plan = []   # [(asset, paths, bytes)]
+        for a in assets:
+            paths = cb.asset_footprint(a, root)
+            if paths:
+                plan.append((a, paths, cb.footprint_size(paths)))
+        if not plan:
+            messagebox.showinfo("Excluir", "Nada desse(s) item(ns) no warehouse local.")
+            return
+
+        total = sum(n for _, _, n in plan)
+        linhas = []
+        for a, paths, n in plan[:5]:
+            estado = cb.remote_status(root, a).lower()
+            linhas.append(f"“{_wh_readable_name(a)}” ({estado}, {n / 1024**2:.0f} MB)")
+            if len(plan) == 1:
+                linhas += [f"    • {rel}" + (f"/ ({k} arquivo(s))" if k is not None else "")
+                           for rel, k in core.path_summary(paths)]
+        if len(plan) > 5:
+            linhas.append(f"… e mais {len(plan) - 5} item(ns)")
+        if not messagebox.askyesno(
+                "Excluir definitivamente",
+                f"Excluir {len(plan)} item(ns) do warehouse?\n\n"
+                + "\n".join(linhas)
+                + f"\n\nTotal ~{total / 1024**2:.0f} MB\n\n"
+                  "APAGA do computador sem cópia no HD externo. "
+                  "Não dá para desfazer.",
+                icon=messagebox.WARNING, default=messagebox.NO):
+            return
+
+        self._wh_purging = True
+        self._log_line(f"🗑  Exclusão: {len(plan)} item(ns) de {root}", "cmd")
+        self._hd_batch(
+            [a for a, _, _ in plan],
+            lambda a, pcb: cb.delete_asset(a, root, progress_cb=pcb),
+            emoji="🗑", erro="excluir", feito="apagados", before=self._wh_wait_notes,
+            on_done=self._wh_delete_done)
+
+    def _wh_delete_done(self, summary: dict):
+        self._wh_purging = False
+        ok = set(summary["ok"])
+        if ok:
+            self._wh_refresh()
+            self._wh_update_archive_btn()
+            if any(m.get("asset") in ok for m in self._col_matches):
+                self._col_show_results([m for m in self._col_matches
+                                        if m.get("asset") not in ok])
+        self._hd_report("Excluir", summary, "🗑  Exclusão", "liberados",
+                        "item(ns) excluído(s) definitivamente.",
+                        "liberados no computador.", "mantidos no computador")
 
     def _wh_pick_drive(self):
         """HD externo de destino. None se não há (já avisa) ou se cancelou."""
@@ -1442,18 +1520,9 @@ class App(tk.Tk):
         self._wh_purging = True
         self._log_line(f"📦 Expurgo: {len(plan)} episódio(s) → {dest}", "cmd")
 
-        def _wait_notes():
-            # Notas pendentes gravam no _base.txt que vai sair daqui: espera a
-            # fila esvaziar e a janela de coalescência do escritor passar.
-            for _ in range(50):
-                if self._nota_q.empty():
-                    break
-                time.sleep(0.1)
-            time.sleep(0.5)
-
         self._hd_batch(
             [a for a, _, _ in plan], lambda a, pcb: cb.purge_asset(a, dest, progress_cb=pcb),
-            emoji="📦", erro="expurgar", feito="movidos para o HD", before=_wait_notes,
+            emoji="📦", erro="expurgar", feito="movidos para o HD", before=self._wh_wait_notes,
             on_done=lambda summary: self._wh_purge_done(summary, dest))
 
     def _wh_purge_done(self, summary: dict, dest: Path):
