@@ -142,6 +142,22 @@ pre.log .e { color: var(--err); } pre.log .w { color: var(--warn); } pre.log .o 
   overflow: hidden; background: #000; }
 .frases .slide:only-child { flex-basis: 100%; }
 .frases .slide img { display: block; width: 100%; height: 100%; object-fit: contain; }
+.frases .slide { cursor: zoom-in; }
+
+/* Tela cheia dos frames: cobre a tela mesmo onde não há Fullscreen API (iPhone). */
+.fsv { position: fixed; inset: 0; z-index: 50; background: #000; color: #f1efe8;
+  display: flex; flex-direction: column; overscroll-behavior: contain; touch-action: pan-x; }
+.fsv .bar { position: absolute; top: 0; left: 0; right: 0; z-index: 1; display: flex; align-items: center;
+  justify-content: space-between; padding: calc(6px + env(safe-area-inset-top)) 8px 6px 16px;
+  background: linear-gradient(rgba(0,0,0,.55), transparent); transition: opacity .2s; }
+.fsv.bare .bar { opacity: 0; pointer-events: none; }
+.fsv .bar span { font-size: 14px; color: #d3d1c7; }
+.fsv .bar button { border: 0; background: transparent; color: #f1efe8; font-size: 26px; width: 48px; min-height: 48px; }
+.fsv .track { flex: 1; display: flex; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; }
+.fsv .track::-webkit-scrollbar { display: none; }
+.fsv .page { flex: 0 0 100%; height: 100%; scroll-snap-align: center; scroll-snap-stop: always;
+  display: flex; align-items: center; justify-content: center; }
+.fsv .page img { max-width: 100%; max-height: 100%; width: 100%; height: 100%; object-fit: contain; }
 </style>
 </head>
 <body>
@@ -293,6 +309,7 @@ wide.addEventListener("change", function () {
 var timers = [];          // limpos a cada troca de tela
 var aborts = [];
 function clearScreen() {
+  if (closeFrameViewer) closeFrameViewer(true);
   timers.forEach(clearInterval); timers = [];
   aborts.forEach(function (a) { a.abort(); }); aborts = [];
   try { speechSynthesis.cancel(); } catch (e) { /* sem TTS */ }
@@ -393,6 +410,90 @@ function flushCorrect(onResult) {
   return flushing;
 }
 
+// Tela cheia dos frames. Usa a Fullscreen API quando existe (Android) e, onde
+// não existe (iPhone), a sobreposição fixa já cobre a tela. Mostra primeiro o
+// 640x480 do carrossel (já em cache) e troca pelo frame na resolução do vídeo
+// (?full=1) quando ele chega. Voltar do sistema, ✕ e Esc fecham.
+var closeFrameViewer = null;
+function openFrameViewer(srcs, alts, start, onClose) {
+  if (closeFrameViewer) closeFrameViewer(true);
+  if (document.activeElement && document.activeElement.blur) document.activeElement.blur();   // some o teclado
+  var pos = h("span");
+  var imgs = srcs.map(function (s, k) { return h("img", { alt: alts[k] || "", decoding: "async" }); });
+  var track = h("div", { class: "track" }, imgs.map(function (img) { return h("div", { class: "page" }, img); }));
+  var box = h("div", { class: "fsv", role: "dialog", "aria-label": "Frame em tela cheia" }, [
+    h("div", { class: "bar" }, [pos, h("button", { "aria-label": "Fechar", onclick: function () { close(false); } }, "✕")]),
+    track
+  ]);
+  document.body.appendChild(box);
+  var overflow = document.body.style.overflow;
+  document.body.style.overflow = "hidden";
+  var at = -1, closed = false, wentFull = false;
+
+  function load(k) {
+    var img = imgs[k];
+    if (!img || img.dataset.state) return;
+    img.dataset.state = "small";
+    img.src = srcs[k];
+    var big = new Image();
+    big.onload = function () { if (!closed) { img.src = big.src; img.dataset.state = "full"; } };
+    big.src = srcs[k] + "?full=1";
+  }
+  function onScroll() {
+    var k = Math.max(0, Math.min(imgs.length - 1, Math.round(track.scrollLeft / (track.clientWidth || 1))));
+    if (k === at) return;
+    at = k;
+    pos.textContent = imgs.length > 1 ? (k + 1) + " / " + imgs.length : "";
+    load(k); load(k + 1); load(k - 1);
+  }
+  function close(fromHistory) {
+    if (closed) return;
+    closed = true; closeFrameViewer = null;
+    window.removeEventListener("popstate", onPop);
+    window.removeEventListener("resize", onResize);
+    document.removeEventListener("keydown", onKey);
+    document.removeEventListener("fullscreenchange", onFs);
+    document.removeEventListener("webkitfullscreenchange", onFs);
+    var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fsEl) (document.exitFullscreen || document.webkitExitFullscreen).call(document).catch(function () {});
+    box.remove();
+    document.body.style.overflow = overflow;
+    if (!fromHistory && history.state && history.state.fsv) history.back();
+    if (onClose) onClose(Math.max(0, at));
+  }
+  function onPop() { close(true); }
+  // Girar o celular ou entrar em tela cheia muda a largura: mantém o frame atual.
+  function onResize() { if (at >= 0) track.scrollLeft = at * track.clientWidth; }
+  function onKey(e) {
+    if (e.key === "Escape") close(false);
+    else if (e.key === "ArrowRight" || e.key === "ArrowLeft") {
+      e.preventDefault();
+      track.scrollTo({ left: (at + (e.key === "ArrowRight" ? 1 : -1)) * track.clientWidth, behavior: "smooth" });
+    }
+  }
+  // Sair da tela cheia pelo sistema (gesto/voltar do Android) fecha o visor.
+  function onFs() {
+    var fsEl = document.fullscreenElement || document.webkitFullscreenElement;
+    if (fsEl) wentFull = true; else if (wentFull) close(false);
+  }
+  closeFrameViewer = close;
+  history.pushState({ fsv: 1 }, "");
+  window.addEventListener("popstate", onPop);
+  window.addEventListener("resize", onResize);
+  document.addEventListener("keydown", onKey);
+  document.addEventListener("fullscreenchange", onFs);
+  document.addEventListener("webkitfullscreenchange", onFs);
+  track.addEventListener("scroll", onScroll, { passive: true });
+  // A barra some sozinha (deitado, ela cobriria a tradução do topo do frame);
+  // um toque na imagem mostra/esconde.
+  var hideBar = setTimeout(function () { box.classList.add("bare"); }, 2500);
+  track.addEventListener("click", function () { clearTimeout(hideBar); box.classList.toggle("bare"); });
+
+  var req = box.requestFullscreen || box.webkitRequestFullscreen;
+  if (req) { try { var p = req.call(box, { navigationUI: "hide" }); if (p && p.catch) p.catch(function () {}); } catch (e) { /* sem tela cheia */ } }
+  requestAnimationFrame(function () { track.scrollLeft = start * track.clientWidth; onScroll(); });
+}
+
 async function viewPalavras(main) {
   var box = h("div", { class: "empty" }, "Carregando…");
   main.appendChild(box);
@@ -489,7 +590,17 @@ async function viewPalavras(main) {
       return h("img", { alt: f.chinese + " — " + f.portuguese, decoding: "async", fetchpriority: "low",
         "data-src": base + encodeURIComponent(f.asset) + "/" + f.line + ".jpg" });
     });
-    var strip = h("div", { class: "strip" }, imgs.map(function (img) { return h("div", { class: "slide" }, img); }));
+    var strip = h("div", { class: "strip" }, imgs.map(function (img, k) {
+      // click só chega num toque: arrastar o carrossel não gera click.
+      return h("div", { class: "slide", onclick: function () {
+        openFrameViewer(imgs.map(function (x) { return x.getAttribute("data-src"); }),
+          imgs.map(function (x) { return x.alt; }), k, function (last) {
+            if (!strip.isConnected) return;
+            strip.scrollLeft = last * (strip.firstChild.offsetWidth + 8);
+            input.focus({ preventScroll: true });
+          });
+      } }, img);
+    }));
     frasesBody.replaceChildren(strip);
     var at = -1;
     function onScroll() {

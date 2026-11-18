@@ -22,6 +22,8 @@
                                    duplicadas (carrossel da aba Palavras)
   GET  /web/words/<palavra>/frame/<asset>/<linha>.jpg
                                  → o frame com a legenda das Coleções do manager
+                                   (640x480; ?full=1 na resolução do vídeo, para
+                                   a tela cheia)
 
 O Manager da página usa os endpoints ``/mgr/*`` do manager_api, como o client
 desktop.
@@ -362,10 +364,14 @@ def word_frases(word: str) -> dict:
          "portuguese": m["portuguese"]} for m in _matches(word)]}
 
 
-def frame_jpeg(word: str, asset: str, line: int) -> bytes:
-    """Frame da frase com a legenda das Coleções do manager (render_preview r36s)."""
+def frame_jpeg(word: str, asset: str, line: int, full: bool = False) -> bytes:
+    """Frame da frase com a legenda das Coleções do manager.
+
+    ``full=False`` é o 640x480 do carrossel (render_preview "r36s"); ``full=True``
+    é a resolução original do vídeo, a da tela cheia — como no manager.
+    """
     global _frames_mastered
-    key = (word, asset, line)
+    key = (word, asset, line, full)
     mastered = word_vocab.mastered_words()
     with _frames_lock:
         if mastered is not _frames_mastered:
@@ -378,7 +384,7 @@ def frame_jpeg(word: str, asset: str, line: int) -> bytes:
     if m is None:
         raise LookupError(f"{word} não está em {asset}:{line}")
     with _scan_slots:   # render (ffmpeg/OpenCV) também é trabalho pesado
-        img = _cb().render_preview(m, "r36s")
+        img = _cb().render_preview(m, "original" if full else "r36s")
     if img is None:
         raise LookupError(f"não deu para renderizar {asset}:{line}")
     buf = io.BytesIO()
@@ -429,7 +435,9 @@ def handle_get(h) -> bool:
         elif mf := re.match(r"^/web/words/([^/]+)/frases$", path):
             h._json(200, word_frases(unquote(mf.group(1))))
         elif mj := re.match(r"^/web/words/([^/]+)/frame/([^/]+)/(\d+)\.jpg$", path):
-            _send(h, 200, frame_jpeg(unquote(mj.group(1)), unquote(mj.group(2)), int(mj.group(3))),
+            full = (parse_qs(h.path.partition("?")[2]).get("full") or ["0"])[0] == "1"
+            _send(h, 200, frame_jpeg(unquote(mj.group(1)), unquote(mj.group(2)),
+                                     int(mj.group(3)), full),
                   "image/jpeg", "max-age=600")
         elif path == "/web/manifest.json":
             _send(h, 200, json.dumps(MANIFEST).encode(), "application/manifest+json")
